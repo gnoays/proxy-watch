@@ -1,0 +1,63 @@
+# Changelog
+
+Notable changes to `proxy-watch`, newest first. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the version numbers follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Every entry names the minimum
+supported Rust version in force for that release.
+
+## [0.1.0] - 2026-09-07
+
+Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
+
+### Reading
+
+- `read()` returns the operating system's current proxy configuration as a `ProxyConfig`;
+  `read_with_options()` takes the same `WatchOptions` the watcher does. Neither starts a
+  thread, and neither registers a change notification.
+- Windows reads the active connection through WinHTTP and the registry, macOS reads the
+  global proxies key out of `SCDynamicStore`, and Linux reads GNOME's GSettings, KDE's
+  `kioslaverc`, the XDG desktop portal, or the `http_proxy` family of environment
+  variables — whichever the desktop and the sandbox make available.
+- `ProxyConfig::effective` is the merged answer. `sources` keeps each store that replied
+  next to its own `ProxyConfigSource`, and `fallbacks` names a store the machine may well
+  be configured with whose value this read did not learn — the case `sources` alone cannot
+  express. `ProxyMode::rejected()` carries what was read and refused, with a
+  `RejectionKind` saying why.
+
+### Watching
+
+- `ProxyWatcher` delivers each change as a `Stream` item, preferring the operating
+  system's own notification API: `RegNotifyChangeKeyValue`, `SCDynamicStore`, GSettings
+  signals, a `kioslaverc` file watch. A sandboxed Linux portal offers no signal at all, so
+  `WatchOptions::poll_interval` is what makes the stream live there.
+- `WatchHealth` and `WatchState` report which sources are still armed. A source whose
+  notification route cannot be re-armed is retired and named in `fallbacks`, and the
+  watcher goes on delivering the sources that remain.
+- `watch_channel()` (feature `tokio`) hands the same stream over as a
+  `tokio::sync::watch::Receiver<ProxyConfig>`.
+
+### Routing
+
+- `resolve()` (feature `resolve`, on by default) turns a configuration and a target `Url`
+  into the ordered `ProxyStep`s to try, bypass rules applied. `resolve_with_pac()` does
+  the same with a PAC evaluator in hand.
+- `BypassRules` implements the platform bypass syntaxes: the `<local>` and `<-loopback>`
+  tokens Windows spells, and the CIDR, leading-dot and suffix forms the environment
+  variables use.
+- `pac` adds `PacScript` and the `PacEvaluator` trait. `pac-boa` supplies a portable
+  engine, `pac-windows-native` hands evaluation to WinHTTP.
+- `parse` exposes the platform parsers on their own — `proxy_server`, `proxy_override`,
+  `no_proxy`, `windows_manual` — for code that already holds a raw settings string.
+
+### Known limits at this version
+
+- Windows reports whichever connection is currently active, not every connection
+  configured.
+- macOS sees the proxies key `configd` derives from the primary network service, so a
+  proxy set on a service that is not primary does not appear. That is also the one key
+  `SCDynamicStoreCopyProxies` reads, and what every reader built on it sees.
+- The macOS backend has run on CI runners only, never on Mac hardware.
+- `tracing` is off by default, so the library picks no logging facade on a dependent's
+  behalf; a consumer that wants the lifecycle and change logs turns the feature on.
+
+[0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0

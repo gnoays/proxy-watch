@@ -1,0 +1,680 @@
+name: CI
+
+# The core types and the Windows, macOS, GNOME, and KDE watch backends all ship, and
+# this workflow actually runs every one of them.
+
+on:
+  push:
+    branches: [main]
+    # Excluding what to skip rather than listing what to build keeps a new source
+    # directory covered by default. `cargo xtask audit-docs` is the gate that does read
+    # `docs/` — run it locally on a change confined there, or the break waits for the
+    # next commit that touches anything else.
+    paths-ignore: ['docs/**']
+  pull_request:
+    # Repeated because GitHub's workflow parser resolves no YAML anchors. Edit both.
+    paths-ignore: ['docs/**']
+  # Nothing above fires for a branch that is neither `main` nor in a PR, nor for a change
+  # confined to the paths ignored. Dispatch is how such a branch reaches the two platforms
+  # a Windows development machine cannot run, and it costs nothing until someone presses it.
+  workflow_dispatch:
+
+# Cancel superseded runs for the same ref, so CI resources aren't wasted
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # Single source of truth for the feature matrix that the clippy job and the docs
+  # job both iterate over.
+  # Both jobs read this one value rather than keeping copies of their own. Two
+  # matrices drift, and the drift is silent: a feature listed in one and missing
+  # from the other is linted or documented in exactly one job, while both jobs'
+  # comments go on claiming the same coverage.
+  #
+  # What this list is *for*: the configurations `--all-features` cannot express,
+  # namely the ones where a feature is **off**. Both jobs run `--all-features` first,
+  # so every feature is already linted and documented in its on state; a feature only
+  # earns an entry here when turning it off changes what compiles.
+  #
+  # That rule is why three features have no entry of their own, and it is the same
+  # reason each time — not an oversight:
+  #
+  # * `linux-gnome` pulls in GLib, already covered by the `--all-features` run.
+  # * `pac-boa` only adds `boa_engine` on top of `pac`, which is in the list; its own
+  #   code is covered by `--all-features`. The engine-*less* half is the one that
+  #   needs a build of its own, and the `"pac"` entry below is exactly that build.
+  # * `tokio` only adds `watch_channel`, likewise covered by `--all-features`.
+  #
+  # This list governs lints, not tests: the `test` job below runs `--all-features`
+  # everywhere and adds one engine-less `cargo test` step of its own. Nothing here
+  # runs a single test.
+  #
+  # `pac-windows-native` collapses to the same build as `pac` on anything but
+  # Windows (`mod winhttp` in `src/pac/mod.rs` is gated on
+  # `cfg(all(windows, feature = ...))`). It only means something on the lint job's
+  # windows-latest run; on the docs job (pinned to ubuntu) it duplicates `pac` —
+  # even so, the matrix is not split into two separate lists for the two jobs.
+  # Keeping "both jobs use the same matrix" true by construction is worth more than
+  # saving one redundant configuration.
+  #
+  # `linux-kde` appears twice, with `tracing` and without, because on Linux the
+  # tracing-off entries above it compile no backend at all: with both Linux features
+  # off there is nothing but the unsupported path. `resolve,linux-kde` is the only entry
+  # that lints a Linux backend with `tracing` off — do not drop it: that shape is where a
+  # field whose only non-test reader is a log line reads as unused, and where an
+  # `if`/`else if` whose arms are both a single warning collapses into one arm once the
+  # macro expands to `()`. Off Linux the entry duplicates `resolve`, the same
+  # accepted redundancy as `pac-windows-native` above.
+  # `linux-gnome` mirrors it, and closes two further gaps at the same time. It is the
+  # only entry anywhere with a Linux backend on and `linux-kde` *off*, a shape
+  # `--all-features` cannot express and every other entry reaches only with both Linux
+  # features off. It is also the only entry with a Linux backend on and `resolve` off,
+  # the pair that let `tests/portal_watch.rs` name `proxy_watch::resolve` in a build
+  # that has none: the library compiled and only the test target did not, so no other
+  # leg was in a position to see it. Carrying `resolve` here bought nothing, per the
+  # `linux-gnome` note above. GLib does not make this entry Linux-only: clippy and
+  # rustdoc never link, so `--target x86_64-unknown-linux-gnu` reproduces it on Windows
+  # once `glib-sys`'s probe is bypassed with `SYSTEM_DEPS_GLIB_2_0_NO_PKG_CONFIG=1` plus
+  # `SYSTEM_DEPS_GLIB_2_0_LIB` (same pair for `gobject-2.0` and `gio-2.0`). The entry is
+  # here to keep the configuration clean, not to fix a failure in it.
+  FEATURE_MATRIX: >-
+    ""
+    "tracing"
+    "resolve"
+    "pac"
+    "pac-windows-native"
+    "resolve,linux-kde"
+    "linux-gnome"
+    "tracing,resolve"
+    "tracing,resolve,linux-kde"
+
+  # The matrix above governs lints and docs, which compile the tests but never run
+  # a single one. This second list is the one that *runs* them.
+  #
+  # Keeping it separate is deliberate, not drift. The lint list answers "does this
+  # configuration still compile cleanly"; entries earn a place there by changing what
+  # the compiler sees. This list answers "does this configuration still behave", and
+  # entries earn a place by changing which `#[cfg]`-gated test bodies exist at all.
+  # The two questions have different answers: `pac-windows-native` belongs above
+  # because clippy runs on windows-latest, and has no business here because this job
+  # is pinned to ubuntu; `resolve,tokio` belongs here because it is the only place
+  # `watch_channel`'s tests run outside `--all-features`, and adding it above would only
+  # recompile what `--all-features` already lints.
+  #
+  # Every entry below is a configuration whose tests no other job runs:
+  #
+  # * `""` — the crate with nothing turned on. No `resolve`, no store backend, no PAC.
+  # * `"tracing"` — the log lines with `resolve` off, the shape a consumer that only
+  #   wants lifecycle logs actually gets.
+  # * `"resolve"` — on Linux this compiles no store backend at all, so it is the
+  #   `Unsupported` path with nothing else in the way.
+  # * `"resolve,tokio"` — `watch_channel` without PAC or a backend.
+  # * `"pac"` — the engine-less build, which must answer `Error::PacEngineUnavailable`
+  #   rather than pretend a script ran.
+  # * `"resolve,linux-kde"` — a Linux backend with `tracing` off.
+  # * `"tracing,resolve,linux-kde"` — the GLib-free build the README describes.
+  # * `"resolve,linux-gnome"` — GNOME with KDE off, which `--all-features` cannot express.
+  #
+  # Adding a configuration belongs in this list rather than in a step of its own, so
+  # that it is an edit to a list rather than a step someone has to remember to write.
+  # Do not move an entry back out into a hand-written step in the `test` job.
+  TEST_FEATURE_MATRIX: >-
+    ""
+    "tracing"
+    "resolve"
+    "resolve,tokio"
+    "pac"
+    "resolve,linux-kde"
+    "tracing,resolve,linux-kde"
+    "resolve,linux-gnome"
+
+jobs:
+  # Repository-wide prose/source invariants are platform independent. Keep them mandatory,
+  # but run them once instead of recompiling and executing them in every OS/feature leg.
+  repo-audit:
+    name: repository audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint repository audit harness
+        run: cargo clippy -p proxy-watch-repo-audit --all-targets -- -D warnings
+
+      - name: Verify documentation and source invariants
+        run: cargo xtask audit-docs
+
+  # --- test ---------------------------------------------------------------
+  # Every step here runs on every event and every OS, forks included. The integration
+  # steps rewrite state outside the process — the Windows registry under
+  # `HKCU\...\Internet Settings`, a real macOS network service's web proxy — and what
+  # makes that safe for an arbitrary contributor is the runner: GitHub-hosted, and
+  # discarded when the job ends. A `pull_request` from a fork also gets no secrets and a
+  # read-only `GITHUB_TOKEN`, and this workflow asks for neither.
+  #
+  # Do not move this job to a self-hosted runner while `pull_request` is a trigger. The
+  # steps below would then rewrite the proxy settings of a machine that outlives the run,
+  # for anyone who can open a pull request.
+  #
+  # Do not restrict these steps to pull requests whose head is this repository either.
+  # Every contribution from outside arrives as a fork PR, so such a condition skips
+  # exactly the coverage an outside contribution needs and reports the run green anyway.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The linux-gnome feature links against gio/glib, so it needs GLib's
+      # development headers. Without them, glib-sys's build script fails at
+      # pkg-config, and the --all-features build never even reaches compilation.
+      # Not needed on other OSes.
+      #
+      # Beyond that, actually running the `tests/gsettings_watch.rs` integration
+      # tests needs more than the libglib2.0-dev the build itself requires. At run
+      # time, the tests self-skip based on whether the org.gnome.system.proxy schema
+      # is installed and whether a write probe against dconf succeeds (which needs a
+      # session bus) — and the headless ubuntu-latest runner has neither. Left as
+      # is, the tests report "7 passed" but every one was actually skipped, so
+      # nothing gets verified (the gate turns green while its contents stay empty).
+      # To fix that:
+      #   - gsettings-desktop-schemas: provides the org.gnome.system.proxy schema itself
+      #   - dconf-gsettings-backend:   the actual gsettings backend (dconf)
+      #   - dbus:                      needed to bring up a session bus via dbus-run-session
+      #   - dconf-cli:                 `dconf compile`, which is a separate package from
+      #     the backend. `tests/gsettings_lock.rs` builds an administrator lock out of a
+      #     `file-db:` profile and needs the compiler to turn a keyfile directory into a
+      #     database; without it that test self-skips and the one clause of
+      #     `gnome::was_written` no other test can reach goes unverified again.
+      - name: Install GLib development headers and GNOME watch test dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev dbus dconf-cli dconf-gsettings-backend gsettings-desktop-schemas
+
+      # Unit tests (lib/bins) are also run **serially**, and not because they avoid
+      # global state — they do not. The 7 unit tests that use `mod registry_guard`
+      # from `src/sys/win/mod.rs` rewrite the same real registry key
+      # (HKCU\...\Internet Settings) as the integration tests do. They live in the
+      # same binary, so cargo's per-binary serialization does not separate them, and
+      # a default parallel run lets them fight over one value: a majority of runs
+      # fail. `registry_guard`'s own doc requires serial execution, and this flag is
+      # what makes this step follow it. A `REGISTRY_LOCK` (std::sync::Mutex) on the
+      # `registry_guard` side serializes a plain `cargo test` as well; it stays
+      # alongside the flag because it also covers a run that forgot to pass one,
+      # which the flag alone cannot do.
+      #
+      # `--include-ignored` is needed because the tests that rewrite the real
+      # registry are marked `#[ignore]`. **In this repository, `#[ignore]` does not
+      # mean "broken / pending" — it means "rewrites the dev machine's real
+      # settings, so only run it in CI."** If CI doesn't run them, nothing verifies
+      # them at all. On a dev machine, plain `cargo test` skips these, and running
+      # them requires explicitly passing `-- --ignored`.
+      # This flag is added to every OS's step, but only Windows-only tests carry
+      # `#[ignore]`, so behavior on Linux/macOS is unchanged by it. An "ignore we
+      # don't even want in CI" would break that assumption:
+      # `tests/mac_configd_denied.rs` is exactly that shape — a test that should run
+      # neither by default nor in this normal CI step — which is why it is gated by
+      # an environment variable instead. Follow that pattern for anything similar.
+      - name: Run unit tests
+        run: cargo test --lib --bins --all-features -- --test-threads=1 --include-ignored
+
+      # Integration tests (under tests/) are **run serially on every OS**. They
+      # rewrite state that exists only once per process, so running them in
+      # parallel lets tests interfere with each other: on Windows it's the real
+      # registry (HKCU\...\Internet Settings); on Linux it's a PID-keyed fixture
+      # directory and process-global environment variables shared between tests
+      # (see `tests/linux_watch.rs`'s module doc). The Linux side is what makes the
+      # flag load-bearing: the Windows tests that rewrite the registry sit in their
+      # own binaries (tests/windows_watch.rs and tests/pac_winhttp_registry.rs) and
+      # are serialized inside those by REGISTRY_LOCK, so Windows alone would stay
+      # green even under a plain `cargo test`. Linux has no such per-binary escape,
+      # because what its tests share is the process.
+      # Only ubuntu runs under dbus-run-session. Without a D-Bus session bus,
+      # gsettings/dconf write probes fail, and the 7 tests in
+      # `tests/gsettings_watch.rs` end up "ran, but self-determined they should
+      # skip" — green, while verifying nothing (the apt-get install step above
+      # installs the schema and backend, but the bus is a separate requirement).
+      # dbus-run-session starts a temporary session bus and runs the command inside
+      # it, so it runs with real substance even on headless CI, which has no real
+      # process D-Bus session.
+      # macOS also runs serially. `tests/mac_watch.rs`'s
+      # `a_sudo_networksetup_change_is_observed` rewrites a piece of state outside
+      # the process — the real network service's web proxy setting — so it carries
+      # the same constraint (see that file's module doc, "Serialisation" section).
+      # The only difference from ubuntu is that it doesn't need dbus-run-session.
+      - name: Run integration tests (ubuntu, under dbus session)
+        if: matrix.os == 'ubuntu-latest'
+        run: dbus-run-session -- cargo test --tests --all-features -- --test-threads=1 --include-ignored
+
+      - name: Run integration tests (macos)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --tests --all-features -- --test-threads=1 --nocapture --include-ignored
+
+      - name: Run integration tests (windows, serialized)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --tests --all-features -- --test-threads=1 --include-ignored
+
+      # Every step above passes `--all-features`, so every configuration where a
+      # feature is *off* is somebody else's job — the `test-features` job below, whose
+      # `TEST_FEATURE_MATRIX` includes the engine-less `pac` build and the GLib-free
+      # `tracing,resolve,linux-kde` build. Add a configuration to that list rather than
+      # a step here; one list is what keeps the set legible.
+
+      # --- macOS failure paths --------------------------------------------------
+      # This step is the only thing that runs macOS's SCDynamicStore retry path —
+      # the behavior when configd is unreachable. Nothing else in CI reaches it,
+      # because nothing else can make configd unreachable on demand.
+      #
+      # The mechanism is a sandbox-exec profile that denies `mach-lookup` on
+      # `com.apple.SystemConfiguration.configd`. **The identical test binary**
+      # returns `Some` in a plain run and `None` under this profile, with that plain
+      # run serving as the control. The technique doesn't depend on SIP, so it doesn't matter
+      # that GitHub's macOS runners have SIP disabled
+      # (actions/runner-images #8162). For why this step is gated by an
+      # environment variable rather than `#[ignore]`, and for what still
+      # **cannot** be verified even with this, see
+      # tests/mac_configd_denied.rs's module doc.
+      #
+      # `cargo test` as a whole is not run under sandbox-exec, because putting
+      # cargo and rustc inside the sandbox too would make a failure ambiguous —
+      # "the sandbox didn't take effect" versus "the build broke under the
+      # sandbox" become indistinguishable. Build first with --no-run, then launch
+      # only the test binary under the sandbox.
+      #
+      # continue-on-error is **deliberately not set**. A failure here means the
+      # configd path is actually broken, and a step that can stay green while
+      # protecting nothing is worse than no step at all.
+      - name: Verify the configd failure path under a deny sandbox (macos)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/deny-configd.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny mach-lookup (global-name "com.apple.SystemConfiguration.configd"))
+          PROFILE
+
+          # Build outside the sandbox, and capture the path to the resulting test binary.
+          bin=$(cargo test --test mac_configd_denied --all-features --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "mac_configd_denied" and .executable != null) | .executable' \
+            | tail -n 1)
+          echo "test binary: $bin"
+          test -x "$bin"
+
+          # The control (no sandbox, no environment variable) is already recorded by
+          # the "Run integration tests (macos)" step, which runs the same binary and
+          # leaves a CONTROL line, so only the experimental side runs here.
+          # --test-threads=1: some tests measure retry elapsed time, and running them
+          # in parallel makes the measurement jitter under runner load. It costs a bit
+          # over 10 seconds for the two of them (a 5-second retry budget x 2).
+          PROXY_WATCH_EXPECT_CONFIGD_DENIED=1 sandbox-exec -f "$RUNNER_TEMP/deny-configd.sb" \
+            "$bin" --nocapture --test-threads=1
+
+  # --- test (feature matrix) --------------------------------------------------
+  # Runs the test suite once per entry in `TEST_FEATURE_MATRIX`. Pinned to ubuntu:
+  # the point of this job is which `#[cfg(feature = ...)]` bodies exist, and that is
+  # decided by the feature list, not by the runner. The `test` job above already
+  # covers what differs between operating systems.
+  #
+  # A failing configuration does not abort the loop. This job exists to answer
+  # "which configurations are broken", and stopping at the first one turns that into
+  # "at least one is" — so each entry records its own `::error::` and the job fails at
+  # the end with every result already printed.
+  #
+  # Everything runs under `dbus-run-session` for the same reason the ubuntu
+  # integration step above does: without a session bus the GSettings write probe
+  # fails and `tests/gsettings_watch.rs` self-skips into a green run that verified
+  # nothing. Only the `linux-gnome` entry needs it; the rest are unaffected by being
+  # handed a bus they never open.
+  #
+  # No `--include-ignored`: in this repository `#[ignore]` marks the tests that
+  # rewrite the machine's real settings, they are Windows-only, and this job is
+  # ubuntu — so nothing here touches configuration outside the process.
+  test-features:
+    name: test (feature matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `linux-gnome` needs GLib's headers to build, and the schema, backend and bus
+      # packages to make `tests/gsettings_watch.rs` and `tests/gsettings_lock.rs` do
+      # anything but skip. Same package set and same reasoning as the `test` job.
+      - name: Install GLib development headers and GNOME watch test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev dbus dconf-cli dconf-gsettings-backend gsettings-desktop-schemas
+
+      - name: cargo test (feature matrix)
+        run: |
+          set -euo pipefail
+          eval "set -- $TEST_FEATURE_MATRIX"
+          status=0
+          for features in "$@"; do
+            echo "::group::--no-default-features --features '$features'"
+            if ! dbus-run-session -- cargo test --no-default-features --features "$features" -- --test-threads=1; then
+              echo "::error::tests failed with --no-default-features --features '$features'"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  # --- wasm ---------------------------------------------------------------------
+  # `wasm32-unknown-unknown` is the one target no other job touches. Nothing in this
+  # crate claims to *work* there — every store backend is behind a `cfg` for an
+  # operating system wasm is not — but the portable half (parsing, bypass matching,
+  # PAC result handling, the error and mode types) is exactly the part a wasm consumer
+  # would use, and this job is the only check that it still builds off the three
+  # tier-1 desktop targets.
+  #
+  # `--all-features` cannot be used here: `pac-boa` pulls `boa_engine`, which pulls
+  # `getrandom`, which refuses `wasm32-unknown-unknown` unless its own `wasm_js` feature
+  # is on. Nothing turns it on — `boa_engine` 0.21.1 declares that dependency with the
+  # feature but only behind its optional `js` one — and picking a source of randomness
+  # for a JavaScript host is the embedder's call, not this library's. So the first step
+  # below turns on every feature *except* `pac-boa`. The second is the bare crate, which
+  # is what actually pins the portable half: a `cfg` mistake that only shows up with
+  # everything off has no other check. (`getrandom` 0.3.4 made the feature sufficient on
+  # its own — `--cfg getrandom_backend="wasm_js"` is no longer required, whatever the
+  # `compile_error!` you will see still says.)
+  #
+  # `cargo check`, not `cargo build` or `cargo test`: there is no wasm runtime here to
+  # execute anything in, and `--all-targets` fails on `examples/reqwest_client.rs` — not
+  # because `reqwest` is unbuildable there, it has a whole wasm dependency set, but
+  # because the wasm build exposes no `reqwest::Proxy` at all, proxying being the
+  # browser's business rather than the client's. That is a fact about the example, not
+  # about the library. `RUSTFLAGS: -D warnings` is on because an unused item under a
+  # target this crate does not otherwise see is the most likely thing to be wrong here.
+  wasm:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (wasm, every feature but pac-boa)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --features resolve,tracing,tokio,pac,pac-windows-native,linux-kde,linux-gnome
+
+      - name: cargo check (wasm, no features)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+
+  # --- lint -----------------------------------------------------------------
+  # **Runs on every OS.** Do not narrow this back to ubuntu alone. There
+  # `src/sys/win/**` (`#[cfg(windows)]`), `src/sys/mac/**`
+  # (`#[cfg(target_os = "macos")]`), and `src/pac/winhttp.rs`
+  # (`#[cfg(all(windows, feature = "pac-windows-native"))]`) compile not a single
+  # line — even with `--all-features` — so clippy and its `-D warnings` reach none
+  # of the Windows / macOS backend code, which is the backend of this crate's
+  # primary target. The `test` job does build them **with rustc**, so syntax and
+  # type errors get caught, but warnings do not (`cargo test` carries no
+  # `-D warnings`).
+  #
+  # `cargo fmt`, on the other hand, operates on the same sources regardless of OS,
+  # so running it on the ubuntu leg alone is sufficient.
+  lint:
+    name: lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # The feature-matrix step is a bash script. windows-latest's default shell is
+    # PowerShell, so bash is pinned for the whole job (it ships with the runner).
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-features` includes linux-gnome, which pulls in glib-sys. On anything
+      # but Linux, gio/glib never even become dependencies in the first place,
+      # because of `[target.'cfg(target_os = "linux")'.dependencies]`, so this
+      # isn't needed there.
+      - name: Install GLib development headers
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+
+      - name: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # `--all-features` alone never surfaces inconsistencies that only show up
+      # when a feature is turned off. In fact, a test was added that
+      # unconditionally references `crate::trace::SafeError`, and the fact that lib
+      # tests wouldn't even compile under `--no-default-features` went unnoticed by
+      # anyone. The key is `--all-targets` — what was broken was the test code, not
+      # the lib itself.
+      # The combinations to run come from FEATURE_MATRIX at the top of the
+      # workflow, the single source shared with the docs job.
+      - name: cargo clippy (feature matrix)
+        run: |
+          set -euo pipefail
+          eval "set -- $FEATURE_MATRIX"
+          for features in "$@"; do
+            echo "::group::--no-default-features --features '$features'"
+            cargo clippy --all-targets --no-default-features --features "$features" -- -D warnings
+            echo "::endgroup::"
+          done
+
+  # --- docs -------------------------------------------------------------------
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-features` includes linux-gnome, which pulls in glib-sys.
+      - name: Install GLib development headers
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps --all-features
+
+      # `--all-features` alone never sees links that only break with a feature turned
+      # off: `resolve` off makes `mod resolve` disappear entirely, so every intra-doc
+      # link to `crate::resolve()` goes unresolved in a build the single line above
+      # never makes. This step runs docs against the same feature matrix as the clippy
+      # job. Both read FEATURE_MATRIX at the top of the workflow, so "same" holds by
+      # construction — do not give either job a feature list of its own.
+      - name: cargo doc --no-deps (feature matrix)
+        run: |
+          set -euo pipefail
+          eval "set -- $FEATURE_MATRIX"
+          for features in "$@"; do
+            echo "::group::--no-default-features --features '$features'"
+            cargo doc --no-deps --no-default-features --features "$features"
+            echo "::endgroup::"
+          done
+
+      # Both steps above document the *host* target only, and this job is pinned
+      # to ubuntu — so every `#[cfg(target_os = "macos")]` and `#[cfg(windows)]`
+      # module is invisible to them, docs included. Rustdoc does not link, so
+      # cross-target documentation needs nothing but the target's std — no cross
+      # linker, no SDK. `--all-features` is safe with a foreign target because
+      # `linux-gnome`'s glib/gio dependencies are declared under a
+      # `cfg(target_os = "linux")` target table: selecting a non-Linux target
+      # drops them, so no cross build of glib-sys is attempted.
+      #
+      # The target is only half of it, and the step below is the other half. What
+      # neither half alone catches: a `///` on a `mod` declaration merges with that
+      # module's own `//!` documentation, and the links it carries go unresolved for
+      # as long as nothing renders the module. Selecting a macOS target is what makes
+      # such a module *compile*; it is not what makes rustdoc *document* it. `mod sys`
+      # is private and re-exports nothing, so no page is generated for anything under
+      # it — and links on a page that is never generated are never checked — unless
+      # `--document-private-items` is passed. Most of this crate is `pub(crate)`, so
+      # that flag is the difference between checking the docs and checking a small
+      # public surface.
+      - name: Install cross targets for documentation
+        run: rustup target add aarch64-apple-darwin x86_64-pc-windows-msvc
+
+      - name: cargo doc --no-deps (macOS target)
+        run: cargo doc --no-deps --all-features --target aarch64-apple-darwin
+
+      - name: cargo doc --no-deps (Windows target)
+        run: cargo doc --no-deps --all-features --target x86_64-pc-windows-msvc
+
+      # Two deliberate narrowings, both of which would otherwise make this step
+      # fail on defects it is not meant to police:
+      #
+      # * `RUSTDOCFLAGS` denies exactly one lint instead of inheriting
+      #   `-D warnings`. `broken_intra_doc_links` is the whole class this step
+      #   exists for — it covers both a link that resolves to nothing and one
+      #   that resolves ambiguously, which matters because `[`crate::resolve`]`
+      #   was the second kind (`resolve` is both a function and a module) and a
+      #   grep for "unresolved link" would have walked straight past it. Private
+      #   items also carry a tail of `redundant_explicit_links` warnings that
+      #   have nothing to do with either; naming the lint leaves those at warn
+      #   rather than forcing a choice between fixing them in the same breath
+      #   and turning the step off again.
+      # * `--all-features` only, never the feature matrix. A doc link to an item
+      #   behind a feature that is *off* cannot resolve, and private modules are
+      #   full of them: `--no-default-features --features tracing,resolve,linux-kde`
+      #   leaves links to `linux-gnome` items unresolved by construction — a count that
+      #   moves with every edit to a cfg'd-out module, so it is deliberately not stated.
+      #   That is a property of cfg'd-out code, not a defect, so the matrix stays
+      #   on the public-surface steps above where the question is well posed.
+      - name: cargo doc --document-private-items (host and cross targets)
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
+        run: |
+          set -euo pipefail
+          status=0
+          for target in host aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            echo "::group::--document-private-items ($target)"
+            args=(doc --no-deps --document-private-items --all-features)
+            if [ "$target" != host ]; then
+              args+=(--target "$target")
+            fi
+            if ! cargo "${args[@]}"; then
+              echo "::error::broken intra-doc link under --document-private-items ($target)"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  # --- MSRV ---------------------------------------------------------------------
+  # Declaring `rust-version` in `Cargo.toml` guarantees nothing by itself.
+  # Before this job existed, there was no way to notice if someone used an API
+  # that broke the MSRV (the three jobs above all run on stable, so they never see
+  # a divergence from the declared value). In fact, the first time this job was
+  # written and run locally, the lib didn't even build under the then-declared
+  # 1.85 (`let` chains = stabilized in 1.88, plus boa 0.21 requiring 1.88). The
+  # declaration was corrected to 1.88 after measuring. The edition 2024 floor
+  # (1.85) and the MSRV are two different things.
+  #
+  # There isn't just one floor. `linux-gnome`'s `glib`/`gio` 0.22 requires 1.92.
+  # Both are Linux-only dependencies, so they are not in a Windows host's build
+  # graph at all and a plain `cargo check` there never sees that floor, even with
+  # the feature turned on. That is why this job's very first run (on ubuntu) was
+  # what found it, right after 1.88 had been confirmed locally. A Windows dev
+  # machine can reach it now, though: `cargo +1.88.0 check --all-features --target
+  # x86_64-unknown-linux-gnu` stops at `gio@0.22.8 requires rustc 1.92` before any
+  # build script runs, so it wants neither GLib nor the `SYSTEM_DEPS_*` bypass the
+  # feature matrix above documents.
+  #
+  # So the matrix measures the two floors separately:
+  #   1.88 = the declared `rust-version`. Every feature except linux-gnome must
+  #          build under this.
+  #   1.92 = the real floor once linux-gnome is included. `--all-features` must
+  #          build under this.
+  # Measuring only one would leave no way to notice the declared value being
+  # either too loose or too strict.
+  #
+  # `--all-targets` is included here for the same reason it matters elsewhere in
+  # this workflow: dropping a feature breaks lib tests and doc links while the lib
+  # itself keeps building, so a check that stops at the lib misses both kinds of
+  # breakage. GLib headers are only
+  # needed on the row that includes linux-gnome.
+  msrv:
+    name: msrv (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The exact floor that `rust-version` declares.
+          - toolchain: "1.88"
+            features: >-
+              --no-default-features
+              --features resolve,linux-kde,tokio,pac,pac-boa,pac-windows-native,tracing
+            needs-glib: false
+          # Including linux-gnome raises the floor. This pins where it lands.
+          - toolchain: "1.92"
+            features: "--all-features"
+            needs-glib: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install GLib development headers
+        if: matrix.needs-glib
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+
+      - name: cargo check --all-targets ${{ matrix.features }}
+        run: cargo check --all-targets ${{ matrix.features }}
+
+  # --- Why no extra job -----------------------------------------------------
+  # The Windows, macOS, GNOME, and KDE backends are all implemented already, and
+  # their integration tests are already part of the `cargo test` run in the `test`
+  # job above (macOS via `tests/mac_watch.rs`, GNOME via
+  # `tests/gsettings_watch.rs`, KDE via `tests/linux_watch.rs`). A dedicated job
+  # isn't needed.
+  #
+  # One item remains: reproducing the Flatpak sandbox in CI is
+  # **permanently out of scope for automation**. This was investigated and
+  # decided: placing `/.flatpak-info` alone isn't enough — reproducing whether
+  # access is actually allowed or denied under dconf's [Session Bus Policy] would
+  # require setting up bwrap/flatpak plus a D-Bus session inside the container,
+  # with two separate schema policies. The implementation cost doesn't justify
+  # what that coverage would add.
+  #
+  # So the fact that `a_flatpak_without_dconf_access_never_reports_direct` in
+  # `tests/linux_watch.rs` always self-skips in CI is not a gap that was forgotten
+  # — it's exactly the state the decision above calls for (that test's own doc heads
+  # the same point "This is an allow-listed skip, permanently").

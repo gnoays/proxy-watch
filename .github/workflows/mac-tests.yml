@@ -1,0 +1,99 @@
+name: mac tests
+
+# Dispatch only, one job. The macOS backend is the part of this crate a Windows
+# development machine can *type* check — `cargo check --target aarch64-apple-darwin
+# --all-targets` reaches `src/sys/mac/` and `tests/mac_watch.rs` alike — and can never
+# run. This exists for exactly that gap, and for nothing else CI does.
+#
+# The `CI` workflow answers the same question, but pressing it boots three `test` runners
+# plus the lint matrix, the docs job and the feature matrix to do it. This is that one
+# measurement without the rest, so the cost of confirming a macOS-only change is one
+# macOS runner rather than the whole board.
+#
+# All three steps, because no one of them asks what the others ask. They are `ci.yml`'s
+# three macOS runs — `--lib --bins`, a separate `--tests`, and `mac_configd_denied`'s
+# sandbox-exec block — carried rather than chosen, so the two files cannot drift into
+# measuring different things. Do not drop one to save a rebuild: `--lib` alone builds
+# neither `tests/mac_watch.rs` nor the configd failure path, so a change to either would
+# dispatch this, read the green, and have measured a target that was never built.
+#
+# Do not rename this file on a branch: `workflow_dispatch` resolves by path on the default
+# branch, so the rename takes the workflow out of the dispatch list for everyone until
+# `main` carries the new name too.
+#
+# Deliberately not on `push` or `pull_request`: nothing here gates a merge, and a second
+# copy of a gate is a second thing to keep true. `CI`'s `test (macos-latest)` job is what
+# protects `main`; this is a tool for a branch.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mac-tests:
+    name: cargo test (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The two flags are carried from `CI`'s "Run unit tests" step rather than chosen
+      # here, so the two cannot drift into measuring different things. Neither changes
+      # anything on macOS today — this repository's `#[ignore]` marks the tests that
+      # rewrite the machine's real registry, and those are Windows-only — and that is
+      # precisely why leaving them off would be a silent divergence rather than a saving.
+      - name: Run unit tests
+        run: cargo test --lib --bins --all-features -- --test-threads=1 --include-ignored
+
+      # `tests/mac_watch.rs`, which is the only reason a round changing the macOS backend
+      # can be confirmed at all: it drives a real `SCDynamicStore` and, where the runner
+      # grants passwordless sudo, a real `networksetup` write with a restore. `--nocapture`
+      # is not decoration — `logs_which_scope_the_configuration_came_from` asserts nothing
+      # and exists to print which scopes a real machine populates, which is invisible
+      # without it.
+      - name: Run integration tests
+        run: cargo test --tests --all-features -- --test-threads=1 --nocapture --include-ignored
+
+      # The experimental half of `tests/mac_configd_denied.rs`, carried from `ci.yml`'s
+      # "Verify the configd failure path under a deny sandbox (macos)" step for the same
+      # reason as the two above: so the two files cannot drift into denying different
+      # things. Read that file's module doc for why the gate is an environment variable
+      # rather than `#[ignore]`, and for the two shapes the sandbox structurally cannot
+      # produce.
+      #
+      # Its control is the line the step above already left in this same log: the same
+      # binary, unsandboxed, printing `CONTROL: ... returned Some`. "`None` under the
+      # profile" means nothing without it, which is why this step is placed after rather
+      # than before, and why one dispatch carries the whole experiment rather than half.
+      #
+      # cargo and rustc stay outside the sandbox — building under it would make a failure
+      # ambiguous between "the deny did not take" and "the build broke". Hence `--no-run`,
+      # then the binary alone. The rebuild is a cache hit off the previous step, which
+      # built this same target.
+      - name: Verify the configd failure path under a deny sandbox
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/deny-configd.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny mach-lookup (global-name "com.apple.SystemConfiguration.configd"))
+          PROFILE
+
+          bin=$(cargo test --test mac_configd_denied --all-features --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "mac_configd_denied" and .executable != null) | .executable' \
+            | tail -n 1)
+          echo "test binary: $bin"
+          test -x "$bin"
+
+          # --test-threads=1 because two of these assert on elapsed retry time, and
+          # running them together makes that measurement jitter under runner load.
+          PROXY_WATCH_EXPECT_CONFIGD_DENIED=1 sandbox-exec -f "$RUNNER_TEMP/deny-configd.sb" \
+            "$bin" --nocapture --test-threads=1

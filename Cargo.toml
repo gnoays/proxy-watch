@@ -1,0 +1,139 @@
+[package]
+name = "proxy-watch"
+version = "0.1.0"
+edition = "2024"
+# MSRV 1.88 (`let` chains). `linux-gnome` raises it to 1.92 via `glib`/`gio` 0.22;
+# the `msrv` CI job checks both floors.
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Detect and watch operating system proxy configuration changes"
+authors = ["gnoays <169730769+gnoays@users.noreply.github.com>"]
+readme = "README.md"
+repository = "https://github.com/gnoays/proxy-watch"
+keywords = ["proxy", "system-proxy", "pac", "watcher", "http"]
+categories = ["network-programming", "os", "config"]
+# Allowlist: only what a crate consumer needs. Leading `/` is load-bearing
+# (gitignore-shaped; bare `README.md` would also match under `docs/`).
+include = [
+    "/src/**/*.rs",
+    "/examples/*.rs",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+resolver = "3"
+
+# Features only *add* portable pieces. OS backends are target cfg, never features
+# (except the Linux store toggles below).
+[features]
+default = ["resolve", "linux-gnome", "linux-kde"]
+# `resolve()` + `ProxyStep`.
+resolve = []
+# `watch_channel()` → `tokio::sync::watch`.
+tokio = ["dep:tokio"]
+# Linux stores (inert off-Linux). `linux-gnome` raises MSRV to 1.92.
+linux-gnome = ["dep:gio", "dep:glib"]
+linux-kde = ["dep:notify", "dep:configparser"]
+# PAC evaluation. Engine features are additive (Cargo unions features).
+pac = ["resolve"]
+pac-boa = ["pac", "dep:boa_engine"]
+pac-windows-native = ["pac"]
+# Lifecycle / change logs. Off by default so the library does not pick a facade.
+tracing = ["dep:tracing"]
+
+[dependencies]
+futures-core = { version = "0.3", default-features = false, features = ["std"] }
+ipnet = "2.9"
+thiserror = "2"
+url = "2.5"
+
+# `pac-boa` only; default-off. `default-features = false` drops boa 0.21's
+# `float16`/`xsum`; larger surfaces (`annex-b`, `intl`, `temporal`) are already non-default.
+[dependencies.boa_engine]
+version = "0.21"
+optional = true
+default-features = false
+
+# Only `sync` + `rt`; absent when the `tokio` feature is off.
+[dependencies.tokio]
+version = "1"
+optional = true
+default-features = false
+features = ["rt", "sync"]
+
+# Drops `tracing-attributes`; `std` enables `set_global_default`.
+[dependencies.tracing]
+version = "0.1.41"
+optional = true
+default-features = false
+features = ["std"]
+
+# OS backends are target cfg, never Cargo features.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",         # SECURITY_ATTRIBUTES, required by CreateEventW
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+]
+
+# Pinned to 0.9 to match `system-configuration` 0.7 (0.10 would split CF types).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration = "0.7"
+
+# Optional via `linux-gnome` / `linux-kde`. Keep `gio`/`glib` on the same gtk-rs release.
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = { version = "0.22", optional = true }
+glib = { version = "0.22", optional = true }
+notify = { version = "8", optional = true }
+configparser = { version = "3", optional = true }
+
+[dev-dependencies]
+futures-executor = "0.3"
+# `examples/reqwest_client.rs` only.
+reqwest = { version = "0.12", default-features = false }
+# `tracing` feature tests only (always compiled as a dev-dep; never reaches consumers).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
+# `tests/mac_configd_denied.rs` needs `SCDynamicStoreBuilder` directly; keep in lockstep
+# with the normal macOS dependency above.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+system-configuration = "0.7"
+
+[[example]]
+name = "resolve"
+required-features = ["resolve"]
+
+[[example]]
+name = "resolve_os_and_env"
+required-features = ["resolve"]
+
+[[example]]
+name = "reqwest_client"
+required-features = ["resolve"]
+
+[[example]]
+name = "pac"
+required-features = ["pac-boa"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+# Paired with `#![cfg_attr(docsrs, feature(doc_cfg))]` in `src/lib.rs`; neither half does
+# anything alone.
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"

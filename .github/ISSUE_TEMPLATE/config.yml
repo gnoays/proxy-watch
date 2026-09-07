@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: API reference
+    url: https://docs.rs/proxy-watch
+    about: What a type or function does, and the limits each backend documents for itself.
+  - name: Security
+    url: https://github.com/gnoays/proxy-watch/security
+    about: Report a credential leak, a PAC sandbox escape, or a hang here rather than as an issue.

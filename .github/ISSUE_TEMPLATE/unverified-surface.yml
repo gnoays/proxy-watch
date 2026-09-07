@@ -1,0 +1,82 @@
+name: Unverified surface report
+description: A platform or configuration path CI cannot reach — macOS GUI / location / MDM, or a Flatpak or Snap sandbox
+title: "[unverified] "
+labels: ["unverified-surface"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The failure to expect on these surfaces is the quiet one: the crate reports no proxy
+        while the host has one, and returns no error. So the report that settles anything is
+        a pair taken on the same machine at the same moment — what the host is set to, and
+        what the crate answered. Either half alone is consistent with the crate being right.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - macOS — proxy changed in System Settings while a watcher is running
+        - macOS — network location switched
+        - macOS — MDM GlobalHTTPProxy payload
+        - Linux — Flatpak sandbox, read through the ProxyResolver portal
+        - Linux — Snap sandbox, read through the ProxyResolver portal
+        - Other — say which below
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: OS version, plus desktop or MDM where it applies
+      placeholder: macOS 15.5 / Fedora 42 with GNOME 48, running under Flatpak
+    validations:
+      required: true
+
+  - type: textarea
+    id: host-setting
+    attributes:
+      label: What the host is set to
+      description: >-
+        Read it back from the OS rather than from memory — `networksetup -getwebproxy
+        <service>`, `gsettings get org.gnome.system.proxy mode`, `profiles show` for an MDM
+        payload. Redact credentials and internal host names freely; the shape is what matters.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: crate-output
+    attributes:
+      label: What the crate answered
+      description: >-
+        `cargo run --example resolve_os_and_env`, run while the setting above is in effect. It
+        prints the effective mode, every source that contributed, and the decision per URL —
+        which is what separates "read nothing" from "read it and ranked it below something else".
+        For the two rows above about a running watcher, use `cargo run --example watch`
+        instead and paste what it printed on either side of the change, with roughly how long
+        the gap was: a snapshot that arrives late and one that never arrives are different bugs.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version and features
+      placeholder: 0.1.0, default features
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        For a watcher that never wakes, the `tracing` feature logs which source changed the
+        configuration and when; that log says whether the notification arrived and was
+        discarded, or never arrived. Inside Flatpak or Snap, say whether
+        `WatchOptions::poll_interval` was set — the portal sends no change signal, so without
+        it the stream is expected to stay on its first snapshot.
+    validations:
+      required: false

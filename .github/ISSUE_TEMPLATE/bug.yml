@@ -1,0 +1,72 @@
+name: Bug report
+description: The crate does something other than what it documents
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what the documentation says instead
+      description: >-
+        Name the API or the sentence where you can. The README's **Pitfalls** section lists
+        the behaviours that most often read as bugs and are documented ones — Windows
+        reporting the active connection and the first enabled step only, `*_proxy` being a
+        snapshot rather than a stream, a sandboxed watcher needing `poll_interval`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        The smallest program or example invocation that shows it, and the proxy configuration
+        it runs against.
+    validations:
+      required: true
+
+  - type: textarea
+    id: crate-output
+    attributes:
+      label: What the crate answered
+      description: >-
+        `cargo run --example resolve_os_and_env`, or `cargo run --example watch` if the
+        problem is that a change does not arrive. Credentials are masked in this output by
+        the crate itself.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-configured
+    attributes:
+      label: How the proxy is configured on that host
+      description: >-
+        Everything that applies, if you know — which store holds the setting decides which
+        code path reads it. Skip it if you are not sure; the output above usually says.
+      multiple: true
+      options:
+        - Proxy servers set in the settings GUI
+        - A PAC URL, or auto-detect / WPAD
+        - Environment variables (`http_proxy` and friends)
+        - Policy or MDM — Windows Group Policy, `netsh winhttp set proxy`, a macOS profile
+        - Hand-edited `gsettings` or `kioslaverc`
+        - Inside Flatpak or Snap
+    validations:
+      required: false
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: On Linux, add the desktop and `XDG_CURRENT_DESKTOP`.
+      placeholder: Windows 11 26200 x86_64 / Ubuntu 24.04, KDE, XDG_CURRENT_DESKTOP=KDE
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version and features
+      placeholder: 0.1.0, --no-default-features --features resolve,linux-kde
+    validations:
+      required: true
