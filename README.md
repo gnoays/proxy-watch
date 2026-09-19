@@ -1,6 +1,9 @@
 # proxy-watch
 
+[![crates.io](https://img.shields.io/crates/v/proxy-watch.svg)](https://crates.io/crates/proxy-watch)
+[![docs.rs](https://img.shields.io/docsrs/proxy-watch)](https://docs.rs/proxy-watch)
 [![CI](https://github.com/gnoays/proxy-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/gnoays/proxy-watch/actions/workflows/ci.yml)
+[![Audit](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml/badge.svg)](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml)
 
 Read the operating system's proxy configuration on Windows, macOS and Linux — and get a
 `Stream` item every time it changes.

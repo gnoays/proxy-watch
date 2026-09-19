@@ -5,6 +5,20 @@ Notable changes to `proxy-watch`, newest first. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Every entry names the minimum
 supported Rust version in force for that release.
 
+## [Unreleased]
+
+MSRV unchanged: 1.88, and 1.92 with `linux-gnome`. No change to the library's API.
+
+### Changed
+
+- `examples/reqwest_client.rs` reads `ProxyEnv` once at start-up and merges it into each
+  snapshot as it arrives, instead of re-scanning the environment inside the `Proxy::custom`
+  closure; `ProxyEnv::from_env()` failing is now a start-up error rather than a silent
+  fall-back to the OS snapshot. The watch thread reports `WatchEvent::Error` on stderr
+  instead of dropping it, and the module doc says what `reqwest` actually does with the
+  closure: called on connection to route, and twice more per plaintext request for
+  headers, never to re-route.
+
 ## [0.1.0] - 2026-09-07
 
 Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
@@ -60,4 +74,5 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0
