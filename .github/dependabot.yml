@@ -1,0 +1,35 @@
+# Two ecosystems, one pull request each per week, every update in it grouped.
+#
+# `github-actions` moves the commit SHAs in `workflows/*.yml` and rewrites the version
+# comment beside each one. `dtolnay/rust-toolchain` publishes no release tags, so its
+# pin is a branch head that Dependabot cannot follow; it moves by hand.
+#
+# `cargo` bumps `Cargo.lock` and, when a new release falls outside the requirement,
+# `Cargo.toml`. The MSRV job in `ci.yml` is what refuses a bump that raises the floor.
+#
+# `cooldown` keeps a release out of the pull request until it has been public for a
+# week: a compromised or yanked release is usually found within days, and nothing here
+# needs the newest version the day it lands.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
