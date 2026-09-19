@@ -1,0 +1,123 @@
+name: Release
+
+# A tag `vX.Y.Z` pushed to the public repository is the release. This workflow checks
+# that the tag, the manifest and the changelog agree, publishes the crate through
+# crates.io Trusted Publishing, and then creates the GitHub Release the changelog's
+# version link points at. Three jobs, so a failure in one is a failure in a named
+# place: nothing is published when the check fails, and a release page that failed to
+# appear after a successful publish is re-created by hand with `gh release create`
+# rather than by re-running a publish that would refuse the existing version.
+#
+# Trusted Publishing needs a one-time setup on crates.io (Settings → Trusted
+# Publishing on the crate): repository owner and name, workflow file `release.yml`,
+# environment `crates-io`. No long-lived token is stored anywhere in GitHub.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+# Each job raises what it needs: `id-token` for the crates.io exchange, `contents:
+# write` for the release page. The default stays at the floor.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --- verify -------------------------------------------------------------------
+  # Everything that can refuse the release before anything irreversible happens.
+  verify:
+    name: tag, manifest and changelog agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+      - name: Install GLib development headers
+        # The default features include `linux-gnome`, and the verification build in
+        # `cargo publish` compiles the crate on this runner.
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+
+      - name: The tag names the manifest version
+        run: |
+          set -euo pipefail
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "proxy-watch") | .version')
+          if [ "v$manifest" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag is $GITHUB_REF_NAME but Cargo.toml says $manifest"
+            exit 1
+          fi
+
+      - name: The changelog has a section for it
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## \[$version\] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version] - <date>' heading"
+            exit 1
+          fi
+          if ! grep -q "^\[$version\]: https://github.com/.*/releases/tag/v$version\$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '[$version]: .../releases/tag/v$version' link"
+            exit 1
+          fi
+
+      - name: cargo publish --dry-run
+        run: cargo publish --locked --dry-run
+
+  # --- publish ------------------------------------------------------------------
+  publish:
+    name: crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+      - name: Install GLib development headers
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - name: cargo publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # --- release ------------------------------------------------------------------
+  # The notes are the changelog section for this version, verbatim: the heading line
+  # and the link-reference lines dropped, everything up to the next `## ` kept.
+  release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Cut the notes out of the changelog
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "] - ") == 1 { inside = 1; next }
+            inside && index($0, "## ") == 1   { exit }
+            inside && /^\[[0-9.]+\]: /        { next }
+            inside                            { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md"
