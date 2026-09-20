@@ -1210,6 +1210,7 @@ dependencies = [
  "core-foundation",
  "futures-core",
  "futures-executor",
+ "futures-util",
  "gio",
  "glib",
  "ipnet",

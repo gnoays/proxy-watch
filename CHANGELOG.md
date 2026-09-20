@@ -18,6 +18,9 @@ MSRV unchanged: 1.88, and 1.92 with `linux-gnome`. No change to the library's AP
   instead of dropping it, and the module doc says what `reqwest` actually does with the
   closure: called on connection to route, and twice more per plaintext request for
   headers, never to re-route.
+- The README's watch example and `examples/watch.rs` drive the stream with
+  `StreamExt::next()` and `block_on` instead of a hand-written `poll_fn` over `poll_next`.
+  `futures-util` joins the dev-dependencies for that; consumers see no new dependency.
 
 ## [0.1.0] - 2026-09-07
 

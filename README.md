@@ -86,27 +86,24 @@ that error as "use `ProxyEnv` alone", not as fatal.
 ### Watch it
 
 `ProxyWatcher` is a `futures_core::Stream` on OS threads of its own, so it needs no async
-runtime. Driving it still needs something that blocks on a future: this uses `poll_fn` with
-`futures_executor::block_on`, which is not a dependency of this crate — add
-`futures-executor` yourself, or block with whatever your runtime already provides.
+runtime: `StreamExt::next()` gives one future per item, and anything that blocks on a
+future drives it. Neither `futures-util` nor `futures-executor` is a dependency of this
+crate — add them yourself, or `.await` the same `next()` from whatever runtime you have.
 
 ```rust,no_run
-use std::future::poll_fn;
-use std::pin::Pin;
-
-use proxy_watch::{ProxyWatcher, Stream, WatchEvent};
+use futures_util::StreamExt;
+use proxy_watch::{ProxyWatcher, WatchEvent};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut watcher = ProxyWatcher::new()?;
-    loop {
-        match futures_executor::block_on(poll_fn(|cx| Pin::new(&mut watcher).poll_next(cx))) {
-            Some(WatchEvent::Snapshot { state, .. }) => {
+    while let Some(event) = futures_executor::block_on(watcher.next()) {
+        match event {
+            WatchEvent::Snapshot { state, .. } => {
                 let live = state.health.is_fully_live();
                 println!("-> {:?} (live: {live})", state.config.effective);
             }
-            Some(WatchEvent::Error { error, .. }) => eprintln!("-> error: {error}"),
-            Some(_) => {}
-            None => break,
+            WatchEvent::Error { error, .. } => eprintln!("-> error: {error}"),
+            _ => {}
         }
     }
     Ok(())

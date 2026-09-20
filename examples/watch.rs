@@ -14,10 +14,8 @@
 //! cargo run --example watch
 //! ```
 
-use std::future::poll_fn;
-use std::pin::Pin;
-
-use proxy_watch::{ProxyConfig, ProxyWatcher, Stream, WatchEvent, WatchHealth, WatchState};
+use futures_util::StreamExt;
+use proxy_watch::{ProxyConfig, ProxyWatcher, WatchEvent, WatchHealth, WatchState};
 
 fn main() -> Result<(), proxy_watch::Error> {
     let mut watcher = ProxyWatcher::new()?;
@@ -25,14 +23,13 @@ fn main() -> Result<(), proxy_watch::Error> {
     println!("change a proxy setting to see the next block\n");
 
     let mut n = 0u64;
-    loop {
-        let next = futures_executor::block_on(poll_fn(|cx| Pin::new(&mut watcher).poll_next(cx)));
-        match next {
-            Some(WatchEvent::Snapshot { state, .. }) => {
+    while let Some(event) = futures_executor::block_on(watcher.next()) {
+        match event {
+            WatchEvent::Snapshot { state, .. } => {
                 n += 1;
                 print_snapshot(n, &state);
             }
-            Some(WatchEvent::Error { error, state, .. }) => {
+            WatchEvent::Error { error, state, .. } => {
                 n += 1;
                 eprintln!("--- #{n} error ---");
                 eprintln!("error: {error}");
@@ -41,13 +38,10 @@ fn main() -> Result<(), proxy_watch::Error> {
                 println!();
             }
             // `WatchEvent` is `#[non_exhaustive]`: a future variant lands here.
-            Some(_) => {}
-            None => {
-                println!("stream ended");
-                break;
-            }
+            _ => {}
         }
     }
+    println!("stream ended");
 
     Ok(())
 }

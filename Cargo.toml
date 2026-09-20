@@ -97,6 +97,8 @@ configparser = { version = "3", optional = true }
 
 [dev-dependencies]
 futures-executor = "0.3"
+# `StreamExt::next()` in the README and `examples/watch.rs`.
+futures-util = "0.3"
 # `examples/reqwest_client.rs` only.
 reqwest = { version = "0.12", default-features = false }
 # `tracing` feature tests only (always compiled as a dev-dep; never reaches consumers).
