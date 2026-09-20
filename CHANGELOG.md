@@ -7,6 +7,8 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-20
+
 MSRV unchanged: 1.88, and 1.92 with `linux-gnome`. No change to the library's API.
 
 ### Changed
@@ -79,5 +81,6 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
-[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0

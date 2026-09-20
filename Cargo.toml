@@ -1,6 +1,6 @@
 [package]
 name = "proxy-watch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # MSRV 1.88 (`let` chains). `linux-gnome` raises it to 1.92 via `glib`/`gio` 0.22;
 # the `msrv` CI job checks both floors.
