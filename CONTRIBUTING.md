@@ -67,6 +67,25 @@ error — so what settles it is a pair taken on one machine at one moment: what 
 set to, read back from the OS, and what the crate answered against it. There is a form that
 asks for exactly that pair, under `.github/ISSUE_TEMPLATE/`.
 
+## Cutting a release
+
+A release is a tag. `.github/workflows/release.yml` does the rest — publishes to crates.io
+through Trusted Publishing and creates the GitHub Release from the changelog — after
+refusing anything that disagrees with itself:
+
+1. Bump `version` in `Cargo.toml`.
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add the
+   `[X.Y.Z]: https://github.com/gnoays/proxy-watch/releases/tag/vX.Y.Z` link at the
+   bottom, and open a fresh `[Unreleased]` above it.
+3. Land that on `main` and let CI pass.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+The workflow checks that the tag names the manifest version, that the changelog has a
+section and a link for it, that the tagged commit is on `main` with a successful CI run,
+and that `cargo publish --dry-run` passes — in that order, before anything irreversible.
+Publishing waits on the `crates-io` environment, which is where a required reviewer goes
+if one is wanted.
+
 ## License
 
 Contributions are licensed under `MIT OR Apache-2.0`, the same terms as the crate, and no

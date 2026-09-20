@@ -33,8 +33,10 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
   thread, and neither registers a change notification.
 - Windows reads the active connection through WinHTTP and the registry, macOS reads the
   global proxies key out of `SCDynamicStore`, and Linux reads GNOME's GSettings, KDE's
-  `kioslaverc`, the XDG desktop portal, or the `http_proxy` family of environment
-  variables — whichever the desktop and the sandbox make available.
+  `kioslaverc` or the XDG desktop portal — whichever the desktop and the sandbox make
+  available. None of them reads `http_proxy`: the environment is a second snapshot,
+  `ProxyEnv::from_env()`, and `ProxyConfig::with_env` merges the two under an
+  `EnvPrecedence` the caller names.
 - `ProxyConfig::effective` is the merged answer. `sources` keeps each store that replied
   next to its own `ProxyConfigSource`, and `fallbacks` names a store the machine may well
   be configured with whose value this read did not learn — the case `sources` alone cannot
