@@ -1,0 +1,49 @@
+name: Audit
+
+# `cargo deny check` over the whole dependency graph: advisories, licenses, sources and
+# duplicate versions, with `deny.toml` at the repository root saying what is allowed.
+#
+# Separate from `CI` because its trigger is different in kind. An advisory lands on a
+# schedule of its own, with no commit to fire on, so the weekly run is the one that
+# actually catches it; the pull-request run only re-checks a graph someone just moved.
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/audit.yml
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/audit.yml
+  schedule:
+    # Monday 06:00 UTC. GitHub disables a schedule on a public repository after sixty
+    # days without a commit; re-enable it from the Actions tab if the crate goes quiet.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# The job reads the repository and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # A Docker action, so Linux only; the graph it checks already spans every target
+      # (`[graph]` in `deny.toml`), so one runner sees the Windows and macOS backends too.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features

@@ -207,8 +207,9 @@ fn parse_manifest() -> Manifest {
 // The toolchains the `msrv` CI job actually builds.
 //
 // `- toolchain: "1.88"` is the matrix row shape; the other `toolchain` lines in the
-// workflow are either `@stable` in a `uses:` or the `${{ matrix.toolchain }}` expansion,
-// neither of which carries a literal.
+// workflow are the `toolchain: stable` input under a `uses:` and the
+// `${{ matrix.toolchain }}` expansion, neither of which carries a version literal, and
+// neither of which starts with `- `.
 fn ci_toolchains() -> BTreeSet<String> {
     read(".github/workflows/ci.yml")
         .lines()

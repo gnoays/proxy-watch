@@ -1,0 +1,47 @@
+name: Semver
+
+# `cargo semver-checks` against the version on crates.io: an API change the version
+# number in `Cargo.toml` does not license fails here, before it ships. The tool reads
+# the 0.x rule the way Cargo does — a minor bump may break, a patch bump may not.
+#
+# Runs on pushes to `main` as well as on pull requests because the public tree
+# receives most of its history as direct pushes.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/semver.yml
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/semver.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semver:
+    name: cargo semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install GLib development headers
+        # Both the baseline and the current crate are built to rustdoc JSON on this
+        # runner, and the default features include `linux-gnome`.
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev
+      # A composite action: it installs its own toolchain and cache steps, which this
+      # file cannot pin. The SHA below pins what it does with them.
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          package: proxy-watch

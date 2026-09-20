@@ -27,6 +27,12 @@ name: mac tests
 on:
   workflow_dispatch:
 
+# Every job only reads the repository. A job that has to write — a release, a comment —
+# raises its own `permissions:` block, so the default stays at the floor and does not
+# depend on what the repository's settings page happens to say.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,11 +45,13 @@ jobs:
     name: cargo test (macos)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # The two flags are carried from `CI`'s "Run unit tests" step rather than chosen
       # here, so the two cannot drift into measuring different things. Neither changes

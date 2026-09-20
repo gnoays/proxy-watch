@@ -1,0 +1,51 @@
+# `cargo deny check` — the dependency graph's licenses, advisories, sources and duplicates.
+# `audit.yml` runs it on every pull request and once a week; locally, `cargo deny
+# --all-features check` is the same command.
+
+[graph]
+# The graph is evaluated for every target cargo-deny knows, so the Windows, macOS and
+# Linux backends are all in it at once. `all-features` here is what makes the optional
+# PAC engines and the `tokio` bridge part of the audited surface without a flag.
+all-features = true
+
+[advisories]
+# https://github.com/rustsec/advisory-db
+yanked = "deny"
+ignore = [
+  # `paste` is a proc-macro `boa_engine` 0.21 expands at compile time; it ships no code
+  # into the binary and its author archived it in a working state. It leaves the graph
+  # when `boa_engine` drops it, not before, so the advisory is acknowledged rather than
+  # left to fail every run until then.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro reached only through boa_engine" },
+]
+
+[licenses]
+# Permissive licenses only. Every crate that offers a copyleft alternative (`configparser`
+# is `MIT OR LGPL-3.0-or-later`) is taken under the permissive arm; the allowlist is what
+# makes that choice explicit rather than something cargo-deny works out on its own.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Two versions of one crate are a fact of a graph this wide (`hashbrown`, `syn`,
+# `windows-sys` all arrive twice or more through crates this library does not pick).
+# Reported, not refused: a library cannot flatten its dependents' choices.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

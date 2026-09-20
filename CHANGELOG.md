@@ -5,6 +5,25 @@ Notable changes to `proxy-watch`, newest first. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Every entry names the minimum
 supported Rust version in force for that release.
 
+## [Unreleased]
+
+## [0.1.1] - 2026-09-20
+
+MSRV unchanged: 1.88, and 1.92 with `linux-gnome`. No change to the library's API.
+
+### Changed
+
+- `examples/reqwest_client.rs` reads `ProxyEnv` once at start-up and merges it into each
+  snapshot as it arrives, instead of re-scanning the environment inside the `Proxy::custom`
+  closure; `ProxyEnv::from_env()` failing is now a start-up error rather than a silent
+  fall-back to the OS snapshot. The watch thread reports `WatchEvent::Error` on stderr
+  instead of dropping it, and the module doc says what `reqwest` actually does with the
+  closure: called on connection to route, and twice more per plaintext request for
+  headers, never to re-route.
+- The README's watch example and `examples/watch.rs` drive the stream with
+  `StreamExt::next()` and `block_on` instead of a hand-written `poll_fn` over `poll_next`.
+  `futures-util` joins the dev-dependencies for that; consumers see no new dependency.
+
 ## [0.1.0] - 2026-09-07
 
 Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
@@ -16,8 +35,10 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
   thread, and neither registers a change notification.
 - Windows reads the active connection through WinHTTP and the registry, macOS reads the
   global proxies key out of `SCDynamicStore`, and Linux reads GNOME's GSettings, KDE's
-  `kioslaverc`, the XDG desktop portal, or the `http_proxy` family of environment
-  variables — whichever the desktop and the sandbox make available.
+  `kioslaverc` or the XDG desktop portal — whichever the desktop and the sandbox make
+  available. None of them reads `http_proxy`: the environment is a second snapshot,
+  `ProxyEnv::from_env()`, and `ProxyConfig::with_env` merges the two under an
+  `EnvPrecedence` the caller names.
 - `ProxyConfig::effective` is the merged answer. `sources` keeps each store that replied
   next to its own `ProxyConfigSource`, and `fallbacks` names a store the machine may well
   be configured with whose value this read did not learn — the case `sources` alone cannot
@@ -60,4 +81,6 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0

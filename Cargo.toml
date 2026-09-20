@@ -1,6 +1,6 @@
 [package]
 name = "proxy-watch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # MSRV 1.88 (`let` chains). `linux-gnome` raises it to 1.92 via `glib`/`gio` 0.22;
 # the `msrv` CI job checks both floors.
@@ -97,6 +97,8 @@ configparser = { version = "3", optional = true }
 
 [dev-dependencies]
 futures-executor = "0.3"
+# `StreamExt::next()` in the README and `examples/watch.rs`.
+futures-util = "0.3"
 # `examples/reqwest_client.rs` only.
 reqwest = { version = "0.12", default-features = false }
 # `tracing` feature tests only (always compiled as a dev-dep; never reaches consumers).
