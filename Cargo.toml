@@ -85,8 +85,8 @@ features = [
 
 # Pinned to 0.9 to match `system-configuration` 0.7 (0.10 would split CF types).
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9"
-system-configuration = "0.7"
+core-foundation = "0.10"
+system-configuration = "0.8"
 
 # Optional via `linux-gnome` / `linux-kde`. Keep `gio`/`glib` on the same gtk-rs release.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -100,14 +100,14 @@ futures-executor = "0.3"
 # `StreamExt::next()` in the README and `examples/watch.rs`.
 futures-util = "0.3"
 # `examples/reqwest_client.rs` only.
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.13", default-features = false }
 # `tracing` feature tests only (always compiled as a dev-dep; never reaches consumers).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 # `tests/mac_configd_denied.rs` needs `SCDynamicStoreBuilder` directly; keep in lockstep
 # with the normal macOS dependency above.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-system-configuration = "0.7"
+system-configuration = "0.8"
 
 [[example]]
 name = "resolve"
