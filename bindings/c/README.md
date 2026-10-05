@@ -23,7 +23,8 @@ pw_context_free(context);
 - Shared: `lib/libproxy_watch_c.so`, `lib/libproxy_watch_c.dylib`, or `lib/proxy_watch_c.dll`
   with its import library `lib/proxy_watch_c.dll.lib`.
 - Static: `lib/libproxy_watch_c.a` or `lib/proxy_watch_c.lib`, plus the system libraries
-  listed in `lib/native-static-libs.txt` for that target.
+  listed in `lib/native-static-libs.txt` for that target. On Windows the static library
+  uses the DLL C runtime, so the program compiles with `/MD`.
 
 Linux builds need glibc 2.17 or later. Windows builds load `VCRUNTIME140.dll`, which the
 Microsoft Visual C++ Redistributable installs, and the Universal CRT that Windows 10 and later
