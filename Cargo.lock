@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-watch-c"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proxy-watch",
  "proxy-watch-shared",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-watch-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-watch-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proxy-watch",
  "proxy-watch-shared",
@@ -933,7 +933,7 @@ version = "0.0.0"
 
 [[package]]
 name = "proxy-watch-shared"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-core",
  "proxy-watch",
