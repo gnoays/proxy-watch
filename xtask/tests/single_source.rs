@@ -7,15 +7,16 @@
 //! and `docs/` off the manifest directory to derive its values, and neither of those is
 //! inside the published `.crate`.
 //!
-//! Of those authorities, `docs/` is the one a checkout need not have, so this gate also runs
-//! with the doc pages absent — see [`doc_pages_under`] for why that is a supported shape and
-//! not a hole.
+//! Of those authorities, `docs/` is the one a checkout need not have, so this gate also
+//! runs with the doc pages absent; see [`doc_pages_under`] for why that is a supported
+//! shape and not a hole.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// `gated_files` walks `src/`, `tests/` and `examples/`, none of which reaches `xtask/`, so
+// `gated_files` walks `src/`, `tests/`, `tests-gnome/`, `examples/` and `bindings/`, none of
+// which reaches `xtask/`, so
 // this gate sits outside the list it walks even though it quotes the very strings it checks
 // for. Do not add a self-exclusion without first making the walk reach here.
 
@@ -28,14 +29,22 @@ const PROSE_FILES: &[&str] = &[
 ];
 
 // Ungated `docs/*.html` pages. Directory-checked: add/remove requires a row change.
+// Exempt from the toolchain and dependency-version checks only; a feature name on an exempt
+// page is still this crate's and is still checked.
 const EXEMPT_DOCS: &[(&str, &str)] = &[(
     "docs/SURVEY.html",
-    "other crates' versions / download counts — not this manifest",
+    "other crates' versions, toolchains and download counts — not this manifest",
 )];
 
 // Toolchain strings that are not this crate's MSRV.
-const TOOLCHAIN_EXCEPTIONS: &[(&str, &str)] =
-    &[("1.85", "edition-2024 floor, not this crate's MSRV")];
+const TOOLCHAIN_EXCEPTIONS: &[(&str, &str)] = &[
+    ("1.85", "edition-2024 floor, not this crate's MSRV"),
+    (
+        "1.92",
+        "gtk-rs 0.22's floor, which binds the unpublished `tests-gnome` crate and \
+             nothing a consumer builds",
+    ),
+];
 
 // A dependency version stated in prose that is not the one the manifest requires.
 const VERSION_EXCEPTIONS: &[(&str, &str, &str)] = &[(
@@ -50,19 +59,64 @@ const VERSION_EXCEPTIONS: &[(&str, &str, &str)] = &[(
 //
 // This is the claim that broke in four consecutive audit rounds: `unsafe` moved, or a new
 // call site appeared, and the sentence stayed. The paths are the *only* hand-written part;
-// which files actually contain `unsafe` is read off the tree, in both directions — an
-// `unsafe` outside them fails, and an entry that no longer contains any fails too, because
-// a permission nobody uses is a claim that has quietly become false.
+// which files contain `unsafe` is read off the tree, in both directions: an `unsafe`
+// outside them fails, and an entry that no longer contains any fails too, because an unused
+// permission is a claim that has become false without anything failing.
 const UNSAFE_CLAIM: &str = "`unsafe` is confined to the code that calls the OS directly.";
 
-// Paths the claim above allows `unsafe` in, with the reason the claim gives.
-const UNSAFE_ALLOWED: &[(&str, &str)] = &[
-    ("src/sys/win/", "the Windows backend: the OS APIs are C"),
-    ("src/sys/mac/", "the macOS backend: the OS APIs are C"),
+// Paths the claim above allows `unsafe` in, with the reason, and the words of the README's
+// list that name each one, so a README that stops naming a place, or a row added without a
+// README line, fails rather than leaving the list and the table to drift.
+const UNSAFE_ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "src/sys/win/",
+        "the Windows backend: the OS APIs are C",
+        "Windows and macOS backends",
+    ),
+    (
+        "src/sys/mac/",
+        "the macOS backend: the OS APIs are C",
+        "Windows and macOS backends",
+    ),
+    (
+        "src/sys/ios.rs",
+        "the iOS backend: `CFNetworkCopySystemProxySettings` is C and hands back an owned CF pointer",
+        "the iOS backend",
+    ),
+    (
+        "src/sys/cf_dict.rs",
+        "the Core Foundation dictionary conversion macOS and iOS share: keys and values arrive \
+         as raw CF pointers",
+        "the Core Foundation conversion",
+    ),
+    (
+        "src/sys/android.rs",
+        "the Android backend's JNI entry: the `JavaVM` and `Context` arrive as raw pointers",
+        "the Android backend's JNI entry",
+    ),
     (
         "src/pac/winhttp.rs",
         "the WinHTTP PAC engine behind `pac-windows-native`, which is the same C API \
          surface reached from the PAC side",
+        "the WinHTTP and CFNetwork PAC engines",
+    ),
+    (
+        "src/pac/cfnetwork.rs",
+        "the CFNetwork PAC engine behind `pac-macos-native`, the macOS counterpart of the \
+         WinHTTP one",
+        "the WinHTTP and CFNetwork PAC engines",
+    ),
+    (
+        "src/pac/subprocess.rs",
+        "the worker's memory limit behind `pac-subprocess`: a Job Object on Windows and \
+         `setrlimit` between `fork` and `exec` on Linux",
+        "`pac-subprocess` puts on its worker",
+    ),
+    (
+        "src/sys/linux/gio_dl.rs",
+        "the GLib table behind `linux-gnome`: GLib is opened at run time and every call \
+         goes through a C function pointer",
+        "the table through which `linux-gnome` calls GLib",
     ),
 ];
 
@@ -115,8 +169,8 @@ fn quoted(line: &str) -> Option<&str> {
     Some(&line[start..end])
 }
 
-// Parse the manifest far enough to know what it declares. Not a TOML implementation —
-// it understands exactly the table shapes this manifest uses, and
+// Parse the manifest far enough to know what it declares. Not a TOML implementation; it
+// understands the table shapes this manifest uses, and
 // [`the_parser_reads_the_shapes_this_manifest_uses`] fails if that stops being true.
 fn parse_manifest() -> Manifest {
     let text = read("Cargo.toml");
@@ -124,7 +178,7 @@ fn parse_manifest() -> Manifest {
     let mut features = BTreeSet::new();
     let mut deps: BTreeMap<String, String> = BTreeMap::new();
 
-    // The table we are inside, and — when the header named a single dependency — that
+    // The table we are inside, and, when the header named a single dependency, that
     // dependency's name, so its `version = "…"` line can be attributed to it.
     let mut in_features = false;
     let mut in_deps = false;
@@ -141,7 +195,7 @@ fn parse_manifest() -> Manifest {
             in_deps = tail == "dependencies" || tail == "dev-dependencies";
             single_dep = None;
             if !in_deps && !in_features {
-                // `[dependencies.boa_engine]` — the last component is the crate name and
+                // `[dependencies.tokio]`: the last component is the crate name and
                 // the one before it says which table it belongs to.
                 let mut parts = header.rsplitn(2, '.');
                 let name = parts.next().unwrap_or_default();
@@ -204,7 +258,7 @@ fn parse_manifest() -> Manifest {
     }
 }
 
-// The toolchains the `msrv` CI job actually builds.
+// The toolchains the `msrv` CI job builds.
 //
 // `- toolchain: "1.88"` is the matrix row shape; the other `toolchain` lines in the
 // workflow are the `toolchain: stable` input under a `uses:` and the
@@ -223,20 +277,20 @@ fn ci_toolchains() -> BTreeSet<String> {
 
 // Files this gate reads: the Rust tree, the prose files, and every non-exempt doc page.
 //
-// `examples/` is in the walk because it is in `Cargo.toml`'s `include` — a version number
-// restated in an example travels to the consumer exactly as one restated in `src/` does,
-// and [`doc_pages_under`] below already names it as part of the tree that travels.
+// `examples/` is in the walk because it is in `Cargo.toml`'s `include`; a version number
+// restated in an example travels to the consumer as one restated in `src/` does, and
+// [`doc_pages_under`] below already names it as part of the tree that travels.
 //
 // `tests/` is in the walk for the opposite reason, and is where this gate and
-// `claim_counts` deliberately differ: that gate dropped `tests/` because its subject is a
-// numeral a consumer can read off the shipped surface, and test prose ships to nobody.
-// This gate's subject is a *restatement* — two copies of one fact drifting apart — which
-// costs the same upkeep whether or not the second copy is published.
+// `claim_counts` differ: that gate dropped `tests/` because its subject is a numeral a
+// consumer can read off the shipped surface, and test prose is not shipped. This gate's
+// subject is a *restatement*, two copies of one fact drifting apart, which costs the same
+// upkeep whether or not the second copy is published.
 fn gated_files() -> Vec<String> {
     let root = manifest_dir();
     let mut files: Vec<String> = PROSE_FILES.iter().map(|f| (*f).to_string()).collect();
 
-    for dir in ["src", "tests", "examples"] {
+    for dir in ["src", "tests", "tests-gnome", "examples", "bindings"] {
         let mut pending = vec![root.join(dir)];
         while let Some(current) = pending.pop() {
             for entry in fs::read_dir(&current).expect("a source directory is readable") {
@@ -260,6 +314,21 @@ fn gated_files() -> Vec<String> {
     files
 }
 
+// [`gated_files`] with the [`EXEMPT_DOCS`] pages put back, for the checks an exemption does
+// not cover: a feature name is this crate's whatever page states it.
+fn gated_files_and_exempt_pages() -> Vec<String> {
+    let mut files = gated_files();
+    let pages = doc_pages();
+    files.extend(
+        EXEMPT_DOCS
+            .iter()
+            .map(|(page, _)| (*page).to_owned())
+            .filter(|page| pages.contains(page)),
+    );
+    files.sort();
+    files
+}
+
 fn doc_pages() -> Vec<String> {
     doc_pages_under(&manifest_dir())
 }
@@ -268,7 +337,7 @@ fn doc_pages() -> Vec<String> {
 //
 // An absent `docs/` is a tree this gate supports rather than an error. This gate travels
 // with the crate, so `cargo test` has to pass in a checkout that carries the crate and the
-// gates that check it and no prose pages at all — that is where a copy which took too much
+// gates that check it and no prose pages at all; that is where a copy which took too much
 // or too little gets caught, and a gate that panicked on the absence would make the check
 // it exists for impossible to run there.
 //
@@ -301,9 +370,9 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
-// Every `1.<80–99>` token on the line — the shape of a Rust toolchain this crate could
-// plausibly require. A narrower net than "any version", and deliberately so: it must not
-// match `0.21`, `2.5` or an IPv4 literal.
+// Every `1.<80–99>` token on the line, the shape of a Rust toolchain this crate could
+// plausibly require. A narrower net than "any version": it must not match `0.21`, `2.5` or
+// an IPv4 literal.
 fn toolchain_versions(line: &str) -> Vec<String> {
     let bytes = line.as_bytes();
     let mut found = Vec::new();
@@ -329,7 +398,7 @@ fn toolchain_versions(line: &str) -> Vec<String> {
 }
 
 // Every feature name the line names *as a feature*: `feature = "x"`, `--features a,b`,
-// and `required-features = ["a"]`. Backticked prose is out — `` `pac` `` has no shape
+// and `required-features = ["a"]`. Backticked prose is out: `` `pac` `` has no shape
 // that distinguishes a feature from anything else, so a stale name there is invisible to
 // any gate. What is checked instead is that every declared feature is documented; see
 // [`every_feature_is_documented`].
@@ -385,10 +454,10 @@ fn quoted_or_bare(item: &str) -> Option<&str> {
 
 // Whether a captured string is shaped like a Cargo feature name at all.
 //
-// `#[cfg(feature = "...")]` appears in prose as a *placeholder* — a sentence about the
+// `#[cfg(feature = "...")]` appears in prose as a *placeholder*: a sentence about the
 // shape of a gate rather than about any one feature. Cargo feature names are lowercase
-// ASCII with hyphens, so an ellipsis, a `{}` or a metavariable simply is not one, and
-// demanding that it exist would make the gate wrong rather than strict.
+// ASCII with hyphens, so an ellipsis, a `{}` or a metavariable is not one, and demanding
+// that it exist would make the gate wrong rather than strict.
 fn is_feature_shaped(name: &str) -> bool {
     !name.is_empty()
         && name.starts_with(|c: char| c.is_ascii_lowercase())
@@ -400,7 +469,7 @@ fn is_feature_shaped(name: &str) -> bool {
 // Every `` `name` version `` pair on the line where `name` is a manifest dependency.
 //
 // Backticks are required. Without them the scan matches prose about the *system* library
-// a crate binds — "GLib 2.72" is the GLib on the machine the backend was verified on, not
+// a crate binds: "GLib 2.72" is the GLib on the machine the backend was verified on, not
 // the `glib` crate this manifest depends on, and conflating the two would make the gate
 // wrong rather than strict.
 fn dependency_versions(line: &str, deps: &BTreeMap<String, String>) -> Vec<(String, String)> {
@@ -463,7 +532,7 @@ fn uses_unsafe(line: &str) -> bool {
         let after = at + "unsafe".len();
         let before_ok = at == 0 || !is_word_byte(bytes[at - 1]);
         let after_ok = after >= bytes.len() || !is_word_byte(bytes[after]);
-        // A backticked `unsafe` inside a non-comment line is still prose — it happens in
+        // A backticked `unsafe` inside a non-comment line is still prose; it happens in
         // `expect` strings and attribute reasons.
         let quoted = at > 0 && bytes[at - 1] == b'`';
         if before_ok && after_ok && !quoted {
@@ -474,7 +543,7 @@ fn uses_unsafe(line: &str) -> bool {
     false
 }
 
-// Every file under `src/` that actually uses the `unsafe` keyword.
+// Every file under `src/` that uses the `unsafe` keyword.
 fn files_using_unsafe() -> Vec<String> {
     let root = manifest_dir();
     let mut found: Vec<String> = gated_files()
@@ -542,7 +611,7 @@ fn every_rust_version_agrees_with_the_manifest_and_ci() {
     );
 }
 
-// The declared floor has to be one CI actually builds, or the declaration is a guess.
+// The declared floor has to be one CI builds, or the declaration is a guess.
 #[test]
 fn the_declared_floor_is_one_ci_builds() {
     let manifest = parse_manifest();
@@ -559,7 +628,7 @@ fn the_declared_floor_is_one_ci_builds() {
 // exists.
 //
 // The last of those is the check [`every_version_exception_justifies_itself`] calls the
-// one that decays silently, and it was written there and not here. The two tables excuse
+// one that decays silently. The two tables excuse
 // the same shape of thing and rot the same way, so the discipline belongs to both.
 #[test]
 fn every_toolchain_exception_justifies_itself() {
@@ -594,7 +663,7 @@ fn every_feature_named_as_a_feature_exists() {
     let root = manifest_dir();
     let mut unknown = Vec::new();
 
-    for file in gated_files() {
+    for file in gated_files_and_exempt_pages() {
         // The manifest is where features are *defined*; reading it here would only
         // confirm that it agrees with itself, and its dependency tables carry
         // `features = [...]` lists belonging to other crates.
@@ -621,8 +690,9 @@ fn every_feature_named_as_a_feature_exists() {
 
 // Every feature is described where a consumer looks for it.
 //
-// The other direction of the check above: a feature that exists but appears in
-// neither the crate's feature table nor the README is one nobody can find.
+// The other direction of the check above: a feature that exists but is missing from
+// either the crate's feature table or the README's is one a reader of that page cannot
+// find, so both rows are required.
 #[test]
 fn every_feature_is_documented() {
     let manifest = parse_manifest();
@@ -633,16 +703,23 @@ fn every_feature_is_documented() {
         .features
         .iter()
         .filter(|name| *name != "default")
+        // A table row, not a mention: `lib.rs`'s introduction names several features in
+        // passing, and a match there would outlive the row it stands in for.
         .filter(|name| {
-            let quoted = format!("`{name}`");
-            !lib.contains(&quoted) || !readme.contains(&quoted)
+            let in_lib = lib
+                .lines()
+                .any(|line| line.starts_with(&format!("//! | `{name}` |")));
+            let in_readme = readme
+                .lines()
+                .any(|line| line.starts_with(&format!("| `{name}` |")));
+            !in_lib || !in_readme
         })
         .collect();
 
     assert!(
         undocumented.is_empty(),
-        "features declared but absent from `src/lib.rs`'s feature table or from \
-         `README.md`: {undocumented:?}"
+        "features declared with no row in `src/lib.rs`'s feature table or in \
+         `README.md`'s: {undocumented:?}"
     );
 }
 
@@ -687,7 +764,7 @@ fn every_dependency_version_in_prose_matches_the_manifest() {
 }
 
 // Every version exception names a real dependency, says why, is still not what the
-// manifest requires — and is still excusing a line that exists.
+// manifest requires, and is still excusing a line that exists.
 //
 // The last of those is the one that decays silently: a row whose prose was rewritten or
 // deleted goes on passing the other three checks forever, and reads as coverage.
@@ -749,17 +826,17 @@ fn a_version_written_in_html_is_read_like_one_written_in_markdown() {
 
 // Every exemption names a page that exists, says why, and is still doing work.
 //
-// A page nobody has decided about needs no row: [`gated_files`] subtracts
-// [`EXEMPT_DOCS`] from the directory listing, so a new page is gated by default. That
-// leaves the exemptions themselves to check, and asserting the *other* direction —
-// that a non-exempt page is gated — asserts only what `gated_files` makes true by
-// construction. What matters is whether each exemption is still load-bearing: one for
-// a page that would now pass anyway goes on excusing whatever is added there later.
+// A page with no exemption decision needs no row: [`gated_files`] subtracts [`EXEMPT_DOCS`]
+// from the directory listing, so a new page is gated by default. That leaves the exemptions
+// themselves to check, and asserting the *other* direction (that a non-exempt page is
+// gated) asserts only what `gated_files` makes true by construction. Each exemption must
+// still exclude a page that would fail the gate: one for a page that would now pass anyway
+// goes on excusing whatever is added there later.
 #[test]
 fn every_exemption_names_a_page_and_still_earns_it() {
     let pages = doc_pages();
     if pages.is_empty() {
-        // No pages — a checkout with no `docs/` at all. A `docs/` that is present and
+        // No pages: a checkout with no `docs/` at all. A `docs/` that is present and
         // scans to nothing lands here too; that shape is not silently tolerated, it is
         // what `the_gate_reaches_the_whole_tree_that_travels` fails on. Either way every
         // row names a page that is not here, so there is nothing to hold to account. Do
@@ -787,11 +864,6 @@ fn every_exemption_names_a_page_and_still_earns_it() {
             .into_iter()
             .any(|m| !authority.contains(&m.value));
         let text = read(page);
-        let stale_feature = text.lines().any(|line| {
-            feature_names(line)
-                .iter()
-                .any(|name| is_feature_shaped(name) && !manifest.features.contains(name))
-        });
         let stale_version = text.lines().any(|line| {
             // `backticked` for the same reason the gate itself uses it: an exempt page is
             // usually HTML, and a version written `<code>0.6</code>` is invisible without
@@ -802,7 +874,7 @@ fn every_exemption_names_a_page_and_still_earns_it() {
                 .any(|(name, stated)| !describes(&manifest.deps[&name], &stated))
         });
         assert!(
-            stale_toolchain || stale_feature || stale_version,
+            stale_toolchain || stale_version,
             "{page} is exempt but would pass the gate as it stands — delete the row \
              rather than leaving an exemption that only covers what gets added later"
         );
@@ -832,7 +904,7 @@ fn a_tree_without_docs_yields_no_pages_rather_than_panicking() {
 // The install line is the one line of the README a reader runs before reading anything
 // else, and it restates a name the manifest owns. A rename that reaches `Cargo.toml` and
 // not the README leaves a command that fetches the wrong crate or none, and it reads
-// correctly to whoever made it — the old name is still the name they have in mind.
+// correctly to whoever made it; the old name is still the name they have in mind.
 #[test]
 fn the_readme_installs_the_crate_the_manifest_names() {
     let manifest = read("Cargo.toml");
@@ -850,9 +922,8 @@ fn the_readme_installs_the_crate_the_manifest_names() {
         .map(|(_, rest)| rest.split_whitespace().next().unwrap_or(""))
         .collect();
 
-    // Every one of them, not merely one: the README installs the crate twice — plainly, and
-    // again with the default features off — so a check satisfied by a single line passes
-    // while the two disagree.
+    // Every one of them, not merely one: a second install line (with the default features
+    // off, say) would otherwise pass a check satisfied by the first while the two disagree.
     assert!(
         !installs.is_empty(),
         "README.md gives a reader no `cargo add` line at all"
@@ -866,18 +937,18 @@ fn the_readme_installs_the_crate_the_manifest_names() {
     }
 }
 
-// What the gate covers must not quietly shrink. Everything asserted here is in every
-// checkout; the doc pages are the part that need not be, so their presence is tied to the
-// directory's rather than assumed either way.
+// A reduction in the gate's coverage must fail this test. Everything asserted here is in
+// every checkout; the doc pages are the part that need not be, so their presence is tied to
+// the directory's rather than assumed either way.
 //
-// What this cannot see is a `docs/` deleted by mistake — from inside, that is
+// What this cannot see is a `docs/` deleted by mistake: from inside, that is
 // indistinguishable from a checkout that never carried one, which is the price of
 // supporting the absence.
 #[test]
 fn the_gate_reaches_the_whole_tree_that_travels() {
     let files = gated_files();
     // `gated_files` seeds its list from `PROSE_FILES`, so asking whether the list contains
-    // them answers itself — and asking anyway would read as a check. What is worth asking
+    // them answers itself, and asking anyway would read as a check. What is worth asking
     // is whether each one is still a file this gate can read: a `PROSE_FILES` entry that
     // was renamed would otherwise surface as a panic somewhere downstream rather than as
     // the missing coverage it is.
@@ -888,7 +959,7 @@ fn the_gate_reaches_the_whole_tree_that_travels() {
              travels with the crate has to be readable here or it is not gated at all"
         );
     }
-    for dir in ["src/", "tests/", "examples/"] {
+    for dir in ["src/", "tests/", "examples/", "tests-gnome/", "bindings/"] {
         assert!(
             files.iter().any(|f| f.starts_with(dir)),
             "nothing under {dir} is gated, so the scan found no source tree to walk"
@@ -902,10 +973,10 @@ fn the_gate_reaches_the_whole_tree_that_travels() {
     );
 }
 
-// The manifest parser understands the shapes this manifest actually uses.
+// The manifest parser understands the shapes this manifest uses.
 //
-// A parser that silently stopped recognising a table would make every check above
-// pass by finding nothing, which is the way a gate dies quietly.
+// A parser that silently stopped recognising a table would make every check above pass by
+// finding nothing to check.
 #[test]
 fn the_parser_reads_the_shapes_this_manifest_uses() {
     let manifest = parse_manifest();
@@ -925,9 +996,9 @@ fn the_parser_reads_the_shapes_this_manifest_uses() {
     for (name, shape) in [
         ("url", "[dependencies] with a bare string"),
         ("futures-core", "[dependencies] with an inline table"),
-        ("boa_engine", "[dependencies.name]"),
+        ("tokio", "[dependencies.name]"),
         ("windows", "[target.'cfg(…)'.dependencies.name]"),
-        ("gio", "[target.'cfg(…)'.dependencies] inline table"),
+        ("libloading", "[target.'cfg(…)'.dependencies] inline table"),
         ("system-configuration", "[target.'cfg(…)'.dependencies]"),
         ("futures-executor", "[dev-dependencies]"),
     ] {
@@ -939,13 +1010,13 @@ fn the_parser_reads_the_shapes_this_manifest_uses() {
 
     assert_eq!(
         ci_toolchains().len(),
-        2,
-        "the msrv job's matrix is no longer two rows — check that the parser still \
+        1,
+        "the msrv job's matrix is no longer one row — check that the parser still \
          reads it before trusting the toolchain check"
     );
 }
 
-// `unsafe` is where the README says it is — and nowhere the README does not.
+// `unsafe` is where the README says it is, and nowhere the README does not.
 //
 // Both directions matter. A new `unsafe` in the OS-independent core would make the
 // README's "contain none of their own" false; an allowance that has emptied out
@@ -965,7 +1036,7 @@ fn unsafe_lives_only_where_the_readme_says() {
         .filter(|file| {
             !UNSAFE_ALLOWED
                 .iter()
-                .any(|(allowed, _)| file.starts_with(allowed))
+                .any(|(allowed, _, _)| file.starts_with(allowed))
         })
         .collect();
     assert!(
@@ -973,7 +1044,15 @@ fn unsafe_lives_only_where_the_readme_says() {
         "`unsafe` outside the places the README allows: {stray:?}"
     );
 
-    for (allowed, reason) in UNSAFE_ALLOWED {
+    // The README's list, with its line breaks folded, as the words to look the rows up in.
+    let readme = read("README.md");
+    let readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (allowed, reason, named) in UNSAFE_ALLOWED {
+        assert!(
+            readme.contains(named),
+            "the README's list no longer names {allowed} ({named:?}) — say where `unsafe` \
+             is, or drop the row with the code"
+        );
         assert!(
             reason.len() > 30,
             "the allowance for {allowed} has to say why the OS forces it"
@@ -984,4 +1063,133 @@ fn unsafe_lives_only_where_the_readme_says() {
              claim rather than leaving the reader a wider one than the code needs"
         );
     }
+}
+
+// The other way round from `every_feature_is_documented`: a row in either feature table
+// that names a feature the manifest no longer declares documents something that cannot be
+// enabled.
+#[test]
+fn every_feature_table_row_names_a_declared_feature() {
+    let manifest = parse_manifest();
+    let mut stale = Vec::new();
+    let mut rows = 0;
+    for (file, margin) in [("src/lib.rs", "//! "), ("README.md", "")] {
+        let mut in_table = false;
+        for line in read(file).lines() {
+            let Some(cell) = line.strip_prefix(margin) else {
+                in_table = false;
+                continue;
+            };
+            if cell.starts_with("| Feature | Default |") {
+                in_table = true;
+                continue;
+            }
+            if !in_table || !cell.starts_with('|') {
+                in_table = false;
+                continue;
+            }
+            let Some(name) = cell
+                .strip_prefix("| `")
+                .and_then(|rest| rest.split('`').next())
+            else {
+                continue;
+            };
+            rows += 1;
+            if !manifest.features.contains(name) {
+                stale.push(format!("{file}: `{name}`"));
+            }
+        }
+    }
+    // Both tables were found and read, or the check above passes on nothing.
+    assert!(
+        rows >= 2 * (manifest.features.len() - 1),
+        "read only {rows} feature rows"
+    );
+    assert!(
+        stale.is_empty(),
+        "feature rows for undeclared features: {stale:?}"
+    );
+}
+
+// The two readers the gates above rest on, against planted lines: each shape is read, and
+// an empty answer can only mean the line names nothing.
+#[test]
+fn the_feature_and_unsafe_readers_read_planted_lines() {
+    assert_eq!(
+        feature_names(r#"#[cfg(feature = "pac-native")]"#),
+        ["pac-native"]
+    );
+    assert_eq!(
+        feature_names("cargo test --features resolve,tokio"),
+        ["resolve", "tokio"]
+    );
+    assert_eq!(
+        feature_names(r#"required-features = ["pac-quickjs", "pac"]"#),
+        ["pac-quickjs", "pac"]
+    );
+    assert!(feature_names("no feature named here").is_empty());
+
+    assert!(uses_unsafe("    let p = unsafe { f() };"));
+    assert!(uses_unsafe("unsafe impl Send for X {}"));
+    assert!(!uses_unsafe("// unsafe in a comment"));
+    assert!(!uses_unsafe("#![deny(unsafe_code)]"));
+    assert!(!uses_unsafe(r#"    .expect("the `unsafe` block above")"#));
+}
+
+// `ci.yml`'s dispatch input lists the jobs it can run alone, and each job carries the guard
+// that makes the choice mean something. A job added without both runs on every one-job
+// dispatch, or cannot be chosen at all; a stale option chooses nothing.
+#[test]
+fn every_ci_job_is_a_dispatch_option_and_carries_its_guard() {
+    let ci = read(".github/workflows/ci.yml");
+    let lines: Vec<&str> = ci.lines().collect();
+
+    let options_at = lines
+        .iter()
+        .position(|line| line.trim() == "options:")
+        .expect("the `jobs` input lists its options");
+    let options: BTreeSet<&str> = lines[options_at + 1..]
+        .iter()
+        .map_while(|line| line.trim().strip_prefix("- "))
+        .filter(|option| *option != "all")
+        .collect();
+
+    let jobs_at = lines
+        .iter()
+        .position(|line| *line == "jobs:")
+        .expect("ci.yml has a jobs table");
+    let mut jobs = BTreeSet::new();
+    let mut unguarded = Vec::new();
+    for (index, line) in lines.iter().enumerate().skip(jobs_at + 1) {
+        let Some(id) = line
+            .strip_prefix("  ")
+            .and_then(|rest| rest.strip_suffix(':'))
+            .filter(|id| !id.starts_with(' ') && !id.starts_with('#'))
+        else {
+            continue;
+        };
+        jobs.insert(id);
+        let guard = format!("inputs.jobs == '{id}'");
+        let guarded = lines[index + 1..]
+            .iter()
+            .take_while(|next| next.starts_with("    ") || next.trim().is_empty())
+            .any(|next| next.trim_start().starts_with("if:") && next.contains(&guard));
+        if !guarded {
+            unguarded.push(id);
+        }
+    }
+
+    assert!(
+        jobs.len() >= 10,
+        "read only {} jobs from ci.yml",
+        jobs.len()
+    );
+    assert_eq!(
+        options, jobs,
+        "the dispatch options and the job ids disagree"
+    );
+    assert!(
+        unguarded.is_empty(),
+        "jobs with no dispatch guard: {unguarded:?}"
+    );
 }

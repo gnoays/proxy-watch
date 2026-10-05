@@ -1,0 +1,383 @@
+name: Bindings release
+
+# Builds the Node, Python and C bindings for every target they ship on, checks each
+# artifact on a machine that can load it, and (for a tag `bindings-vX.Y.Z` pushed to the
+# public repository) publishes them: the npm packages and the wheels through Trusted
+# Publishing, the C archives on a GitHub Release. A manual dispatch builds and checks
+# everything and publishes nothing.
+#
+# `cargo xtask package` does the building and packing, so a runner only installs tools
+# and calls it. Linux artifacts are linked by `cargo zigbuild` against glibc 2.17 (and
+# musl), so one build loads on any distribution as old as manylinux2014.
+#
+# A tag runs the jobs in this order: `verify` refuses a tag that is not on main, whose CI
+# did not pass, or whose version the manifests do not all say; `draft` opens a draft
+# release; each build job uploads its artifacts to the draft; the publish jobs take them
+# from there; `finish` makes the release public. A build job never holds an OIDC token,
+# and a publish job builds nothing.
+#
+# One-time setup, outside this file:
+# - npm: each of the nine packages (`proxy-watch` and `proxy-watch-<platform>`) has a
+#   Trusted Publisher naming this repository, workflow `bindings-release.yml` and
+#   environment `npm`. npm configures one only on a package that exists, so the first
+#   version of each is published by hand.
+# - PyPI: a (pending) Trusted Publisher for `proxy-watch` naming this repository, this
+#   workflow and environment `pypi`.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "bindings-v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_ABOUT_VERSION: 0.9.2
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+  ZIGLANG_VERSION: 0.16.0
+  MATURIN_VERSION: 1.15.0
+  NPM_VERSION: 11.21.0
+  UV_VERSION: 0.12.22
+  # Rust's own floor for aarch64-apple-darwin; the x86-64 build takes the same.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  # --- verify -------------------------------------------------------------------
+  verify:
+    name: versions agree
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # `gh run list`
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # `merge-base` needs main's history
+      - name: Every manifest names one version, and the loader checks for it
+        # The npm loader that napi-rs generates compares each platform package's version
+        # with its own, so `index.js` is regenerated whenever the version moves.
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version bindings/node/package.json)
+          fail=0
+          check() { if [ "$2" != "$version" ]; then echo "::error::$1 says $2, package.json says $version"; fail=1; fi; }
+          for manifest in bindings/node/npm/*/package.json; do
+            check "$manifest" "$(jq -r .version "$manifest")"
+          done
+          for dep in $(jq -r '.optionalDependencies | to_entries[] | .value' bindings/node/package.json); do
+            check "optionalDependencies" "$dep"
+          done
+          check bindings/python/pyproject.toml "$(sed -n 's/^version = "\(.*\)"$/\1/p' bindings/python/pyproject.toml)"
+          for crate in node python c; do
+            check "bindings/$crate/Cargo.toml" "$(sed -n 's/^version = "\(.*\)"$/\1/p' "bindings/$crate/Cargo.toml" | head -1)"
+          done
+          if ! grep -q "!== '$version'" bindings/node/index.js; then
+            echo "::error::bindings/node/index.js does not check for $version; regenerate it with napi build --platform"
+            fail=1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "bindings-v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag is $GITHUB_REF_NAME but the manifests say $version"
+            fail=1
+          fi
+          exit "$fail"
+      - name: The tag is on main, and CI passed there
+        # As `release.yml` checks it: a push run, or a dispatch that ran every job.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+          runs=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --status success \
+            --json event,displayTitle \
+            --jq '[.[] | select(.event == "push" or .displayTitle == "CI (all, all)")] | length')
+          if [ "$runs" -lt 1 ]; then
+            echo "::error::no successful CI run for $GITHUB_SHA"
+            exit 1
+          fi
+
+  draft:
+    name: draft release
+    needs: verify
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: gh release create --draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Node, Python and C bindings $GITHUB_REF_NAME. The C archives below each carry the header, static and shared libraries, and their license notices."
+
+  # --- build --------------------------------------------------------------------
+  linux:
+    name: build (linux, android)
+    needs: [verify, draft]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the draft release, on a tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,aarch64-linux-android,x86_64-linux-android
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install the packaging tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install "maturin==$MATURIN_VERSION" "ziglang==$ZIGLANG_VERSION" "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          # API 21 is the floor Rust's Android targets build for. `ANDROID_NDK_LATEST_HOME` is
+          # the runner's own variable: the shell sees it, the `env` context does not.
+          ndk="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/aarch64-linux-android21-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ndk/x86_64-linux-android21-clang"
+          cargo xtask package node root dist
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            cargo xtask package node "$target" dist
+            cargo xtask package python "$target" dist
+          done
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-linux-android x86_64-linux-android; do
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+      - name: Every artifact carries its licenses
+        run: python3 .github/scripts/check_bindings_artifacts.py dist
+
+      - name: Node, from the packed tarballs
+        run: |
+          set -euo pipefail
+          cp bindings/node/npm/linux-x64-gnu/proxy-watch.linux-x64-gnu.node bindings/node/proxy-watch.node
+          (cd bindings/node && node --test test/*.test.mjs)
+          mkdir "$RUNNER_TEMP/e2e" && cd "$RUNNER_TEMP/e2e" && npm init -y > /dev/null
+          npm install --omit=optional "$GITHUB_WORKSPACE"/dist/proxy-watch-0*.tgz "$GITHUB_WORKSPACE"/dist/proxy-watch-linux-x64-gnu-*.tgz
+          node -e "const s = require('proxy-watch').readSync({ env: {} }); console.log(s.route('https://a.example/', { pac: 'auto' }))"
+      - name: Python, from the wheel
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install dist/proxy_watch-*-manylinux*_x86_64.whl
+          "$RUNNER_TEMP/py/bin/python" -m unittest discover -s bindings/python/tests -v
+      - name: C, from the archive
+        run: |
+          set -euo pipefail
+          tar -xzf dist/proxy-watch-c-*-x86_64-unknown-linux-gnu.tar.gz -C "$RUNNER_TEMP"
+          c=$(echo "$RUNNER_TEMP"/proxy-watch-c-*-x86_64-unknown-linux-gnu)
+          cc -I"$c/include" bindings/c/tests/smoke.c "$c/lib/libproxy_watch_c.a" $(cat "$c/lib/native-static-libs.txt") -o "$RUNNER_TEMP/smoke-static"
+          "$RUNNER_TEMP/smoke-static"
+          cc -I"$c/include" bindings/c/tests/smoke.c -L"$c/lib" -lproxy_watch_c -Wl,-rpath,"$c/lib" -lpthread -o "$RUNNER_TEMP/smoke-shared"
+          "$RUNNER_TEMP/smoke-shared"
+      - name: musl, in Alpine
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" node:22-alpine sh -c '
+            set -e; mkdir /e2e && cd /e2e && npm init -y > /dev/null
+            npm install --omit=optional /dist/proxy-watch-0*.tgz /dist/proxy-watch-linux-x64-musl-*.tgz
+            node -e "const s = require(\"proxy-watch\").readSync({ env: {} }); console.log(s.route(\"https://a.example/\", { pac: \"quickjs\" }))"'
+          docker run --rm -v "$PWD/dist:/dist:ro" python:3.12-alpine sh -c '
+            set -e; pip install /dist/proxy_watch-*-musllinux_1_2_x86_64.whl
+            python -c "import proxy_watch; print(proxy_watch.read(env={}).route(\"https://a.example/\", pac=\"quickjs\").kind)"'
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/bindings/c/tests:/tests:ro" alpine:3 sh -c '
+            set -e; apk add --no-cache build-base > /dev/null
+            tar -xzf /dist/proxy-watch-c-*-x86_64-unknown-linux-musl.tar.gz -C /tmp
+            c=$(echo /tmp/proxy-watch-c-*-x86_64-unknown-linux-musl)
+            cc -I"$c/include" /tests/smoke.c "$c/lib/libproxy_watch_c.a" $(cat "$c/lib/native-static-libs.txt") -o /tmp/smoke-static && /tmp/smoke-static
+            cc -I"$c/include" /tests/smoke.c -L"$c/lib" -lproxy_watch_c -Wl,-rpath,"$c/lib" -o /tmp/smoke-shared && /tmp/smoke-shared'
+      - name: Upload to the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  macos:
+    name: build (macos)
+    needs: [verify, draft]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: macos-latest
+    permissions:
+      contents: write # the draft release, on a tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install the packaging tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install "maturin==$MATURIN_VERSION"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo xtask package node "$target" dist
+            cargo xtask package python "$target" dist
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+      - name: Every artifact carries its licenses
+        run: python3 .github/scripts/check_bindings_artifacts.py dist
+      # The runner is arm64; the x86-64 artifacts are built and packed but not loaded.
+      - name: Node
+        run: |
+          cp bindings/node/npm/darwin-arm64/proxy-watch.darwin-arm64.node bindings/node/proxy-watch.node
+          cd bindings/node && node --test test/*.test.mjs
+      - name: Python
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install dist/proxy_watch-*_arm64.whl
+          "$RUNNER_TEMP/py/bin/python" -m unittest discover -s bindings/python/tests -v
+      - name: C
+        run: |
+          set -euo pipefail
+          tar -xzf dist/proxy-watch-c-*-aarch64-apple-darwin.tar.gz -C "$RUNNER_TEMP"
+          c=$(echo "$RUNNER_TEMP"/proxy-watch-c-*-aarch64-apple-darwin)
+          cc -I"$c/include" bindings/c/tests/smoke.c "$c/lib/libproxy_watch_c.a" $(cat "$c/lib/native-static-libs.txt") -o "$RUNNER_TEMP/smoke-static"
+          "$RUNNER_TEMP/smoke-static"
+          cc -I"$c/include" bindings/c/tests/smoke.c -L"$c/lib" -lproxy_watch_c -Wl,-rpath,"$c/lib" -o "$RUNNER_TEMP/smoke-shared"
+          "$RUNNER_TEMP/smoke-shared"
+      - name: Upload to the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  windows:
+    name: build (windows)
+    needs: [verify, draft]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: windows-latest
+    permissions:
+      contents: write # the draft release, on a tag
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install the packaging tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/Scripts/pip" install "maturin==$MATURIN_VERSION"
+          echo "$RUNNER_TEMP/tools/Scripts" >> "$GITHUB_PATH"
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            cargo xtask package node "$target" dist
+            cargo xtask package python "$target" dist
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+      - name: Every artifact carries its licenses
+        run: python .github/scripts/check_bindings_artifacts.py dist
+      # The runner is x64; the ARM64 artifacts are built and packed but not loaded.
+      - name: Node
+        run: |
+          cp bindings/node/npm/win32-x64-msvc/proxy-watch.win32-x64-msvc.node bindings/node/proxy-watch.node
+          cd bindings/node && node --test test/*.test.mjs
+      - name: Python
+        run: |
+          python -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/Scripts/pip" install dist/proxy_watch-*-win_amd64.whl
+          "$RUNNER_TEMP/py/Scripts/python" -m unittest discover -s bindings/python/tests -v
+      - name: C
+        run: |
+          set -euo pipefail
+          unzip -q dist/proxy-watch-c-*-x86_64-pc-windows-msvc.zip -d "$RUNNER_TEMP"
+          c=$(echo "$RUNNER_TEMP"/proxy-watch-c-*-x86_64-pc-windows-msvc)
+          clang -I"$c/include" bindings/c/tests/smoke.c "$c/lib/proxy_watch_c.lib" $(cat "$c/lib/native-static-libs.txt") -o "$RUNNER_TEMP/smoke-static.exe"
+          "$RUNNER_TEMP/smoke-static.exe"
+          clang -I"$c/include" bindings/c/tests/smoke.c "$c/lib/proxy_watch_c.dll.lib" -o "$RUNNER_TEMP/smoke.exe"
+          PATH="$c/lib:$PATH" "$RUNNER_TEMP/smoke.exe"
+      - name: Upload to the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  # --- publish ------------------------------------------------------------------
+  npm:
+    name: publish (npm)
+    needs: [linux, macos, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # read the draft release
+      id-token: write # npm Trusted Publishing
+    steps:
+      - name: Fetch the packed tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tgz' --dir dist
+      - name: npm publish
+        # Platform packages first: the root names them as optional dependencies, and an
+        # install of the root alone between the two steps would find none.
+        run: |
+          set -euo pipefail
+          npm install -g "npm@$NPM_VERSION"
+          for package in dist/proxy-watch-*-[0-9]*.tgz; do
+            npm publish "$package" --access public
+          done
+          npm publish dist/proxy-watch-[0-9]*.tgz --access public
+
+  pypi:
+    name: publish (PyPI)
+    needs: [linux, macos, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write # read the draft release
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Fetch the wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --dir dist
+      - name: uv publish
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/pip" install "uv==$UV_VERSION"
+          "$RUNNER_TEMP/uv/bin/uv" publish --trusted-publishing always dist/*.whl
+
+  finish:
+    name: publish the release
+    needs: [npm, pypi]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: gh release edit --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

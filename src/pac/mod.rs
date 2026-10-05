@@ -1,22 +1,37 @@
 //! PAC evaluation (`pac` feature, off by default): script → `Vec<ProxyStep>` like
 //! [`resolve`](crate::resolve()).
 //!
-//! No in-crate fetch — pass body to [`evaluate`]. Untrusted code: [`PacPolicy`] defaults
-//! block DNS, fake local IP, 5 s budget. `pac-boa` to run. Bypass lists do not apply.
+//! No in-crate fetch: pass body to [`evaluate`]. Untrusted code: [`PacPolicy`] defaults
+//! block DNS, fake local IP, 5 s budget. `pac-quickjs` to run. Bypass lists do not apply.
 
-#[cfg_attr(not(feature = "pac-boa"), allow(dead_code))]
+#[cfg_attr(not(pac_quickjs), allow(dead_code))]
 mod hostfn;
 mod policy;
 mod result;
-#[cfg_attr(not(feature = "pac-boa"), allow(dead_code))]
+#[cfg_attr(not(pac_quickjs), allow(dead_code))]
 mod time;
 
-#[cfg(feature = "pac-boa")]
-mod boa;
+#[cfg(any(pac_quickjs, feature = "pac-subprocess"))]
+mod budget;
+
+mod dispatch;
+
+#[cfg(pac_quickjs)]
+mod quickjs;
+
+#[cfg(feature = "pac-subprocess")]
+mod subprocess;
 
 // WinHTTP path: target+feature gated so the flag stays additive/portable.
 #[cfg(all(windows, feature = "pac-windows-native"))]
 mod winhttp;
+
+#[cfg(all(target_os = "android", feature = "pac-android-native"))]
+mod android;
+
+// CFNetwork path: gated like WinHTTP; the dictionary-to-step mapping also builds under `test`.
+#[cfg(any(pac_cfnetwork, test))]
+mod cfnetwork;
 
 use std::fmt;
 
@@ -26,17 +41,47 @@ use crate::error::Error;
 use crate::mode::ProxyMode;
 use crate::resolve::ProxyStep;
 
-pub use self::policy::{
-    DEFAULT_PAC_LOOP_LIMIT, DEFAULT_PAC_RECURSION_LIMIT, DEFAULT_PAC_STACK_SIZE_LIMIT,
-    DEFAULT_PAC_TIMEOUT, PacPolicy,
-};
+pub use self::dispatch::PacResolver;
+pub use self::policy::{DEFAULT_PAC_TIMEOUT, PacPolicy};
 pub use self::result::parse_find_proxy_result;
 
-#[cfg(feature = "pac-boa")]
-pub use self::boa::BoaEvaluator;
+#[cfg(pac_quickjs)]
+pub use self::quickjs::QuickJsEvaluator;
+
+/// Whether this build carries QuickJS, so that [`evaluate`] runs a script rather than
+/// answering [`Error::PacEngineUnavailable`]: `pac-quickjs` on a target other than Android
+/// and iOS. Lets a caller pick an engine before calling, without its own `cfg`.
+pub const QUICKJS_AVAILABLE: bool = cfg!(pac_quickjs);
+
+#[cfg(feature = "pac-subprocess")]
+pub use self::subprocess::SubprocessEvaluator;
+#[cfg(all(feature = "pac-subprocess", pac_quickjs))]
+pub use self::subprocess::serve_worker;
 
 #[cfg(all(windows, feature = "pac-windows-native"))]
-pub use self::winhttp::{DEFAULT_WINHTTP_PAC_TIMEOUT, WinHttpPacResolver, WinHttpPacSource};
+pub use self::winhttp::{
+    AutoProxyReset, DEFAULT_WINHTTP_PAC_TIMEOUT, WinHttpPacResolver, WinHttpPacSource,
+};
+
+#[cfg(all(target_os = "android", feature = "pac-android-native"))]
+pub use self::android::AndroidPacResolver;
+
+/// The native PAC resolver this target has: [`WinHttpPacResolver`] on Windows,
+/// `CfNetworkPacResolver` on macOS and iOS, `AndroidPacResolver` on Android, whichever
+/// the matching `pac-*-native` feature (or `pac-native`) compiled in.
+#[cfg(all(windows, feature = "pac-windows-native"))]
+pub type NativePacResolver = WinHttpPacResolver;
+/// The native PAC resolver this target has: `CfNetworkPacResolver`.
+#[cfg(pac_cfnetwork)]
+pub type NativePacResolver = CfNetworkPacResolver;
+/// The native PAC resolver this target has: `AndroidPacResolver`.
+#[cfg(all(target_os = "android", feature = "pac-android-native"))]
+pub type NativePacResolver = AndroidPacResolver;
+
+#[cfg(pac_cfnetwork)]
+pub use self::cfnetwork::{
+    CfNetworkPacEvaluator, CfNetworkPacResolver, DEFAULT_CFNETWORK_PAC_TIMEOUT,
+};
 
 /// PAC script body (newtype so "this is JS that will run" stays visible in signatures).
 #[derive(Clone, PartialEq, Eq)]
@@ -104,8 +149,9 @@ pub enum PacRequirement<'a> {
     Inline(&'a str),
     /// Fetch this URL and pass the body ([`ProxyMode::Pac`]).
     Fetch(&'a Url),
-    /// WPAD on; no DHCP 252 / DNS `wpad.` discovery (collision risk). Windows:
-    /// `pac-windows-native`. Else: inline or fetched script.
+    /// WPAD on; this crate runs no DHCP 252 / DNS `wpad.` discovery (collision risk).
+    /// Windows / macOS / iOS: the native resolver built `with_wpad(true)` hands it to the OS.
+    /// Else: inline or fetched script.
     Discover,
 }
 
@@ -153,8 +199,12 @@ pub fn requirement(mode: &ProxyMode) -> PacRequirement<'_> {
     }
 }
 
-// Replaceable JS engine: `pac-boa` ships [`BoaEvaluator`]; WinHTTP uses `WinHttpPacResolver`.
-/// macOS may wrap `CFNetworkCopyProxiesForAutoConfigurationScript`. [`PacPolicy`] on the impl.
+/// A replaceable engine that evaluates a PAC script for one URL.
+///
+/// `pac-quickjs` implements it in process, `pac-subprocess` in a worker process, and on
+/// macOS and iOS `pac-macos-native` / `pac-ios-native` over CFNetwork
+/// (`CfNetworkPacEvaluator`). Whether an implementation honours [`PacPolicy`] is stated on
+/// the implementation.
 pub trait PacEvaluator {
     /// Run `FindProxyForURL(url, host)` and parse the result.
     ///
@@ -162,14 +212,15 @@ pub trait PacEvaluator {
     ///
     /// # Errors
     ///
-    /// [`Error::PacEvaluation`], [`Error::PacTimeout`], [`Error::PacInvalidResult`], and
-    /// [`Error::Io`] for an OS resource the evaluator needs but cannot get — with a
-    /// [`PacPolicy::timeout`] set, `BoaEvaluator` spawns the thread it enforces the
-    /// budget on, and that spawn can fail.
+    /// [`Error::PacEvaluation`], [`Error::PacTimeout`], [`Error::PacSaturated`],
+    /// [`Error::PacInvalidResult`], and [`Error::Io`] for an OS resource the evaluator
+    /// needs but cannot get: with a [`PacPolicy::timeout`] set, `QuickJsEvaluator` spawns
+    /// the thread it enforces the budget on, and that spawn can fail.
     fn evaluate(&self, script: &PacScript, url: &Url, host: &str) -> Result<Vec<ProxyStep>, Error>;
 }
 
-/// Chromium `SanitizeUrl`: strip userinfo+fragment; path+query only for `https`/`wss`.
+/// Chromium `SanitizeUrl`: strip userinfo and fragment always, and path and query only for
+/// `https`/`wss`.
 /// Not a [`PacPolicy`] knob. Custom [`PacEvaluator`] impls should still sanitize.
 ///
 /// ```
@@ -186,13 +237,13 @@ pub trait PacEvaluator {
 pub fn sanitize_url(url: &Url) -> Url {
     let mut sanitized = url.clone();
     // Both setters refuse a URL `has_host()` calls hostless. A cannot-be-a-base URL reaches
-    // that refusal with no userinfo to lose — but a non-special scheme whose host was emptied
-    // is hostless *and* still holds `user:pass@`, because `set_host(Some(""))` accepts on
-    // `socks5:` what it rejects on `http:` with `EmptyHost`. Lend such a URL a host so the
-    // setters engage, then put the empty host back. All or nothing: a half-applied round trip
-    // would move the host instead of the credentials. The authority is what separates the two
-    // refusals — `Url::password` is not, because it panics on exactly these URLs
-    // (`trace::render::MaskedUrl` has the same note).
+    // that refusal with no userinfo to lose, but a non-special scheme whose host was
+    // emptied is hostless *and* still holds `user:pass@`, because `set_host(Some(""))`
+    // accepts on `socks5:` what it rejects on `http:` with `EmptyHost`. Lend such a URL a
+    // host so the setters engage, then put the empty host back. All or nothing: a
+    // half-applied round trip would move the host instead of the credentials. The authority
+    // is what separates the two refusals; `Url::password` is not, because it panics on
+    // these URLs (`trace::render::MaskedUrl` has the same note).
     let refused = sanitized.set_username("").is_err();
     let _ = sanitized.set_password(None);
     if refused && sanitized.has_authority() {
@@ -215,12 +266,12 @@ pub fn sanitize_url(url: &Url) -> Url {
 
 /// Evaluate `script` for `url` under `policy` (`sanitize_url` first).
 ///
-/// `pac-boa` is the only engine this reaches, whatever else is enabled — turning on
-/// `pac-windows-native` as well adds `WinHttpPacResolver` for the caller to drive, not a
-/// second engine for this function to choose between.
+/// This function uses `pac-quickjs`. Enabling `pac-windows-native` adds
+/// `WinHttpPacResolver`, which is separate from this function's engine. [`PacResolver`]
+/// routes configurations between that resolver and this function.
 ///
-/// A URL with no host (`data:`, `mailto:`) is still evaluated, with `host` empty —
-/// `resolve_with_pac` and `WinHttpPacResolver::resolve_config` answer Direct for those
+/// A URL with no host (`data:`, `mailto:`) is still evaluated, with `host` empty:
+/// `resolve_with_pac` and the native resolvers' `resolve_config` answer Direct for those
 /// without running anything. This is the engine door, not a routing entry point.
 ///
 /// # Errors
@@ -232,12 +283,12 @@ pub fn evaluate(
     policy: &PacPolicy,
 ) -> Result<Vec<ProxyStep>, Error> {
     // `host_str` keeps the brackets on an IPv6 literal, so the script sees `[::1]`. The two
-    // references disagree here — Gecko passes `nsIURI::GetAsciiHost`, whose IPv6 segment is
-    // bracketed, while Chromium passes `GURL::HostNoBrackets()` — so neither spelling can be
-    // called the right one. Following Gecko keeps the string the URL itself carries; the host
-    // functions accept both spellings (`unbracket_ipv6` in `dns_resolve` / `is_resolvable`,
-    // the colon test in `is_plain_host_name`), and `evaluate_with_host` is the way out for a
-    // caller who wants Chromium's.
+    // references disagree here: Gecko passes `nsIURI::GetAsciiHost`, whose IPv6 segment is
+    // bracketed, while Chromium passes `GURL::HostNoBrackets()`, so neither spelling can be
+    // called the right one. Following Gecko keeps the string the URL itself carries; the
+    // host functions accept both spellings (`unbracket_ipv6` in `dns_resolve` /
+    // `is_resolvable`, the colon test in `is_plain_host_name`), and `evaluate_with_host` is
+    // the way out for a caller who wants Chromium's.
     evaluate_with_host(script, url, url.host_str().unwrap_or_default(), policy)
 }
 
@@ -253,14 +304,13 @@ pub fn evaluate_with_host(
     policy: &PacPolicy,
 ) -> Result<Vec<ProxyStep>, Error> {
     let url = &sanitize_url(url);
-    // `pac-boa` is the only engine this function can reach, whatever else is enabled:
     // `pac-windows-native` exports [`WinHttpPacResolver`] for the caller to drive itself
-    // rather than entering a selection here. There is no engine ordering to describe.
-    #[cfg(feature = "pac-boa")]
+    // rather than entering here.
+    #[cfg(pac_quickjs)]
     {
-        BoaEvaluator::new(*policy).evaluate(script, url, host)
+        QuickJsEvaluator::new(*policy).evaluate(script, url, host)
     }
-    #[cfg(not(feature = "pac-boa"))]
+    #[cfg(not(pac_quickjs))]
     {
         let _ = (script, url, host, policy);
         Err(Error::PacEngineUnavailable)
@@ -274,12 +324,11 @@ mod tests {
     use super::*;
     use crate::BypassRules;
 
-    // The answer this type carries is the whole point of asking for it, and the arms with no
-    // field print as a bare word from a hand-written impl, so this test is the only thing
-    // comparing the word to the variant. `Discover` rendered as `NotNeeded` reads as its own
-    // opposite — "WPAD is on and the discovery cannot be run here" against
-    // "routing is already answered". Deciding whether a machine needs a PAC engine is read
-    // off exactly this line.
+    // Callers ask for this type to read its answer, and the arms with no field print as a
+    // bare word from a hand-written impl, so this test is the only thing comparing the word
+    // to the variant. `Discover` rendered as `NotNeeded` reads as its own opposite: "WPAD
+    // is on and the discovery cannot be run here" against "routing is already answered".
+    // Deciding whether a machine needs a PAC engine is read off this line.
     //
     // `PacScript` shares the digest rendering with `Inline`, so it is held here too. Its
     // `len` label is in `debug_masking`'s registry, which asks the rendering to *contain*
@@ -387,7 +436,7 @@ mod tests {
     // ...and the refusal above is not the only one. `set_host(Some(""))` is accepted on a
     // non-special scheme and rejected on a special one, so this is the one shape that reaches
     // the same refusal with credentials still attached. `Url::parse` cannot build it; a caller
-    // holding a `Url` can, and both engines hand `as_str()` straight to the script.
+    // holding a `Url` can, and every evaluator hands `as_str()` straight to the script.
     #[test]
     fn an_emptied_host_does_not_carry_the_credentials_through() {
         for (input, expected) in [
@@ -417,15 +466,15 @@ mod tests {
     }
 
     // The other half of the guard on the lend-a-host branch, and the half `mailto:` above
-    // cannot show. That one is refused twice over — no authority *and* cannot-be-a-base, so
+    // cannot show. That one is refused twice over: no authority *and* cannot-be-a-base, so
     // `set_host` refuses too and the round trip collapses on its own. A non-special scheme
     // with a rootless path is refused only once: `unix:/run/foo.socket` has no authority to
     // hold userinfo, but it *can* be a base, so every setter in the chain succeeds and the
     // URL comes back with an empty authority it never had.
     //
-    // This test is the only thing holding `has_authority()` in the guard. Without it,
-    // `unix:/run/foo.socket` comes back as `unix:///run/foo.socket`, and nothing else in the
-    // tree objects. Both engines hand `as_str()` to the script, so that is a
+    // No other test checks `has_authority()` in the guard. Without it,
+    // `unix:/run/foo.socket` comes back as `unix:///run/foo.socket`, and nothing else in
+    // the tree objects. Every evaluator hands `as_str()` to the script, so that is a
     // different string in `FindProxyForURL`'s first argument.
     #[test]
     fn a_path_only_url_is_not_lent_an_authority_it_never_had() {
@@ -441,7 +490,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "pac-boa")]
+    #[cfg(pac_quickjs)]
     #[test]
     fn the_script_is_handed_the_sanitized_url_end_to_end() {
         let script = PacScript::new(
@@ -461,7 +510,7 @@ mod tests {
     // URL, it runs the script with the host empty. Adopting the routing convention here
     // would change what a caller who reached the engine directly gets back, and no other
     // test looks at a URL without a host.
-    #[cfg(feature = "pac-boa")]
+    #[cfg(pac_quickjs)]
     #[test]
     fn a_hostless_url_reaches_the_script_with_an_empty_host() {
         let script = PacScript::new(
@@ -484,7 +533,7 @@ mod tests {
     // who wants Chromium's `HostNoBrackets()` can have it. Nothing inside this crate ever
     // passes a host other than the URL's own, so without this the override could stop
     // reaching the engine and no other test would notice.
-    #[cfg(feature = "pac-boa")]
+    #[cfg(pac_quickjs)]
     #[test]
     fn the_host_override_is_what_the_script_sees() {
         let script = PacScript::new(
@@ -555,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "pac-boa"))]
+    #[cfg(not(pac_quickjs))]
     fn without_an_engine_evaluation_reports_why() {
         let script = PacScript::new("function FindProxyForURL(u, h) { return 'DIRECT'; }");
         let url = Url::parse("http://example.com/").unwrap();

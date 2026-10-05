@@ -1,8 +1,8 @@
 name: mac tests
 
 # Dispatch only, one job. The macOS backend is the part of this crate a Windows
-# development machine can *type* check — `cargo check --target aarch64-apple-darwin
-# --all-targets` reaches `src/sys/mac/` and `tests/mac_watch.rs` alike — and can never
+# development machine can *type* check (`cargo check --target aarch64-apple-darwin
+# --all-targets` reaches `src/sys/mac/` and `tests/mac_watch.rs` alike) and can never
 # run. This exists for exactly that gap, and for nothing else CI does.
 #
 # The `CI` workflow answers the same question, but pressing it boots three `test` runners
@@ -11,8 +11,8 @@ name: mac tests
 # macOS runner rather than the whole board.
 #
 # All three steps, because no one of them asks what the others ask. They are `ci.yml`'s
-# three macOS runs — `--lib --bins`, a separate `--tests`, and `mac_configd_denied`'s
-# sandbox-exec block — carried rather than chosen, so the two files cannot drift into
+# three macOS runs (`--lib --bins`, a separate `--tests`, and `mac_configd_denied`'s
+# sandbox-exec block), carried rather than chosen, so the two files cannot drift into
 # measuring different things. Do not drop one to save a rebuild: `--lib` alone builds
 # neither `tests/mac_watch.rs` nor the configd failure path, so a change to either would
 # dispatch this, read the green, and have measured a target that was never built.
@@ -27,7 +27,7 @@ name: mac tests
 on:
   workflow_dispatch:
 
-# Every job only reads the repository. A job that has to write — a release, a comment —
+# Every job only reads the repository. A job that has to write (a release, a comment)
 # raises its own `permissions:` block, so the default stays at the floor and does not
 # depend on what the repository's settings page happens to say.
 permissions:
@@ -44,6 +44,10 @@ jobs:
   mac-tests:
     name: cargo test (macos)
     runs-on: macos-latest
+    # A bound on what one dispatch can bill. macOS minutes are the expensive ones, and
+    # a CFNetwork PAC call that ignores its deadline would otherwise hold the runner
+    # for the six-hour default. A cold build plus all three steps fits well inside it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,17 +58,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # The two flags are carried from `CI`'s "Run unit tests" step rather than chosen
-      # here, so the two cannot drift into measuring different things. Neither changes
-      # anything on macOS today — this repository's `#[ignore]` marks the tests that
-      # rewrite the machine's real registry, and those are Windows-only — and that is
-      # precisely why leaving them off would be a silent divergence rather than a saving.
+      # here, so the two cannot drift into measuring different things: `--include-ignored`
+      # runs the WPAD test in `src/pac/cfnetwork.rs` here as it does in `CI`.
       - name: Run unit tests
         run: cargo test --lib --bins --all-features -- --test-threads=1 --include-ignored
 
       # `tests/mac_watch.rs`, which is the only reason a round changing the macOS backend
       # can be confirmed at all: it drives a real `SCDynamicStore` and, where the runner
       # grants passwordless sudo, a real `networksetup` write with a restore. `--nocapture`
-      # is not decoration — `logs_which_scope_the_configuration_came_from` asserts nothing
+      # is not decoration: `logs_which_scope_the_configuration_came_from` asserts nothing
       # and exists to print which scopes a real machine populates, which is invisible
       # without it.
       - name: Run integration tests
@@ -82,7 +84,7 @@ jobs:
       # profile" means nothing without it, which is why this step is placed after rather
       # than before, and why one dispatch carries the whole experiment rather than half.
       #
-      # cargo and rustc stay outside the sandbox — building under it would make a failure
+      # cargo and rustc stay outside the sandbox: building under it would make a failure
       # ambiguous between "the deny did not take" and "the build broke". Hence `--no-run`,
       # then the binary alone. The rebuild is a cache hit off the previous step, which
       # built this same target.

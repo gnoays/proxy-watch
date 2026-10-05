@@ -1,7 +1,12 @@
 name: Audit
 
 # `cargo deny check` over the whole dependency graph: advisories, licenses, sources and
-# duplicate versions, with `deny.toml` at the repository root saying what is allowed.
+# duplicate versions, with `deny.toml` at the repository root saying what is allowed. The
+# graph is every workspace member's (the bindings ship `napi`, `pyo3` and the rest of
+# what the library does not), because a manifest that is also a package is a graph of one
+# root unless `--workspace` says otherwise. A second job renders the third-party license
+# notice each binding artifact ships, which fails on the same kind of change and on a
+# stable toolchain whose standard library sources moved.
 #
 # Separate from `CI` because its trigger is different in kind. An advisory lands on a
 # schedule of its own, with no commit to fire on, so the weekly run is the one that
@@ -10,16 +15,26 @@ name: Audit
 on:
   pull_request:
     paths:
-      - Cargo.toml
+      - '**/Cargo.toml'
       - Cargo.lock
       - deny.toml
+      - bindings/about.toml
+      - bindings/about.hbs
+      - xtask/src/std_notice.rs
+      - xtask/src/crt_notice.rs
+      - xtask/src/linked.rs
       - .github/workflows/audit.yml
   push:
     branches: [main]
     paths:
-      - Cargo.toml
+      - '**/Cargo.toml'
       - Cargo.lock
       - deny.toml
+      - bindings/about.toml
+      - bindings/about.hbs
+      - xtask/src/std_notice.rs
+      - xtask/src/crt_notice.rs
+      - xtask/src/linked.rs
       - .github/workflows/audit.yml
   schedule:
     # Monday 06:00 UTC. GitHub disables a schedule on a public repository after sixty
@@ -46,4 +61,24 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
-          arguments: --all-features
+          arguments: --all-features --workspace
+
+  # The notice each binding artifact ships, rendered for every binding and target from
+  # `bindings/about.toml`. Fails on a license outside its `accepted` list and on a clarified
+  # text (QuickJS's) that an update changed, so either is read before an artifact ships it.
+  third-party-licenses:
+    name: third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Each notice ends with the standard library's section for its target, read from that
+      # target's sysroot and the `rust-src` sources.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,aarch64-linux-android,x86_64-linux-android
+          components: rust-src
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about --version 0.9.2 --features cli
+      - name: cargo xtask third-party-licenses
+        run: cargo xtask third-party-licenses

@@ -2,7 +2,7 @@ name: Semver
 
 # `cargo semver-checks` against the version on crates.io: an API change the version
 # number in `Cargo.toml` does not license fails here, before it ships. The tool reads
-# the 0.x rule the way Cargo does — a minor bump may break, a patch bump may not.
+# the 0.x rule the way Cargo does: a minor bump may break, a patch bump may not.
 #
 # Runs on pushes to `main` as well as on pull requests because the public tree
 # receives most of its history as direct pushes.

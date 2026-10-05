@@ -16,22 +16,16 @@ use crate::sys;
 /// The default debounce window (200 ms).
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(200);
 
-// The shortest [`WatchOptions::poll_interval`] any backend will actually wait for.
+// The shortest [`WatchOptions::poll_interval`] any backend will wait for.
 pub(crate) const MIN_POLL_INTERVAL: Duration = DEFAULT_DEBOUNCE;
 
-// The longest [`WatchOptions::debounce`] any backend will actually wait for.
-//
-// Every backend opens its window as `Instant::now() + debounce`, and that addition
-// *panics* on overflow rather than saturating. `Instant` is an opaque monotonic counter
-// with no exposed maximum, so the only portable guard is to refuse windows large enough
-// to approach it. There is no portable number at that end to measure a cap against, so
-// the cap comes from the other end: a day is already far longer than any window that
-// coalesces usefully. For scale, `Duration::MAX` carries `u64::MAX` seconds — upwards of
-// 10^19 — against the 86_400 below.
+// Cap [`WatchOptions::debounce`] at a day because `Instant::now() + debounce` panics on
+// overflow, and a day already exceeds any useful coalescing window.
 pub(crate) const MAX_DEBOUNCE: Duration = Duration::from_secs(24 * 60 * 60);
 
-// Cap undelivered items at 1024; [`Shared::emit`] drops the oldest when full. Snapshots
-// fold into one another there, so what this bounds is the number of undelivered failures.
+// Cap undelivered items at 1024 each time [`Shared::emit`] trims, oldest first; a failure
+// arriving after the trim can hold one more until the next snapshot. Snapshots fold into
+// one another, so what this bounds is the number of undelivered failures.
 const MAX_QUEUED_CHANGES: usize = 1024;
 
 // Clamp a caller-supplied poll interval to [`MIN_POLL_INTERVAL`] so no backend can spin.
@@ -72,7 +66,7 @@ pub(crate) fn effective_debounce(requested: Duration) -> Duration {
     }
 }
 
-/// Tuning knobs for [`ProxyWatcher::with_options`] (`#[non_exhaustive]` — use
+/// Tuning knobs for [`ProxyWatcher::with_options`] (`#[non_exhaustive]`: use
 /// [`WatchOptions::new`] / `with_*`).
 ///
 /// ```
@@ -98,28 +92,30 @@ pub struct WatchOptions {
 
     /// Also read and watch per-machine group policy (default `true`; Windows only).
     ///
-    /// The one source no failure of which can fail a read. Whatever goes wrong here — an
-    /// HKLM key this process cannot read, a policy `AutoConfigURL` this crate refuses as
-    /// malformed — is reported as no policy, and [`ProxyConfig::fallbacks`] records that
-    /// something went wrong without saying what. That is affordable because a
-    /// [`ProxyConfigSource::GroupPolicy`] entry is never
-    /// [`effective`](ProxyConfig::effective) — see that variant for the measurement — so
+    /// No failure of this source can fail a read (the machine's WinHTTP default is the
+    /// other source with that property). Whatever goes wrong here (an HKLM key this process
+    /// cannot read, a policy `AutoConfigURL` this crate refuses as malformed) is reported
+    /// as no policy, and [`ProxyConfig::fallbacks`] records that something went wrong
+    /// without saying what. A [`ProxyConfigSource::GroupPolicy`] entry is never
+    /// [`effective`](ProxyConfig::effective) (see that variant for the measurement), so
     /// failing the whole read on its account would refuse a machine whose per-user store
-    /// answers perfectly well. A value stored under a type the key's own name does not
-    /// carry is not a failure at all: a `ProxyEnable` written as a `REG_SZ` rather than the
-    /// documented `REG_DWORD` reads here exactly like one that was never written, and the
-    /// policy is reported as absent.
+    /// answers well. A value stored under a type the key's own name does not carry is not a
+    /// failure at all: a `ProxyEnable` written as a `REG_SZ` rather than the documented
+    /// `REG_DWORD` reads like one that was never written, and the policy is reported as
+    /// absent.
     ///
-    /// Watching it is worth more than reading it. The key holds one value Windows *does*
-    /// act on — `ProxySettingsPerUser`, the only one `inetres.admx` defines there — and
-    /// switching it changes what `WinHttpGetIEProxyConfigForCurrentUser` returns, so a
-    /// change under this key can change the effective configuration even though nothing
-    /// under it is ever the effective configuration.
+    /// The key is watched because it holds one value Windows *does* act on
+    /// (`ProxySettingsPerUser`, the only one `inetres.admx` defines there) and switching it
+    /// changes what `WinHttpGetIEProxyConfigForCurrentUser` returns, so a change under this
+    /// key can change the effective configuration even though nothing under it is ever the
+    /// effective configuration.
     pub watch_group_policy: bool,
 
-    /// Timer re-read in addition to notifications; anything under 200 ms is raised to it,
-    /// and on macOS anything over an hour is lowered to an hour — the run loop wait this
-    /// becomes is bounded so that it is never literally infinite.
+    /// Timer re-read in addition to notifications. Anything under 200 ms is raised to
+    /// 200 ms. A long interval is shortened so that the wait it becomes is finite, by a
+    /// ceiling that differs per platform: 24 h on Linux, Android and iOS, an hour on macOS,
+    /// and on Windows the longest wait the OS call accepts, `u32::MAX - 1` ms (about 49
+    /// days).
     ///
     /// It also decides how a notification route that will not arm reaches the caller. With
     /// no interval set, the platform's primary route failing to arm is fatal:
@@ -180,6 +176,8 @@ impl WatchOptions {
 #[cfg_attr(
     not(any(
         windows,
+        target_os = "macos",
+        target_os = "android",
         all(
             target_os = "linux",
             any(feature = "linux-gnome", feature = "linux-kde")
@@ -200,6 +198,8 @@ pub(crate) enum WatchFailSoft<T> {
 #[cfg_attr(
     not(any(
         windows,
+        target_os = "macos",
+        target_os = "android",
         all(
             target_os = "linux",
             any(feature = "linux-gnome", feature = "linux-kde")
@@ -219,10 +219,29 @@ pub(crate) fn watch_fail_soft<T>(
     }
 }
 
+// [`watch_fail_soft`] for a route that needs the same platform access every read needs.
+// When `reachable` fails the reads fail the same way, so polling would carry nothing: that
+// error goes out unchanged, neither softened nor given the `poll_interval` advice
+// [`fatal_watch_error`] adds for a route that failed alone. `establish` runs only after
+// `reachable` passes.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn watch_fail_soft_reachable<T>(
+    reachable: impl FnOnce() -> Result<(), Error>,
+    leading: bool,
+    poll_interval: Option<Duration>,
+    establish: impl FnOnce() -> Result<T, Error>,
+) -> Result<WatchFailSoft<T>, Error> {
+    reachable()?;
+    Ok(watch_fail_soft(leading, poll_interval, establish()))
+}
+
 // [`Error::Io`] for a fatal route failure; names the fix (`poll_interval`).
 #[cfg_attr(
     not(any(
         windows,
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android",
         all(
             target_os = "linux",
             any(feature = "linux-gnome", feature = "linux-kde")
@@ -251,35 +270,38 @@ pub(crate) struct BackendHealth {
 
 /// Liveness of change-notification routes ([`ProxyWatcher::health`]).
 ///
-/// **`degraded`:** route is not delivering — set [`WatchOptions::poll_interval`].
-/// **`is_frozen`:** nothing arrives on its own — no route and no poll, or a stopped
-/// thread. [`ProxyWatcher::poll_now`] still delivers until the thread stops.
+/// **`degraded`:** route is not delivering; set [`WatchOptions::poll_interval`].
+/// **`is_frozen`:** nothing arrives on its own (no route and no poll, or a stopped
+/// thread). [`ProxyWatcher::poll_now`] still delivers until the thread stops.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchHealth {
     /// Routes that could not be established, or that were established and later lost. An
     /// entry names the source a dead route stops reporting on, which is not always the
-    /// store the reader opens; a source that is simply not configured here is nothing to
-    /// watch rather than a failed watch, and is not listed. Do not expect every entry to
-    /// appear in [`ProxyConfig::sources`](crate::ProxyConfig::sources): notification routes
-    /// are per store, so a lost `kioslaverc` watch is reported as
+    /// store the reader opens; a source that is not configured here is nothing to watch
+    /// rather than a failed watch, and is not listed. Windows is the exception: a missing
+    /// per-user `Internet Settings` key lists
+    /// [`Registry`](crate::ProxyConfigSource::Registry), because a key created later has no
+    /// notification armed on it. Do not expect every entry to appear in
+    /// [`ProxyConfig::sources`](crate::ProxyConfig::sources): notification routes are per
+    /// store, so a lost `kioslaverc` watch is reported as
     /// [`Kioslaverc`](crate::ProxyConfigSource::Kioslaverc) even on a machine whose
     /// `ProxyType = 4` makes that store report
-    /// [`KioslavercEnv`](crate::ProxyConfigSource::KioslavercEnv). Only ever grows: a source that
-    /// degrades stays listed for the life of the watcher, the same one-way shape as
-    /// [`has_live_notifications`](Self::has_live_notifications).
+    /// [`KioslavercEnv`](crate::ProxyConfigSource::KioslavercEnv). Only ever grows: a
+    /// source that degrades stays listed for the life of the watcher, the same one-way
+    /// shape as [`has_live_notifications`](Self::has_live_notifications).
     pub degraded: Vec<ProxyConfigSource>,
     /// At least one native notification route is still live. Starts from what was
     /// established at construction and only ever falls to `false`, once every route is
     /// gone. A backend thread that stopped is reported by [`stopped`](Self::stopped)
-    /// instead — that is not a statement about the routes.
+    /// instead; that is not a statement about the routes.
     pub has_live_notifications: bool,
     /// Poll interval copied from [`WatchOptions::poll_interval`] at construction: what the
     /// caller asked for, not the floor a shorter request is raised to before any backend
     /// uses it. The floor is never reported, because this field says whether polling was
     /// asked for and [`stopped`](Self::stopped) says whether the request is still met.
     pub poll_interval: Option<Duration>,
-    /// The backend thread has stopped, so `poll_interval` no longer buys anything: the
+    /// The backend thread has stopped, so `poll_interval` no longer has any effect: the
     /// polling this type reports happens *on* that thread. The stream ends with `None`
     /// once drained, but a caller that only reads health would otherwise keep waiting.
     pub stopped: bool,
@@ -295,7 +317,7 @@ impl WatchHealth {
         !self.stopped && self.degraded.is_empty() && self.has_live_notifications
     }
 
-    /// No live native notification and no [`WatchOptions::poll_interval`] — or a
+    /// No live native notification and no [`WatchOptions::poll_interval`], or a
     /// [`stopped`](Self::stopped) thread, which takes the polling with it.
     #[must_use]
     pub fn is_frozen(&self) -> bool {
@@ -320,8 +342,8 @@ pub struct WatchState {
 /// Stream item of [`ProxyWatcher`]: a state snapshot or a failed re-read, each stamped
 /// with the watcher's [`WatchState`] as it stood at delivery.
 ///
-/// A snapshot arrives when the configuration changed, when the health changed, or both —
-/// which is what makes a lost notification route reach a subscriber rather than only
+/// A snapshot arrives when the configuration changed, when the health changed, or both, so
+/// a lost notification route reaches a subscriber rather than only
 /// [`ProxyWatcher::health`].
 #[non_exhaustive]
 #[derive(Debug)]
@@ -337,14 +359,13 @@ pub enum WatchEvent {
     },
     /// Re-reading the OS settings failed. This does not end the subscription.
     ///
-    /// Nothing is guaranteed to follow, and nothing reports the recovery either. If the
-    /// next successful read returns the same configuration and no route changed, the
-    /// equality skip publishes nothing, and [`ProxyWatcher::current`] and
-    /// [`ProxyWatcher::state`] answer exactly what they answered before the failure,
-    /// `captured_at` included — so there is nothing to wait for and nothing to confirm:
-    /// what they already hold is what that read agreed with. A
+    /// Nothing is guaranteed to follow, and no event reports the recovery. If the next
+    /// successful read returns the same configuration and no route changed, the equality
+    /// skip publishes nothing, and [`ProxyWatcher::current`] and [`ProxyWatcher::state`]
+    /// return what they returned before the failure, `captured_at` included, so there is
+    /// nothing to wait for: what they hold is what that read agreed with. A
     /// [`Snapshot`](Self::Snapshot) does follow whenever the configuration or the health
-    /// actually moved.
+    /// moved.
     #[non_exhaustive]
     Error {
         /// Why the re-read failed.
@@ -365,9 +386,7 @@ impl WatchEvent {
 }
 
 // Fold runtime additions into construction-time [`WatchHealth`] (dedupe; one-way live→false).
-//
-// `poll_interval` is reported as it was requested even once `stopped`, because it says
-// what the caller asked for; `stopped` is what says the request is no longer being met.
+// `poll_interval` stays as requested even once `stopped`, which reports that it is not met.
 fn merge_runtime_health(
     construction: &WatchHealth,
     runtime_degraded: Vec<ProxyConfigSource>,
@@ -392,22 +411,22 @@ fn merge_runtime_health(
 /// Read the OS proxy configuration once, without starting a watcher.
 ///
 /// The read [`ProxyWatcher::new`] performs during construction, on its own: no thread is
-/// spawned and no change-notification route is registered. That is the difference worth
-/// knowing — a machine where notifications cannot be armed makes `ProxyWatcher::new` fail
-/// while its settings are still perfectly readable, and this call returns them.
+/// spawned and no change-notification route is registered. A machine where notifications
+/// cannot be armed makes `ProxyWatcher::new` fail while its settings are still readable,
+/// and this call returns them.
 ///
 /// Nothing here is watched, so nothing reports a later change; call it again.
 ///
-/// Blocking, and not always briefly. Both non-Windows backends wait on a system service
+/// Blocking, and not always briefly. The macOS and Linux backends wait on a system service
 /// that can be absent: on macOS a `configd` that is still coming up is retried for five
 /// seconds before this gives up, and inside a Linux sandbox each portal `Lookup` is
 /// bounded at five seconds too. That bound is per call, and a sandboxed read asks five
 /// questions: one unanswered `Lookup` ends the read at five seconds, but five answers
 /// that each arrive just inside the bound hold it for twenty-five. Neither is the ordinary
-/// case, but this is not a call to put on a request path expecting syscall latency.
+/// case, but keep this call off a request path that expects syscall latency.
 ///
 /// A Linux read consults both desktop stores, and an error from the one that is *not*
-/// leading this session is softened to "absent" rather than failing the call — a
+/// leading this session is softened to "absent" rather than failing the call: a
 /// malformed `kioslaverc` should not break a GNOME session. So a success can be missing a
 /// source that exists, and without the `tracing` feature nothing says so. The softening
 /// holds only while the leading store is itself configured, which is what makes the
@@ -424,7 +443,8 @@ fn merge_runtime_health(
 /// # Errors
 ///
 /// [`Error::Unsupported`], [`Error::Io`], [`Error::Sandboxed`] (Linux, in a sandbox with
-/// no dconf), or a parse error from malformed OS settings.
+/// no dconf), [`Error::CgiHttpProxy`] (KDE with `ProxyType = 4`, in a CGI environment),
+/// or a parse error from malformed OS settings.
 pub fn read() -> Result<ProxyConfig, Error> {
     read_with_options(&WatchOptions::default())
 }
@@ -437,11 +457,66 @@ pub fn read() -> Result<ProxyConfig, Error> {
 ///
 /// Same as [`read`].
 pub fn read_with_options(options: &WatchOptions) -> Result<ProxyConfig, Error> {
+    read_logged(options, &sys::Env::capture())
+}
+
+/// The process environment, copied for a [`read_in`] or a
+/// [`ProxyWatcher::with_options_in`] on another thread.
+///
+/// A Linux read takes the desktop, sandbox and `kioslaverc` variables from the environment,
+/// and [`read`] copies it on the thread it runs on. A host that writes its environment from
+/// one thread (Node's `process.env`, Python's `os.environ` under the GIL) captures on that
+/// thread and reads on a worker, and the worker then races no write the host makes: glibc's
+/// `getenv` against a concurrent `setenv` is a data race. Elsewhere the read takes nothing
+/// from the environment, and this holds nothing.
+///
+/// GLib, which the GSettings and portal routes load at run time, still reads variables of
+/// its own on the reading thread; this crate does not control those reads.
+///
+/// Hidden, and outside the semver promise: the language bindings use it. A Rust program
+/// writes its environment through `std::env`, whose lock [`read`] already takes.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct CapturedEnv(sys::Env);
+
+impl CapturedEnv {
+    /// Copy the environment of this process, on the calling thread.
+    #[must_use]
+    pub fn capture() -> Self {
+        Self(sys::Env::capture())
+    }
+}
+
+// The whole environment, tokens included: nothing of it is printed.
+impl fmt::Debug for CapturedEnv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedEnv").finish_non_exhaustive()
+    }
+}
+
+/// [`read`], with the environment taken from `env` instead of copied on this thread.
+///
+/// ```no_run
+/// let env = proxy_watch::CapturedEnv::capture();
+/// let config = std::thread::spawn(move || proxy_watch::read_in(&env)).join().unwrap()?;
+/// println!("effective: {:?}", config.effective);
+/// # Ok::<(), proxy_watch::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Same as [`read`].
+#[doc(hidden)]
+pub fn read_in(env: &CapturedEnv) -> Result<ProxyConfig, Error> {
+    read_logged(&WatchOptions::default(), &env.0)
+}
+
+fn read_logged(options: &WatchOptions, env: &sys::Env) -> Result<ProxyConfig, Error> {
     crate::trace::debug!(
         group_policy = options.watch_group_policy,
         "reading the system proxy configuration once"
     );
-    let config = sys::read_config(options)?;
+    let config = sys::read_config_in(options, env)?;
     crate::trace::debug!(
         config = %crate::trace::ConfigSummary(&config),
         "read the system proxy configuration"
@@ -449,12 +524,13 @@ pub fn read_with_options(options: &WatchOptions) -> Result<ProxyConfig, Error> {
     Ok(config)
 }
 
-/// OS proxy watcher: initial snapshot, then debounced changes (equality ignores `captured_at`).
-/// Own OS threads — one, and on Linux one more per live source, plus one for
+/// OS proxy watcher: initial snapshot, then debounced changes (equality ignores
+/// `captured_at`).
+/// Own OS threads: one, and on Linux one more per live source, plus one for
 /// [`WatchOptions::poll_interval`] (elsewhere that interval shortens the single thread's
 /// own wait instead of adding one). Drop joins them.
-/// [`ProxyWatcher::health`] for route liveness. Win/macOS/Linux;
-/// else [`Error::Unsupported`]. Applies no `*_proxy` convention of its own — only KDE's
+/// [`ProxyWatcher::health`] for route liveness. Windows, macOS, Linux, Android and iOS;
+/// elsewhere [`Error::Unsupported`]. Applies no `*_proxy` convention of its own: only KDE's
 /// `ProxyType = 4` builds a [`ProxyEnv`](crate::ProxyEnv), from the variables
 /// `kioslaverc` names.
 ///
@@ -464,34 +540,37 @@ pub fn read_with_options(options: &WatchOptions) -> Result<ProxyConfig, Error> {
 /// end the stream; `None` comes only once the backend thread has stopped, and is preceded
 /// by a snapshot reporting [`WatchHealth::stopped`]. Undelivered snapshots fold into the
 /// newest one, so a subscriber that stops polling loses the history between snapshots,
-/// never [`current`](Self::current); undelivered failures are capped at 1024, oldest
-/// discarded first. The trim runs when a snapshot is published, so a failure arriving
-/// after a full one holds the queue at 1025 until the next snapshot trims it back.
+/// never [`current`](Self::current); failures with no snapshot between them fold into
+/// the newest, and undelivered failures are capped at 1024, oldest discarded first. The
+/// trim runs when a snapshot is published, so a failure arriving after a full one holds
+/// the queue at 1025 until the next snapshot trims it back.
 ///
 /// One subscriber, not a broadcast. Only the most recently registered waker is kept, and
 /// `poll_next` takes `&mut`, so the only way to poll a watcher from more than one task is
-/// to put it behind a lock — after which the task that polled first is parked with its
+/// to put it behind a lock; after which the task that polled first is parked with its
 /// waker overwritten, and stays parked until something else on this watcher wakes it. To
 /// fan a stream out, poll it in one place and forward.
 ///
-/// [`Send`] but not [`Sync`] — on every platform, for a different platform reason each
-/// time. So [`current`](Self::current), [`health`](Self::health), [`state`](Self::state)
-/// and [`poll_now`](Self::poll_now) take `&self` and do no OS I/O, yet still belong to
-/// the thread that owns the watcher, and `Arc<ProxyWatcher>` is not `Send`. Move the
-/// watcher into the task that polls it and forward from there what other threads need.
-/// Under the `tokio` feature `watch_channel` is that forwarding already written — named in
-/// backticks rather than linked because it exists only under that feature; without it the
-/// shape is the same by hand, one owner republishing [`current`](Self::current) into a
-/// `Mutex` or a channel after every item. Neither recovers
-/// [`poll_now`](Self::poll_now), which stays with the owner: send it a request rather than
-/// sharing the watcher.
+/// The waker is woken on the backend thread, which `Drop` joins, so the last owner of the
+/// watcher must not live inside the waker: dropping it there makes that thread wait for
+/// itself.
 ///
-/// The Linux threads read the process environment, and keep reading it: every
-/// notification re-reads the desktop and sandbox variables, at a moment the caller does
-/// not choose. [`std::env::set_var`] and [`std::env::remove_var`] are sound only while no
-/// other thread is reading the environment, so treat them as unavailable for as long as a
-/// watcher is alive — set what you need before constructing one. Windows is exempt;
-/// `std` documents both as always safe there.
+/// [`Send`] but not [`Sync`], on every platform. So [`current`](Self::current),
+/// [`health`](Self::health), [`state`](Self::state) and [`poll_now`](Self::poll_now) take
+/// `&self` and do no OS I/O, yet still belong to the thread that owns the watcher, and
+/// `Arc<ProxyWatcher>` is not `Send`. Move the watcher into the task that polls it and
+/// forward from there what other threads need. Under the `tokio` feature `watch_channel`
+/// is that forwarding already written; without it, one owner republishes
+/// [`current`](Self::current) into a `Mutex` or a channel after every item. Neither
+/// recovers [`poll_now`](Self::poll_now), which stays with the owner: send it a request
+/// rather than sharing the watcher.
+///
+/// On Linux the watcher copies the process environment once, on the constructing thread,
+/// and every later re-read takes the desktop, sandbox and `kioslaverc` variables from that
+/// copy. A variable changed after construction is therefore not seen (set what you need
+/// before constructing one), and the watcher's own threads never race a concurrent
+/// [`std::env::set_var`]. GLib, which the GSettings and portal routes load at run time,
+/// reads variables of its own on those threads; this crate does not control those reads.
 ///
 /// ```no_run
 /// use std::future::poll_fn;
@@ -536,25 +615,42 @@ impl ProxyWatcher {
     /// # Errors
     ///
     /// [`Error::Unsupported`], [`Error::Io`], [`Error::Sandboxed`] (Linux, in a sandbox
-    /// with no dconf), or a parse error from malformed OS settings.
+    /// with no dconf), [`Error::CgiHttpProxy`] (KDE with `ProxyType = 4`, in a CGI
+    /// environment), or a parse error from malformed OS settings.
     pub fn new() -> Result<Self, Error> {
         Self::with_options(WatchOptions::default())
     }
 
     /// Start watching with explicit options.
     ///
-    /// Blocks the way [`read`] does, and can pay that price twice: the notification route is
-    /// armed before the configuration is read, not after, so a change landing between the
-    /// two is already queued rather than lost. macOS is the exception on both counts — it
-    /// subscribes on the watcher thread instead, closing the same window with the re-read
-    /// that thread opens with, and that subscription and the read each run the same
-    /// five-second retry budget, so a `configd` that is still coming up can hold this call
-    /// for ten seconds.
+    /// Blocks the way [`read`] does, and can block for twice as long: the notification
+    /// route is armed before the configuration is read, so a change landing between the
+    /// two is already queued rather than lost. The GSettings subscription on Linux and the
+    /// whole of macOS come up after that read instead, and close the same window with one
+    /// forced re-read once live: Linux queues it from `spawn`, macOS publishes on entering
+    /// its run loop. On macOS that subscription and the read each run the same five-second
+    /// retry budget, so a `configd` that is still coming up can hold this call for ten
+    /// seconds.
     ///
     /// # Errors
     ///
     /// Same as [`ProxyWatcher::new`].
     pub fn with_options(options: WatchOptions) -> Result<Self, Error> {
+        Self::start(options, &sys::Env::capture())
+    }
+
+    /// [`ProxyWatcher::with_options`], with the environment taken from `env` instead of
+    /// copied on this thread; every re-read uses the same copy.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ProxyWatcher::new`].
+    #[doc(hidden)]
+    pub fn with_options_in(options: WatchOptions, env: &CapturedEnv) -> Result<Self, Error> {
+        Self::start(options, &env.0)
+    }
+
+    fn start(options: WatchOptions, env: &sys::Env) -> Result<Self, Error> {
         // By return, the re-read mechanism is in place (delivery may lag a moment).
         crate::trace::debug!(
             debounce = ?options.debounce,
@@ -562,8 +658,8 @@ impl ProxyWatcher {
             poll_interval = ?options.poll_interval,
             "starting a proxy watcher"
         );
-        let mut watch = sys::Watch::armed(&options)?;
-        let initial = sys::read_config(&options)?;
+        let mut watch = sys::armed_in(&options, env)?;
+        let initial = sys::read_config_in(&options, env)?;
         crate::trace::initial(&initial);
         let shared = Arc::new(Shared::new(initial));
         watch.spawn(&options, Arc::clone(&shared))?;
@@ -609,16 +705,15 @@ impl ProxyWatcher {
     ///
     /// Call it when the caller knows something this crate cannot see: a connection attempt
     /// failed in a way that might be proxy-related, or the caller's own network-change
-    /// watch fired. Watching the network itself is not this crate's job, and this is what
-    /// stands in for it.
+    /// watch fired. This crate does not watch the network itself; this call is the hook for
+    /// that signal.
     ///
-    /// Returns immediately, and may deliver nothing. Sharing a notification's path means
-    /// sharing its equality skip: a re-read that finds the configuration and the health
-    /// unchanged publishes no [`WatchEvent`], and asking again does not force one. The
-    /// [`Stream`] reports change, not completion — and so does everything else:
-    /// [`current`](Self::current) and [`state`](Self::state) answer the same before and
-    /// after such a re-read, so they are where the current answer comes from, not evidence
-    /// that this request landed. [`WatchEvent::Error`] says the same for the recovery case.
+    /// Returns immediately, and may deliver nothing. A re-read shares a notification's
+    /// equality skip: one that finds the configuration and the health unchanged publishes
+    /// no [`WatchEvent`], and asking again does not force one. The [`Stream`] reports
+    /// change, not completion, and [`current`](Self::current) and [`state`](Self::state)
+    /// answer the same before and after such a re-read, so neither shows that this request
+    /// landed. [`WatchEvent::Error`] says the same for the recovery case.
     pub fn poll_now(&self) {
         self.watch.poll_now();
     }
@@ -638,7 +733,7 @@ pub(crate) struct Shared {
     state: Mutex<State>,
     // Construction-time half of [`WatchHealth`]; the runtime half lives in `state`.
     // It sits here, rather than on [`ProxyWatcher`], so that the health can be assembled
-    // wherever the shared state is held — including from inside the queue's own lock.
+    // wherever the shared state is held: including from inside the queue's own lock.
     construction: OnceLock<WatchHealth>,
 }
 
@@ -654,17 +749,18 @@ enum Queued {
 #[derive(Debug)]
 struct State {
     current: ProxyConfig,
-    // At most one `Queued::Snapshot` (folded by [`Shared::emit`]); failures keep their
-    // order and count, coalescing only at the tail via [`Shared::fail`], and are capped
-    // at [`MAX_QUEUED_CHANGES`].
+    // At most two `Queued::Snapshot`s, the front one and one behind a failure queued after
+    // it (folded by [`Shared::emit`]); failures keep their
+    // order and count, coalescing only at the tail via [`Shared::fail`], and are trimmed
+    // to [`MAX_QUEUED_CHANGES`] on each snapshot.
     queue: VecDeque<Queued>,
     // Discards in the current overflow episode; reset when the consumer drains.
     dropped: u64,
     waker: Option<Waker>,
     closed: bool,
-    // A health transition nobody has been told about. Nothing enqueues on a degrade, so
-    // without this a lost route would wait for a configuration change that may never
-    // come — [`Shared::poll_next`] synthesises a snapshot for it instead.
+    // A health transition not yet reported to the consumer. Nothing enqueues on a degrade,
+    // so without this a lost route would wait for a configuration change that may never
+    // come; [`Shared::poll_next`] synthesises a snapshot for it instead.
     dirty: bool,
     // Routes that degraded after construction ([`Shared::degrade`]).
     runtime_degraded: Vec<ProxyConfigSource>,
@@ -708,7 +804,7 @@ fn report_discarded(discarded: Option<u64>) {
 impl Shared {
     pub(crate) fn new(initial: ProxyConfig) -> Self {
         let mut queue = VecDeque::new();
-        // The current value is delivered once, at subscription time — stamped with the
+        // The current value is delivered once, at subscription time: stamped with the
         // construction-time health, so a watcher that started degraded says so in its
         // very first event.
         queue.push_back(Queued::Snapshot);
@@ -733,9 +829,9 @@ impl Shared {
         debug_assert!(!already_set, "the constructor writes this exactly once");
     }
 
-    // The construction-time half, or — only before the constructor has returned, which is
-    // the one window in which it is unset — a health that claims nothing: no route has
-    // been established yet, which is the safe direction to be wrong in.
+    // The construction-time half, or (only before the constructor has returned, which is
+    // the one window in which it is unset) a health that claims nothing: no route has been
+    // established yet, so an unset health cannot falsely report a live route.
     fn construction(&self) -> &WatchHealth {
         static NOT_ESTABLISHED: WatchHealth = WatchHealth {
             degraded: Vec::new(),
@@ -753,7 +849,15 @@ impl Shared {
     )]
     pub(crate) fn degrade(&self, source: ProxyConfigSource) {
         let mut state = self.lock();
-        if state.runtime_degraded.contains(&source) {
+        // Already in the health construction reported, so the merged health cannot move and
+        // there is nothing to republish. Only once that health is established: `spawn` starts
+        // the thread that calls this before the constructor records it.
+        if state.runtime_degraded.contains(&source)
+            || self
+                .construction
+                .get()
+                .is_some_and(|health| health.degraded.contains(&source))
+        {
             return;
         }
         state.runtime_degraded.push(source);
@@ -770,7 +874,14 @@ impl Shared {
     // Record that no native notification route is live any more.
     pub(crate) fn mark_no_live_notifications(&self) {
         let mut state = self.lock();
-        if state.runtime_no_live_notifications {
+        // As in `degrade`: nothing to republish when construction already reported no live
+        // route, and only once it has reported anything.
+        if state.runtime_no_live_notifications
+            || self
+                .construction
+                .get()
+                .is_some_and(|health| !health.has_live_notifications)
+        {
             return;
         }
         state.runtime_no_live_notifications = true;
@@ -785,8 +896,8 @@ impl Shared {
     // Runtime additions folded into construction-time [`WatchHealth`].
     //
     // `closed` reaches a live [`ProxyWatcher`] only from [`ThreadGuard::drop`], i.e. the
-    // thread stopped on its own; the ordinary `Drop` path closes a watcher nobody can
-    // still ask.
+    // thread stopped on its own; the ordinary `Drop` path closes a watcher no caller can
+    // still query.
     pub(crate) fn health(&self) -> WatchHealth {
         let state = self.lock();
         self.merged_health(&state)
@@ -823,22 +934,28 @@ impl Shared {
     // Publish `config` unless it is equal to the previous one (the equality skip).
     //
     // Of the publishing methods, only this one has a platform backend as its sole caller,
-    // so on a target that has none it is legitimately dead. `fail` and `close` are not,
-    // and neither is [`Error::io`]: [`ThreadGuard`]'s `Drop` calls them — that is the
-    // whole point of the guard — and a `Drop` impl is live on every target.
-    // This attribute is also the lint root that keeps `trim_to_capacity` and
-    // `report_discarded` from needing an attribute apiece, since
-    // `allow` marks the item it is written on live along with everything it reaches.
-    // `#[expect]` rather than `#[allow]` so a build for such a target says so if any of
-    // that stops holding, instead of silently keeping an attribute nobody needs.
+    // so on a target that has none it is legitimately dead. `fail` and `close` are not, and
+    // neither is [`Error::io`]: [`ThreadGuard`]'s `Drop` calls them, which is what the
+    // guard is for, and a `Drop` impl is live on every target. This attribute is also the
+    // lint root for `trim_to_capacity` and `report_discarded`. `#[expect]` reports when
+    // this target no longer needs the suppression.
     //
     // `not(test)` because the platform backend is only the *non-test* sole caller: the
     // tests below drive `emit` directly, and they are compiled on every target. Without
     // it, `cargo clippy --target <unsupported> --all-targets` builds the lib test, finds
-    // `emit` live, and reports the expectation itself as unfulfilled — which `-D warnings`
+    // `emit` live, and reports the expectation itself as unfulfilled, which `-D warnings`
     // turns into a hard error on a target this crate does not even claim to support.
     #[cfg_attr(
-        all(not(any(windows, target_os = "macos", target_os = "linux")), not(test)),
+        all(
+            not(any(
+                windows,
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "android",
+                target_os = "ios"
+            )),
+            not(test)
+        ),
         expect(dead_code)
     )]
     pub(crate) fn emit(&self, config: ProxyConfig) {
@@ -852,34 +969,36 @@ impl Shared {
             );
             return;
         }
-        // Rendering the transition asks the subscriber whether `INFO` is enabled, and a level
-        // filter is consumer code exactly like the event hook above — so it waits for the
-        // unlock too, and the previous value is kept here to make that possible. The clone is
-        // the price, paid only when the configuration actually changed.
+        // Rendering the transition asks the subscriber whether `INFO` is enabled, and a
+        // level filter is consumer code like the event hook above, so it waits for the
+        // unlock too, and the previous value is kept here to make that possible. The clone
+        // is the price, paid only when the configuration changed.
         let previous = std::mem::replace(&mut state.current, config.clone());
-        // Fold: at most one undelivered snapshot, and it is always the newest one. The entry
-        // carries no payload, so the one already queued renders whatever `current` says when
-        // it is taken — and `current` was just replaced above. Moving it to the back is what
-        // keeps failures queued before it ahead of it.
+        // Fold: at most one undelivered snapshot past the front, and it is always the newest
+        // one. The entry carries no payload, so the one already queued renders whatever
+        // `current` says when it is taken, and `current` was just replaced above. Moving it
+        // to the back is what keeps failures queued before it ahead of it.
         //
         // The front entry is the exception: it is the next thing the consumer takes, and on a
         // subscription that has not polled yet it is the subscription-time snapshot every
         // consumer's first item is documented to be (`README.md`, `examples/watch.rs`, the
         // type doc above). Moving it puts a failure that arrived after subscription in front
         // of it, so the first thing the stream ever says is an error on a configuration it
-        // has not once reported.
-        let pending = state
+        // has not once reported. It stays, and a failure queued behind it gets a second
+        // snapshot after it: `WatchEvent::Error` promises one follows when the
+        // configuration moved, and the front one precedes the failure.
+        let last = state
             .queue
             .iter()
-            .position(|i| matches!(i, Queued::Snapshot));
-        let folded = match pending {
-            Some(0) => true,
-            Some(at) => {
+            .rposition(|i| matches!(i, Queued::Snapshot));
+        let folded = match last {
+            Some(at) if at + 1 == state.queue.len() => true,
+            Some(at) if at > 0 => {
                 state.queue.remove(at);
                 state.queue.push_back(Queued::Snapshot);
                 true
             }
-            None => {
+            _ => {
                 state.queue.push_back(Queued::Snapshot);
                 false
             }
@@ -954,7 +1073,7 @@ impl Shared {
         // it: executor code must not run under this mutex. It cannot wait until the park is
         // decided, because unlocking to take the clone would open a gap in which an `emit`
         // could queue an event and find no waker to wake. The ready paths below pay for one
-        // unused clone, and drop it after `state` — locals unwind in reverse declaration
+        // unused clone, and drop it after `state`; locals unwind in reverse declaration
         // order, and `state` is declared second.
         let waker = cx.waker().clone();
         let mut state = self.lock();
@@ -967,7 +1086,7 @@ impl Shared {
             let event = match item {
                 Queued::Snapshot => {
                     // Stamped now, not when it was queued, so it reports whatever the
-                    // health has become since — which is what `dirty` was for.
+                    // health has become since, which is what `dirty` was for.
                     state.dirty = false;
                     WatchEvent::Snapshot {
                         state: self.stamp(&state),
@@ -1015,7 +1134,7 @@ pub(crate) struct ThreadGuard {
 
 // `new` is what a target with no backend never calls; the struct is not, because `allow`
 // makes the item it is written on a lint root and this one names `Self`. That is also why
-// the attribute has to sit here rather than on the struct — it does not reach out of the
+// the attribute has to sit here rather than on the struct; it does not reach out of the
 // item it is written on, and the struct is a separate item.
 #[cfg_attr(
     not(any(windows, target_os = "macos", target_os = "linux")),
@@ -1049,17 +1168,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Wake;
 
-    // `Send` so a spawned task can hold the watcher; `Sync` is deliberately *not*
-    // required — a single consumer owns the stream.
+    // `Send` so a spawned task can hold the watcher; `Sync` is *not*
+    // required: a single consumer owns the stream.
     const _: fn() = || {
         fn assert_send<T: Send>() {}
         assert_send::<ProxyWatcher>();
         assert_send::<WatchOptions>();
     };
 
-    // Type-checked only, never run: `poll_now` takes `&self` and returns nothing, so nothing
-    // here can tell a working one apart from a no-op. That needs a change the native
-    // notification does not already deliver by itself, and only one test arranges one —
+    // Not `Sync`, on every target: the inference below is ambiguous, and fails to compile,
+    // exactly when `ProxyWatcher: Sync`.
+    const _: fn() = || {
+        trait AmbiguousIfSync<A> {
+            fn item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+        let _ = <ProxyWatcher as AmbiguousIfSync<_>>::item;
+    };
+
+    // Type-checked only, never run: `poll_now` takes `&self` and returns nothing, so
+    // nothing here can tell a working one apart from a no-op. That needs a change the
+    // native notification does not already deliver by itself, and only one test arranges
+    // one:
     // `tests/linux_watch.rs`'s `poll_now_re_reads_a_change_no_watch_can_see`, which writes
     // through a symlink pointing out of the watched directory. Windows and macOS have no
     // equivalent.
@@ -1093,8 +1224,8 @@ mod tests {
     // Why [`ProxyConfig::fallbacks`] is compared by `PartialEq` rather than left beside
     // `captured_at`. Two reads can agree on every mode and still not be the same answer,
     // because one of them was assembled without a source it could not read. The skip above
-    // does not merely stay quiet about that — it *keeps* `current`, so the second half of
-    // this test is the one that matters: with the field excluded, a degradation that healed
+    // suppresses the notification and *keeps* `current`, so the second half of this test
+    // checks that a healed degradation stops being reported: with the field excluded, it
     // would go on being reported for the rest of the watcher's life.
     #[test]
     fn a_snapshot_that_differs_only_in_fallbacks_is_published_rather_than_skipped() {
@@ -1121,13 +1252,10 @@ mod tests {
         );
     }
 
-    // Every consumer's first item is documented to be the subscription-time snapshot —
-    // `README.md`, `examples/watch.rs`, and this type's own doc all say so, and
-    // `tests/mac_watch.rs` asserts it against a live backend. A read that fails between
-    // construction and the first poll queues an `Error` behind that snapshot, and the fold
-    // in `emit` must not lift the snapshot out of the queue and push it back on — that lands
-    // it *behind* the failure, and the first item off the stream is then the error, on a
-    // subscription that has not yet once said what the configuration was.
+    // A read that fails between construction and the first poll, then a change: the
+    // subscription snapshot comes first, the error next, and a snapshot of the change last
+    // (the fold in `Shared::emit` says why). `tests/mac_watch.rs` holds the first item
+    // against a live backend.
     #[test]
     fn a_failure_before_the_first_poll_stays_behind_the_subscription_snapshot() {
         let shared = Shared::new(ProxyConfig::direct());
@@ -1155,7 +1283,37 @@ mod tests {
             shared.poll_next(&mut cx),
             Poll::Ready(Some(WatchEvent::Error { .. }))
         ));
+        assert!(matches!(
+            shared.poll_next(&mut cx),
+            Poll::Ready(Some(WatchEvent::Snapshot { .. }))
+        ));
         assert!(shared.poll_next(&mut cx).is_pending());
+    }
+
+    // The same order once the subscription snapshot is taken: a snapshot still queued in
+    // front of a failure stays there, and the change gets its own snapshot behind it. A
+    // second change folds into that one.
+    #[test]
+    fn a_change_after_a_queued_failure_gets_a_snapshot_behind_it() {
+        let shared = Shared::new(ProxyConfig::direct());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            shared.poll_next(&mut cx),
+            Poll::Ready(Some(WatchEvent::Snapshot { .. }))
+        ));
+        let changed = |mode| ProxyConfig::from_source(ProxyConfigSource::Registry, mode);
+        shared.emit(changed(crate::mode::ProxyMode::WpadAutoDetect));
+        shared.fail(sandboxed_error("between"));
+        shared.emit(changed(crate::mode::ProxyMode::Direct));
+        shared.emit(changed(crate::mode::ProxyMode::WpadAutoDetect));
+
+        let kinds: Vec<&str> = std::iter::from_fn(|| match shared.poll_next(&mut cx) {
+            Poll::Ready(Some(WatchEvent::Snapshot { .. })) => Some("snapshot"),
+            Poll::Ready(Some(WatchEvent::Error { .. })) => Some("error"),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(kinds, ["snapshot", "error", "snapshot"]);
     }
 
     // The construction-time half a live backend would have written, so that the runtime
@@ -1216,12 +1374,12 @@ mod tests {
         )
     }
 
-    // Alternate a change and a failure so the queue actually grows: on its own, a run of
+    // Alternate a change and a failure so the queue grows: on its own, a run of
     // changes folds into one entry and a run of failures coalesces into one.
     //
     // Take the subscription snapshot first, and fail once with the queue empty. `emit`
-    // leaves a snapshot alone while it is the front entry — that entry is the next thing
-    // the consumer takes — so what grows the queue is a stall that begins with an
+    // leaves a snapshot alone while it is the front entry; that entry is the next thing
+    // the consumer takes, so what grows the queue is a stall that begins with an
     // undelivered failure in front, not one that begins before the first poll.
     fn fill_past_capacity(shared: &Shared, rounds: usize) {
         let (direct, wpad) = two_distinct_configs();
@@ -1239,7 +1397,7 @@ mod tests {
     }
 
     // A stalled consumer must not turn an unbounded number of failures into unbounded
-    // memory: [`MAX_QUEUED_CHANGES`] is the ceiling. The `+ 1` is not slack — `emit` is
+    // memory: [`MAX_QUEUED_CHANGES`] is the ceiling. The `+ 1` is not slack; `emit` is
     // where `trim_to_capacity` runs, so a `fail` that lands on a just-trimmed queue sits
     // one past the ceiling until the next snapshot. `ProxyWatcher`'s stream doc says so.
     #[test]
@@ -1295,7 +1453,7 @@ mod tests {
         fill_past_capacity(&shared, MAX_QUEUED_CHANGES + 5);
         assert!(shared.lock().dropped > 0);
 
-        // Drain everything; the reset happens on the poll that empties the queue.
+        // The poll that empties the queue resets the discard count.
         while shared.poll_next(&mut cx).is_ready() {
             if shared.lock().queue.is_empty() {
                 break;
@@ -1305,17 +1463,13 @@ mod tests {
         assert_eq!(shared.lock().queue.len(), 0);
     }
 
-    // The regression this whole item type exists for. A route dies, the re-read that
-    // follows returns the *same* configuration, and the equality skip therefore publishes
-    // nothing. Before delivery-time stamping the subscriber was never told: only someone
-    // pulling `health()` could find out. A degrade must reach the stream on its own.
+    // A lost route reaches the stream even when an equal re-read skips the configuration.
     #[test]
     fn a_degrade_reaches_the_stream_even_when_every_later_read_is_equal() {
         let shared = Shared::new(ProxyConfig::direct());
         shared.set_construction_health(live_construction_health());
         let mut cx = Context::from_waker(Waker::noop());
 
-        // Take the subscription-time snapshot; the stream is now quiet.
         assert!(matches!(
             shared.poll_next(&mut cx),
             Poll::Ready(Some(WatchEvent::Snapshot { .. }))
@@ -1390,7 +1544,7 @@ mod tests {
 
     // The one waker slot, from the losing side. [`ProxyWatcher`]'s doc says a second poll
     // overwrites the first task's waker and leaves it parked; that is the failure mode a
-    // caller who puts the watcher behind a lock and polls it from two tasks actually hits,
+    // caller who puts the watcher behind a lock and polls it from two tasks hits,
     // so it is worth pinning rather than leaving as prose.
     #[test]
     fn a_second_poll_takes_the_waker_slot_from_the_first_consumer() {
@@ -1441,7 +1595,7 @@ mod tests {
     }
 
     // Closing is the last health transition there is, so it owes a snapshot before the
-    // stream ends — otherwise `None` would be the only notice a subscriber ever got that
+    // stream ends; otherwise `None` would be the only notice a subscriber ever got that
     // the thread had stopped, and a subscriber reading health would never see `stopped`.
     #[test]
     fn closing_delivers_a_stopped_snapshot_exactly_once_before_the_end() {
@@ -1488,7 +1642,7 @@ mod tests {
         assert!(matches!(shared.poll_next(&mut cx), Poll::Ready(None)));
     }
 
-    // Whichever variant arrives, it answers the same question — which is what makes an
+    // Whichever variant arrives, it answers the same question, which is what makes an
     // event comparable with a `ProxyWatcher::state()` taken beside it.
     #[test]
     fn every_event_carries_the_state_it_was_delivered_with() {
@@ -1576,7 +1730,7 @@ mod tests {
     }
 
     // A consumer parked on a registered waker must still be woken by the *first* of a
-    // run of failures, and must then see exactly one `Err` — not zero, not two.
+    // run of failures, and must then see exactly one `Err`: not zero, not two.
     #[test]
     fn a_parked_consumer_is_woken_once_and_sees_one_coalesced_error() {
         struct Signal(AtomicBool);
@@ -1627,11 +1781,11 @@ mod tests {
     // The clamp tests below are written in terms of `MIN_POLL_INTERVAL` and `MAX_DEBOUNCE`
     // rather than the numbers they hold, which is what lets them describe the shape of the
     // clamp without repeating a literal in six places. It also means both bounds can move
-    // and the expectations move with them. The numbers are in the rendered documentation —
+    // and those expectations move with them. The numbers are in the rendered documentation:
     // `WatchOptions::poll_interval` says "anything under 200 ms is raised to it" and
-    // `WatchOptions::debounce` says "anything over 24 h is lowered to it" — so moving one
-    // makes the doc wrong without making any test red: `xtask/tests/claim_counts.rs` counts
-    // nouns, not durations.
+    // `WatchOptions::debounce` says "anything over 24 h is lowered to it"; and
+    // `xtask/tests/claim_counts.rs` counts nouns, not durations, so the test below is what
+    // turns red when a bound moves and the doc does not.
     //
     // `WatchOptions::new()`'s own defaults are here for the same reason and one more:
     // `poll_interval` is not a tuning knob but a fork. Unset, a primary notification route
@@ -1707,10 +1861,7 @@ mod tests {
         }
     }
 
-    // What the ceiling is for. Unlike [`MIN_POLL_INTERVAL`], which keeps a backend from
-    // spinning, this one keeps it from *panicking*: every backend opens its window as
-    // `Instant::now() + debounce`, and that addition panics rather than saturating, which
-    // would leave the watcher thread stopped and the subscription frozen.
+    // See [`MAX_DEBOUNCE`]: an overflowing deadline would stop the watcher thread.
     #[test]
     fn a_clamped_debounce_keeps_the_deadline_representable() {
         for requested in [Duration::MAX, MAX_DEBOUNCE + Duration::from_secs(1)] {
@@ -1759,7 +1910,7 @@ mod tests {
                 true,
             ),
             // A stopped thread is not fully live either, however healthy the routes were
-            // while it ran. The Windows backend reaches exactly this state: a fatal `run`
+            // while it ran. The Windows backend reaches this state: a fatal `run`
             // error closes the stream without ever marking the routes lost, so
             // `has_live_notifications` is still the `true` it was armed with.
             (Vec::new(), true, None, true, false, true),
@@ -1776,23 +1927,33 @@ mod tests {
         }
     }
 
+    // Runs `body` on a new thread with the panic hook silenced, so an expected panic prints
+    // no backtrace, and returns the join. The hook is process-wide and tests run in
+    // parallel, so the swap is serialised: tests restoring each other's silent hook
+    // would leave every later panic in the run unprinted.
+    fn join_silently(body: impl FnOnce() + Send + 'static) -> std::thread::Result<()> {
+        static HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::thread::spawn(body).join();
+        std::panic::set_hook(previous);
+        result
+    }
+
     #[test]
     fn a_panicking_watcher_thread_still_closes_the_stream() {
         let shared = Arc::new(Shared::new(ProxyConfig::direct()));
 
-        // The panic below is expected; suppress the default hook so the test output does
-        // not print a spurious backtrace.
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let result = {
             let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
+            join_silently(move || {
                 let _guard = ThreadGuard::new(Arc::clone(&shared));
                 panic!("simulated backend panic");
             })
-            .join()
         };
-        std::panic::set_hook(previous_hook);
 
         assert!(result.is_err());
 
@@ -1808,34 +1969,31 @@ mod tests {
     }
 
     // The sibling above panics with no lock held, so the mutex it leaves behind is clean.
-    // This one panics *inside* the critical section, which poisons it — and `ThreadGuard`'s
+    // This one panics *inside* the critical section, which poisons it, and `ThreadGuard`'s
     // `Drop` then takes that same lock again in `mark_no_live_notifications`, in `fail` and
-    // in `close`, all while `std::thread::panicking()` is still true. `Shared::lock` recovers
-    // from the poison instead of propagating it; a `lock().unwrap()` there would panic during
-    // unwinding, and a panic while panicking aborts the process rather than closing the
-    // stream — so the loss is the whole program, not one wrong answer.
+    // in `close`, all while `std::thread::panicking()` is still true.
+    // `Shared::lock` recovers from the poison instead of propagating it; a
+    // `lock().unwrap()` there would panic during unwinding, and a panic while panicking
+    // aborts the process rather than closing the stream, so the loss is the whole program,
+    // not one wrong answer.
     //
-    // Nothing else in the tree stands here. `Shared::lock` is private, so an integration test
-    // cannot hold the guard, and no other test panics with it held — the recovery answers to
-    // this test alone.
+    // Nothing else in the tree stands here. `Shared::lock` is private, so an integration
+    // test cannot hold the guard, and no other test panics with it held; the recovery
+    // answers to this test alone.
     #[test]
     fn a_thread_that_panicked_holding_the_lock_still_gets_its_failure_delivered() {
         let shared = Arc::new(Shared::new(ProxyConfig::direct()));
 
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let result = {
             let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
+            join_silently(move || {
                 let _guard = ThreadGuard::new(Arc::clone(&shared));
                 // Declared after the guard, so it unwinds first and the guard's `Drop` finds
                 // the mutex already poisoned.
                 let _held = shared.lock();
                 panic!("simulated backend panic inside the critical section");
             })
-            .join()
         };
-        std::panic::set_hook(previous_hook);
 
         assert!(result.is_err());
         // Not vacuous: a fixture that failed to poison would hold nothing below.
@@ -1849,12 +2007,12 @@ mod tests {
         assert!(state.runtime_no_live_notifications);
     }
 
-    // `emit` drops the guard before it logs, with `// Log after unlock: subscriber code must
-    // not run under this mutex.` written on the line. A `tracing` subscriber is arbitrary
-    // consumer code, and `std::sync::Mutex` is not reentrant, so a subscriber that reaches
-    // back for `ProxyWatcher::state` from inside its own event handler would block on a lock
-    // its own thread is holding — a hang rather than a wrong answer, which no assertion
-    // about the emitted value can see.
+    // `emit` drops the guard before it logs, with `// Log after unlock: subscriber code
+    // must not run under this mutex.` written on the line. A `tracing` subscriber is
+    // arbitrary consumer code, and `std::sync::Mutex` is not reentrant, so a subscriber
+    // that reaches back for `ProxyWatcher::state` from inside its own event handler would
+    // block on a lock its own thread is holding: a hang rather than a wrong answer, which
+    // no assertion about the emitted value can see.
     //
     // The witness has to be `try_lock` rather than a real re-entry, or the test would hang
     // instead of failing.
@@ -1942,9 +2100,9 @@ mod tests {
 
     // The guard marks the route lost *before* it queues the failure, and the comment beside
     // it says why: `fail` wakes the consumer, and a consumer that reads the health on being
-    // woken must not still be told a route is live. This test is the only thing holding the
-    // order — swapped, every assertion above still passes, because they all read the state
-    // after the thread has been joined, by which point both calls have run either way.
+    // woken must not still be told a route is live. No other test checks the order:
+    // swapped, every assertion above still passes, because they all read the state after
+    // the thread has been joined, by which point both calls have run either way.
     //
     // What moves is what the woken consumer is told. Only one of the two calls finds a
     // waker (the first one takes it), so the wake happens inside whichever runs first, and
@@ -1984,17 +2142,13 @@ mod tests {
         assert!(shared.poll_next(&mut cx).is_ready());
         assert!(shared.poll_next(&mut cx).is_pending());
 
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let result = {
             let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
+            join_silently(move || {
                 let _guard = ThreadGuard::new(shared);
                 panic!("simulated backend panic");
             })
-            .join()
         };
-        std::panic::set_hook(previous_hook);
         assert!(result.is_err());
 
         // Exactly one wake, and the route was already lost when it arrived. The count is
@@ -2015,13 +2169,13 @@ mod tests {
     // The other half is `poll_next`. It parks by storing the waker, and the store runs two
     // pieces of executor code with the lock held: `Waker::clone`, and the drop of whatever
     // waker was parked before. `Waker::from(Arc<W>)` makes the second one `W`'s own `Drop`,
-    // so it is not exotic executor internals — it is ordinary user code. One that reaches
+    // so it is not exotic executor internals: it is ordinary user code. One that reaches
     // back for `ProxyWatcher::state` blocks on a lock its own thread holds, and
     // `std::sync::Mutex` is not reentrant: a deadlock, not a wrong answer.
     //
     // The probe has to be `try_lock` rather than a real re-entry, or the test would hang
-    // instead of failing. Only the drop is observable from safe code — `Waker::clone` on an
-    // `Arc`-backed waker is a refcount bump with no user hook — but the same two lines move
+    // instead of failing. Only the drop is observable from safe code; `Waker::clone` on an
+    // `Arc`-backed waker is a refcount bump with no user hook, but the same two lines move
     // both out from under the lock.
     #[test]
     fn parking_never_runs_executor_code_under_the_state_mutex() {
@@ -2089,6 +2243,40 @@ mod tests {
     }
 
     #[test]
+    fn an_unreachable_platform_fails_the_route_as_it_is_whatever_the_interval() {
+        let unreachable = || Err(Error::io("attaching", std::io::Error::other("no JavaVM")));
+        for poll_interval in [None, Some(Duration::from_secs(1))] {
+            let mut established = false;
+            let outcome = watch_fail_soft_reachable(unreachable, true, poll_interval, || {
+                established = true;
+                Ok(())
+            });
+            let Err(error) = outcome else {
+                panic!("an unreachable platform was softened under {poll_interval:?}");
+            };
+            assert!(
+                matches!(&error, Error::Io { context, .. } if context == "attaching"),
+                "{error:?}"
+            );
+            assert!(
+                !established,
+                "the route was attempted with no platform to reach"
+            );
+        }
+
+        // Reachable, the route's own failure is `watch_fail_soft`'s to judge.
+        let failed = || Err::<(), _>(Error::Unsupported);
+        assert!(matches!(
+            watch_fail_soft_reachable(|| Ok(()), true, None, failed),
+            Ok(WatchFailSoft::Fatal(Error::Unsupported))
+        ));
+        assert!(matches!(
+            watch_fail_soft_reachable(|| Ok(()), true, Some(Duration::from_secs(1)), failed),
+            Ok(WatchFailSoft::Degraded(Error::Unsupported))
+        ));
+    }
+
+    #[test]
     fn watch_fail_soft_outcomes() {
         enum Input {
             Ok,
@@ -2146,7 +2334,7 @@ mod tests {
         }
     }
 
-    // [`fatal_watch_error`] must actually say what to do about it, not just that it
+    // [`fatal_watch_error`] must say what to do about it, not just that it
     // failed, and must not lose either the caller-supplied `why_no_fallback` or `what`.
     #[test]
     fn fatal_watch_error_names_the_fix_and_keeps_the_context() {
@@ -2191,7 +2379,7 @@ mod tests {
         assert!(!health.stopped);
     }
 
-    // [`Shared::mark_no_live_notifications`] is a one-way flag — nothing ever needs
+    // [`Shared::mark_no_live_notifications`] is a one-way flag: nothing ever needs
     // to clear it, since no backend re-establishes a route once it has degraded.
     #[test]
     fn shared_mark_no_live_notifications_is_reflected_in_health() {
@@ -2233,15 +2421,15 @@ mod tests {
         assert!(health.has_live_notifications);
 
         // Once every native route has degraded, `has_live_notifications` flips to
-        // `false` — the construction-time `true` never wins over it.
+        // `false`; the construction-time `true` never wins over it.
         let health = merge_runtime_health(&construction, Vec::new(), true, false);
         assert!(!health.has_live_notifications);
     }
 
-    // The polling a `poll_interval` buys runs *on* the backend thread, so a thread that
-    // stopped takes it with it. Without `stopped`, a watcher whose thread panicked went
-    // on reporting `is_frozen() == false` on the strength of an interval nobody was
-    // waiting out any more — the reassuring answer, which is the wrong way to be wrong.
+    // The polling configured by `poll_interval` runs *on* the backend thread, so a thread
+    // that stopped takes it with it. Without `stopped`, a watcher whose thread panicked
+    // went on reporting `is_frozen() == false` on the strength of an interval no thread was
+    // waiting out any more, falsely reporting that changes could still be detected.
     #[test]
     fn a_poll_interval_stops_counting_once_the_thread_is_gone() {
         let construction = WatchHealth {

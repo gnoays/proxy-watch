@@ -2,10 +2,8 @@
 //!
 //! `SCDynamicStoreCopyProxies` hands back a `CFDictionary` whose values are `CFString`,
 //! `CFNumber`, `CFBoolean` and `CFArray<CFString>`. Everything below the Core Foundation
-//! boundary lives here: [`ProxyDict`] is an ordinary `HashMap`, so the whole mapping
-//! from Apple's schema onto [`ProxyMode`] is a *total function of its input* and can be
-//! unit tested on any operating system — which matters because the macOS backend was
-//! written without access to a Mac (see [`crate::sys`]).
+//! boundary lives here: [`ProxyDict`] is an ordinary `HashMap`, so the mapping from
+//! Apple's schema onto [`ProxyMode`] is a total function testable on any operating system.
 //!
 //! The key names come from `SCSchemaDefinitions.h` in
 //! [`apple-oss-distributions/configd`](https://github.com/apple-oss-distributions/configd).
@@ -23,23 +21,23 @@
 //! value is the half of a credential this crate does hold, so not even the log carries it.
 //!
 //! That rule is about the *key*, so it may not depend on how far the value got. A value the
-//! Core Foundation reader could not carry at all arrives as [`DictValue::Unreadable`] rather
-//! than not arriving, because the alternative — dropping it — is indistinguishable here from
-//! a key nobody ever set, and the whole rule above turns on being able to tell those apart.
+//! Core Foundation reader could not carry at all arrives as [`DictValue::Unreadable`]
+//! rather than not arriving, because the alternative, dropping it, is indistinguishable
+//! here from an unset key. The whole rule above depends on distinguishing these cases.
 //!
 //! # Known limitations
 //!
 //! * `GopherEnable` / `RTSPEnable` name proxy families macOS recognises but this crate has
 //!   no [`Scheme`] variant for, so nothing is ever routed through one. An enabled family
-//!   that names a host is still recorded as a [`RejectedValue`] rather than dropped —
+//!   that names a host is still recorded as a [`RejectedValue`] rather than dropped,
 //!   exactly as [`crate::parse::proxy_server`] records a Windows `gopher=` entry. Their
 //!   `…Port` and `…User` keys are not read at all, so [`Debug`] withholds those.
-//! * The `*User` keys (macOS 15.0+) become a [`ProxyAuth`] with no password; the
+//! * The `*User` keys (macOS 15.0+) become a [`ProxyAuth`] whose password state is `InKeychain`: the
 //!   password itself lives in the keychain and is deliberately not fetched.
 
 // The module is compiled on every target under `cfg(test)` so that its table driven
 // tests run in CI on Windows and Linux too; there it has no caller.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -48,7 +46,7 @@ use std::fmt;
 use url::Url;
 
 use crate::auth::ProxyAuth;
-use crate::bypass::{BypassDialect, BypassRules};
+use crate::bypass::{BypassDialect, BypassRules, ImplicitBypass};
 use crate::config::{ProxyConfig, ProxyConfigSource};
 use crate::diagnostic::{RejectedValue, RejectionKind, RejectionSource};
 use crate::endpoint::{ProxyEndpoint, ProxyEntry, ProxyScheme, Scheme};
@@ -77,7 +75,7 @@ struct SchemeKeys {
     user: &'static str,
     // The port assumed when the `…Port` key is missing or zero.
     default_port: u16,
-    // The wire protocol hint, set only where the schema actually implies one.
+    // The wire protocol hint, set only where the schema implies one.
     hint: Option<ProxyScheme>,
 }
 
@@ -98,14 +96,21 @@ const SCHEMES: [SchemeKeys; 4] = [
         host: "HTTPSProxy",
         port: "HTTPSPort",
         user: "HTTPSUser",
-        // The proxy for `https://` requests is still reached over plain HTTP
-        // (`CONNECT`), so this is an HTTP proxy and its default port is 80 — 443 would be
-        // the *destination*'s port, which is not what goes here. Chromium says the same
-        // twice: `proxy_chain_util_apple.cc` maps `kCFProxyTypeHTTPS` to `SCHEME_HTTP`
-        // ("the proxy itself is still expected to be an HTTP proxy") and falls back to
-        // `GetDefaultPortForScheme(SCHEME_HTTP)`; libproxy's `config-osx.c` builds
-        // `http://` for HTTP/HTTPS/FTP alike. Same reason for `hint: None`.
-        default_port: 80,
+        // 443 is what every other macOS reader sees. configd's `SCDynamicStoreCopyProxies`
+        // reads the same `State:` key as this crate, then normalizes it: an enabled HTTPS
+        // proxy whose `HTTPSPort` is missing or 0 gets `getservbyname("https", "tcp")`,
+        // or 443 when that finds nothing (`validate_proxy_content` in configd's
+        // `SCProxies.c`). Chromium's `proxy_config_service_mac.cc` and libproxy's
+        // `config-osx.c` read through that call, so their own fallbacks never see a
+        // missing port. This crate reads the key with `SCDynamicStoreCopyValue`, which
+        // does not normalize, so the default here is the one that applies. The proxy is
+        // still an HTTP proxy reached with `CONNECT` (`proxy_chain_util_apple.cc` maps
+        // `kCFProxyTypeHTTPS` to `SCHEME_HTTP`), hence `hint: None`.
+        //
+        // Limitation: the 443 rests on macOS only. iOS hands this table the dictionary
+        // from `CFNetworkCopySystemProxySettings`, whose source is not published, and
+        // Chromium's iOS reader takes no `HTTPS…` key at all.
+        default_port: 443,
         hint: None,
     },
     SchemeKeys {
@@ -114,8 +119,8 @@ const SCHEMES: [SchemeKeys; 4] = [
         host: "FTPProxy",
         port: "FTPPort",
         user: "FTPUser",
-        // 80, not 21, and for the same reason: Chromium passes `kCFProxyTypeHTTP` for
-        // this family, so an `ftp://` request goes through an HTTP proxy here as well.
+        // 80, not 21: Chromium passes `kCFProxyTypeHTTP` for this family, so an `ftp://`
+        // request goes through an HTTP proxy.
         default_port: 80,
         hint: None,
     },
@@ -130,7 +135,7 @@ const SCHEMES: [SchemeKeys; 4] = [
         // `proxy_chain_util_apple.cc` maps `kCFProxyTypeSOCKS` to `SCHEME_SOCKS5` saying
         // "we can't tell whether this was v4 or v5" and assuming v5 as the only version
         // macOS offers. GNOME's `socks` child is pinned the same way and for the same
-        // reason — see `sys/linux/gsettings_map.rs`.
+        // reason, see `sys/linux/gsettings_map.rs`.
         hint: Some(ProxyScheme::Socks5),
     },
 ];
@@ -167,21 +172,21 @@ pub(crate) enum DictValue {
     // The `CFString` elements of a `CFArray`, and how many of its elements were not one this
     // reader could carry across.
     //
-    // The count is here rather than folded into [`DictValue::Unreadable`] because a list that
-    // lost a member is still a list every reader below can use, and because under
+    // The count is here rather than folded into [`DictValue::Unreadable`] because a list
+    // that lost a member is still a list every reader below can use, and because under
     // `ExceptionsList` each lost member is one bypass rule the user configured and will not
-    // get — a host they meant to reach directly, proxied instead. Shorter by exactly the
-    // members that went missing is the one thing a caller cannot see from `items` alone.
-    // Nothing about the lost members is carried: a value this crate could not read is not one
-    // it may quote, the same line [`UNREADABLE`] draws.
+    // get, a host they meant to reach directly, proxied instead. A caller cannot determine
+    // how many members went missing from `items` alone. Nothing about the lost members is
+    // carried: a value this crate could not read is not one it may quote, the same line
+    // [`UNREADABLE`] draws.
     List {
         items: Vec<String>,
         unreadable: usize,
     },
     // A value that reached the reader and could not be carried across the Core Foundation
     // boundary at all: an unmodelled type, or a `CFString` whose content does not reencode
-    // as UTF-8. It holds nothing, on purpose — the point is that the key was *set*, which
-    // is the one thing dropping the entry could not say.
+    // as UTF-8. It holds no value because it represents only that the key is *set*, which
+    // dropping the entry cannot convey.
     Unreadable,
 }
 
@@ -195,7 +200,7 @@ pub(crate) struct ProxyDict {
 //
 // Visible to the rest of [`crate::sys`] because the macOS reader needs the same answer
 // before this module ever sees the dictionary: dropping an unmodelled value is only
-// harmless under a key nothing reads (see `to_proxy_dict` in `src/sys/mac/mod.rs`).
+// harmless under a key nothing reads (see `to_proxy_dict` in `src/sys/cf_dict.rs`).
 pub(super) fn is_known_key(key: &str) -> bool {
     const SINGLES: [&str; 6] = [
         AUTO_DISCOVERY_ENABLE,
@@ -231,7 +236,7 @@ impl fmt::Debug for ProxyDict {
                         crate::util::fnv1a(script.as_bytes())
                     ),
                 ),
-                // Raw text from `SCDynamicStore`, not a parsed `Url` — nothing upstream has
+                // Raw text from `SCDynamicStore`, not a parsed `Url`; nothing upstream has
                 // asked it to be one, so it may hold whatever `configd` was handed. That
                 // rules out `redact_userinfo` alone: its scan restarts at whitespace, so a
                 // password with a space in it (`alice:my pass@host`) puts the `user:` half
@@ -241,21 +246,21 @@ impl fmt::Debug for ProxyDict {
                     map.entry(&key, &format_args!("{}", redact_offending_token(url)))
                 }
                 // The same two keys carrying a value of a type the schema does not model.
-                // `to_dict_value` in `src/sys/mac/mod.rs` picks the `DictValue` off the Core
+                // `to_dict_value` in `src/sys/cf_dict.rs` picks the `DictValue` off the Core
                 // Foundation runtime type and never looks at the key, so a `CFArray` stored
                 // under `ProxyAutoConfigJavaScript` arrives as a `List`: it matches neither
                 // arm above, which require `Text`, nor the three below, whose guard is
                 // `!is_known_key`. Without this arm it would reach the masking arms at the
-                // bottom, which hide a credential but not a script body — and under these
+                // bottom, which hide a credential but not a script body, and under these
                 // two keys the whole value is the secret, not a fragment of it. What the key
-                // promises about its value is not something this crate gets to assume —
-                // `configd` is what wrote it — and the value is unusable here either way, so
-                // name only its shape.
+                // promises about its value is not something this crate gets to assume
+                // (`configd` is what wrote it), and the value is unusable here either way,
+                // so name only its shape.
                 (AUTO_CONFIG_JAVASCRIPT | AUTO_CONFIG_URL, _) => {
                     map.entry(&key, &format_args!("<unmodelled type, withheld>"))
                 }
                 // Nothing was carried across the boundary, so there is nothing to mask and
-                // nothing to count — and no "key not read" spelling either: `to_proxy_dict`
+                // nothing to count, and no "key not read" spelling either: `to_proxy_dict`
                 // stores this variant only under a key [`is_known_key`] answers for.
                 (_, DictValue::Unreadable) => map.entry(&key, &format_args!("{UNREADABLE}")),
                 (_, DictValue::Text(text)) if !is_known_key(key) => {
@@ -270,16 +275,16 @@ impl fmt::Debug for ProxyDict {
                 }
                 // The keys this crate *does* read. `<Scheme>Proxy` holds an address, and
                 // [`ProxyEndpoint::parse`](crate::endpoint::ProxyEndpoint::parse) accepts a
-                // bare `user:pass@host` there — that spelling is supported input, not a
-                // corner case — so the value carries a password as readily as
+                // bare `user:pass@host` there (that spelling is supported input, not a
+                // corner case), so the value carries a password as readily as
                 // `AUTO_CONFIG_URL` does. `ExceptionsList` holds bypass entries, which is
                 // where a stranded `bob:hunter2` fragment turns up. Masked, not counted:
                 // unlike an unread key, what these hold is the thing a reader is debugging.
                 (_, DictValue::Text(text)) => {
                     map.entry(&key, &format_args!("{}", redact_offending_token(text)))
                 }
-                // The lost members are absent here as well as from `items`, and deliberately:
-                // there is nothing of them to print that would not be a guess. What a reader
+                // The lost members are absent here as well as from `items`: there is
+                // nothing of them to print that would not be a guess. What a reader
                 // debugging a missing bypass rule has instead is the [`RejectedValue`] per
                 // lost member that [`bypass_from_dict`] records, which is a public carrier
                 // rather than a `tracing`-only one.
@@ -291,8 +296,7 @@ impl fmt::Debug for ProxyDict {
                         .collect::<Vec<_>>(),
                 ),
                 // No catch-all: a new `DictValue` variant must be given an arm here rather
-                // than falling through to the derive. That fallthrough is what left the
-                // scheme keys in the clear after the `AUTO_CONFIG_*` pair was fixed.
+                // than falling through to the derive, which prints the value in the clear.
                 (_, DictValue::Number(number)) => map.entry(&key, number),
             };
         }
@@ -316,7 +320,7 @@ impl ProxyDict {
     // configured at all", while `HTTPEnable = 0` means "explicitly off" and therefore
     // becomes [`ProxyEntry::Disabled`].
     // The second is the one this `None` cannot express, which is why
-    // [`ProxyDict::flag_is_unusable`] exists — a caller that needs to tell "never set"
+    // [`ProxyDict::flag_is_unusable`] exists: a caller that needs to tell "never set"
     // from "set to something unreadable" asks that instead.
     // The text arm is this crate's own tolerance, not the reference's: Chromium's
     // `GetBoolFromDictionary` asks for a `CFNumberRef` and returns its caller's default
@@ -333,7 +337,7 @@ impl ProxyDict {
 
     // Whether the flag key holds something that is neither absent nor a flag: `"yes"`, an
     // array. [`ProxyDict::flag`] folds those into the same `None` as "never set", so the
-    // scheme is skipped exactly as if nothing had been configured — and a proxy the user
+    // scheme is skipped exactly as if nothing had been configured, and a proxy the user
     // switched on then goes direct with no record, which is the fail-open
     // [`record_unroutable_schemes`] refuses one key over.
     //
@@ -360,7 +364,7 @@ impl ProxyDict {
         }
     }
 
-    // Read a string key *without* trimming — used for the inline PAC script, whose
+    // Read a string key *without* trimming, used for the inline PAC script, whose
     // leading whitespace is part of the source.
     fn raw_text(&self, key: &str) -> Option<&str> {
         match self.entries.get(key)? {
@@ -369,20 +373,9 @@ impl ProxyDict {
         }
     }
 
-    // Whether the string key holds something that is neither absent nor a string: a number,
-    // an array. [`ProxyDict::text`] and [`ProxyDict::raw_text`] fold those into the same
-    // `None` as "never set", and every caller reads that `None` as "nothing was configured
-    // here" — so an `HTTPProxy` the user filled in leaves `HTTPEnable = 1` pointing at
-    // nothing, and `Direct` comes back with no record, which is the fail-open
-    // [`record_unroutable_schemes`] refuses one key over.
-    //
-    // Third of the trio with [`ProxyDict::flag_is_unusable`] and
-    // [`ProxyDict::port_is_unusable`], and it hands back a value to record for the same
-    // reason the flag one does: what it guards does not survive the drop.
-    //
-    // A blank string is absent from the arms on purpose. `text` rejects it, but "filled in
-    // with nothing" is how a key that was never filled in reads at this layer — the line
-    // `port_is_unusable` already draws around `""`.
+    // Record non-string values that [`ProxyDict::text`] would treat as absent; an enabled
+    // scheme could otherwise become `Direct` without a rejection. Blank strings mean unset,
+    // as in [`ProxyDict::port_is_unusable`].
     fn text_is_unusable(&self, key: &str) -> Option<String> {
         match self.entries.get(key)? {
             DictValue::Text(_) => None,
@@ -401,7 +394,7 @@ impl ProxyDict {
     //
     // Same tolerance as [`ProxyDict::flag`], and the reference falls back the same way:
     // `ProxyDictionaryToProxyChain` takes the port as a `CFNumberRef` and, failing that,
-    // uses `GetDefaultPortForScheme` — so a string port means Chromium talks to 80 while
+    // uses `GetDefaultPortForScheme`, so a string port means Chromium talks to 80 while
     // the plist says 8080. The text arm goes through [`port_from_digits`] rather than its
     // own `parse` so that the port grammar (`1*DIGIT`) has one definition, not one per
     // reader.
@@ -417,7 +410,7 @@ impl ProxyDict {
     // Whether the port key holds something that is neither absent nor a port: `70000`,
     // `-1`, `"http"`, an array. [`ProxyDict::port`] folds all of those into the same
     // `None` as "never filled in", so a scheme that kept its default port here would send
-    // a typed-in `70000` to `proxy.corp:80` — a service the user never named, reached over
+    // a typed-in `70000` to `proxy.corp:80`, a service the user never named, reached over
     // a connection they asked to have proxied. Every other backend refuses that: the port
     // travels inside the host string there, [`crate::util::split_host_port`] rejects
     // `proxy.corp:70000` outright, and the scheme is dropped with a record so `resolve`
@@ -466,7 +459,7 @@ impl ProxyDict {
     //
     // It hands back a value like its siblings, but the record goes somewhere else: no
     // scheme lost an answer, so there is no scheme-endpoint entry to carry it, and
-    // [`BypassRules::rejected`] is the carrier instead — the same one `kioslaverc`'s
+    // [`BypassRules::rejected`] is the carrier instead, the same one `kioslaverc`'s
     // unexpanded `NoProxyFor` uses, and the one a malformed *entry* of this very list
     // already reaches. The direction is the opposite of the fold the siblings guard: a
     // host the user meant to reach directly goes through the proxy instead, rather than a
@@ -478,7 +471,7 @@ impl ProxyDict {
     fn list_is_unusable(&self, key: &str) -> Option<String> {
         match self.entries.get(key)? {
             // An array is what this key is supposed to hold, however few of its members
-            // survived the crossing — a list that lost members is not a list of the wrong
+            // survived the crossing, a list that lost members is not a list of the wrong
             // *type*, and folding it in here would report it as one. The loss is recorded by
             // [`bypass_from_dict`] instead, one entry per member.
             DictValue::List { .. } => None,
@@ -502,7 +495,7 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
     let mut rejected = Vec::new();
 
     // `== Some(true)` folds "unreadable" into "off", the same fold the scheme loop below
-    // records rather than swallows — and these two flags are the wider drop of the three:
+    // records rather than swallows, and these two flags are the wider drop of the three:
     // WPAD or a PAC the user switched on is skipped whole, not one scheme of four. Which is
     // why they are attributed to `Scheme::All` and not left unattributed: an unattributed
     // record is one `resolve` cannot find, and the widest drop would be the only one that
@@ -517,14 +510,14 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
         // The one return that drops `rejected` on purpose, and the only one that can: getting
         // here means the flag above read as `Some(true)`, and `record_unreadable_flag` pushes
         // only when the flag is unreadable, so the list is still empty. Record anything ahead
-        // of this line and it needs somewhere to go — `WpadAutoDetect` has no slot for it.
+        // of this line and it needs somewhere to go; `WpadAutoDetect` has no slot for it.
         return Ok(ProxyMode::WpadAutoDetect);
     }
 
     record_unreadable_flag(dict, AUTO_CONFIG_ENABLE, Some(Scheme::All), &mut rejected);
     if dict.flag(AUTO_CONFIG_ENABLE) == Some(true) {
         // Both PAC returns carry the list rather than dropping it: unlike the WPAD one above,
-        // the scheme-key loop is not the only thing that can have recorded by now — a
+        // the scheme-key loop is not the only thing that can have recorded by now: a
         // `ProxyAutoDiscoveryEnable` that was present but unreadable is recorded and then
         // folded into "off", which lands here.
         if let Some(script) = dict.raw_text(AUTO_CONFIG_JAVASCRIPT) {
@@ -552,7 +545,7 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
         // a valid entry fills every scheme with none of its own. A drop under `SOCKSEnable`
         // or `SOCKSProxy` therefore costs that fallback too, not just `socks://` itself, so
         // it is attributed as widely as the fallback it prevented rather than to its own
-        // scheme — the same reasoning `mode_from_dict`'s PAC/WPAD attribution above uses.
+        // scheme, the same reasoning `mode_from_dict`'s PAC/WPAD attribution above uses.
         let attributed_scheme = if keys.scheme == Scheme::Socks {
             Scheme::All
         } else {
@@ -566,8 +559,8 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
         let host = if enabled { dict.text(keys.host) } else { None };
         let Some(host) = host else {
             // Only when the scheme is on: an unreadable host under a scheme the user turned
-            // off is a key nobody was going to read. Recording it also keeps the scheme out
-            // of `per_scheme`, where `Disabled` would answer Direct for a proxy the user
+            // off is a key that will not be read. Recording it also keeps the scheme out of
+            // `per_scheme`, where `Disabled` would answer Direct for a proxy the user
             // switched on. An enabled scheme whose host key is absent or blank does take
             // `Disabled`: nothing was dropped, because there was nothing to route to.
             if enabled
@@ -627,7 +620,7 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
             endpoint = endpoint.with_scheme_hint(hint);
         }
         if let Some(user) = dict.text(keys.user) {
-            endpoint = endpoint.with_auth(ProxyAuth::from_username(user));
+            endpoint = endpoint.with_auth(ProxyAuth::from_username(user).password_in_keychain());
         } else if dict.text_is_unusable(keys.user).is_some() {
             // Not even the log line carries the value: a username is the half of a
             // credential this crate does hold.
@@ -647,7 +640,7 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
     // above, which *overwrites* `Disabled` rather than filling around it, and an unreadable
     // PAC or WPAD switch costs a mode that replaces the manual answer whole. Dropping the
     // entry is what lets `resolve` reach the record in `rejected` instead of a `Disabled`
-    // pre-empting it — GNOME's `socks_unusable` guard is the same rule one backend over.
+    // pre-empting it; GNOME's `socks_unusable` guard is the same rule one backend over.
     //
     // This is here rather than in `ProxyMode::with_rejected` because the overwrite is what
     // makes it true, and only this reader does one: Windows' `apply_socks_catch_all` fills
@@ -660,7 +653,7 @@ pub(crate) fn mode_from_dict(dict: &ProxyDict) -> Result<ProxyMode, Error> {
         per_scheme.retain(|_, entry| !entry.is_disabled());
     }
 
-    // Reject-only stays `Manual` so the drops are not lost — `parse::windows_manual`'s
+    // Reject-only stays `Manual` so the drops are not lost: `parse::windows_manual`'s
     // doc is where that rule is written. Only that half is shared: the emptiness test here
     // is "nothing was switched on", not "`per_scheme` is empty", so a dict holding nothing
     // but `Disabled` entries collapses instead of answering Direct the long way round.
@@ -685,7 +678,7 @@ fn apply_socks_fallback(per_scheme: &mut HashMap<Scheme, ProxyEntry>) {
 }
 
 // A proxy family with no [`Scheme`] cannot be routed through, so there is no endpoint to
-// build; an enabled one that names a host is recorded instead — the same call
+// build; an enabled one that names a host is recorded instead, the same call
 // [`crate::parse::proxy_server`] makes for a Windows `gopher=` entry.
 fn record_unroutable_schemes(dict: &ProxyDict, rejected: &mut Vec<RejectedValue>) {
     for keys in &UNROUTABLE {
@@ -719,13 +712,13 @@ fn record_unroutable_schemes(dict: &ProxyDict, rejected: &mut Vec<RejectedValue>
 // dropped, so the question each caller answers is *which requests lost an answer*, not
 // which key was read:
 //
-// - one scheme's `<Scheme>Enable` / `<Scheme>Proxy` — that scheme, except SOCKS, which is
+// - one scheme's `<Scheme>Enable` / `<Scheme>Proxy`: that scheme, except SOCKS, which is
 //   also every unclaimed scheme's fallback and so is attributed to [`Scheme::All`]
 //   (`attributed_scheme`);
-// - the PAC and WPAD switches — [`Scheme::All`]. A PAC the user switched on decides every
+// - the PAC and WPAD switches: [`Scheme::All`]. A PAC the user switched on decides every
 //   request, so losing it loses every answer, and `All` is the slot every lookup falls
 //   back to, which is where `ProxyMode::with_rejected` files a record attributed to it;
-// - the [`UNROUTABLE`] families — `None`. Gopher and the rest have no [`Scheme`] variant,
+// - the [`UNROUTABLE`] families: `None`. Gopher and the rest have no [`Scheme`] variant,
 //   so no request was ever going to be routed by them and none lost an answer.
 fn record_unreadable_flag(
     dict: &ProxyDict,
@@ -786,6 +779,27 @@ fn warn_unusable_exceptions_list(key: &str) {
 // excluded is being proxied has [`BypassRules::rejected`] to look at either way.
 fn bypass_from_dict(dict: &ProxyDict) -> BypassRules {
     let mut rules = BypassRules::new();
+    // `localhost`, `127.0.0.1` and `::1`, and nothing else: CFNetwork proxies the rest of
+    // `127.0.0.0/8`, `*.localhost` and the link-local ranges unless an entry names them
+    // (`cfnetwork_implicit_bypass_is_three_destinations` in `tests/mac_exceptions_list.rs`).
+    // And only once the settings carry a bypass key: with neither an `ExceptionsList` array
+    // nor `ExcludeSimpleHostnames` switched on, CFNetwork proxies those three as well
+    // (`a_bypass_key_is_what_turns_on_the_loopback_bypass_not_any_entry_in_it`). A key in a
+    // shape no run has asked about (a list that is not an array, the switch set to 0) is
+    // read as absent, which proxies.
+    let has_bypass_key =
+        dict.list(EXCEPTIONS_LIST).is_some() || dict.flag(EXCLUDE_SIMPLE_HOSTNAMES) == Some(true);
+    // CFNetwork reads a trailing dot as the DNS root on either side, and an IPv4 entry does
+    // not reach the IPv4-mapped spelling of its address (`cfnetwork_sheds_a_trailing_dot`
+    // and `cfnetwork_reads_a_mapped_destination_as_written` in
+    // `tests/mac_exceptions_list.rs`).
+    rules.strip_trailing_dot = true;
+    rules.ipv4_mapped_as_ipv4 = false;
+    rules.implicit = if has_bypass_key {
+        ImplicitBypass::CfNetwork
+    } else {
+        ImplicitBypass::Empty
+    };
     if let Some(value) = dict.list_is_unusable(EXCEPTIONS_LIST) {
         warn_unusable_exceptions_list(EXCEPTIONS_LIST);
         rules.rejected.push(RejectedValue::new(
@@ -797,26 +811,30 @@ fn bypass_from_dict(dict: &ProxyDict) -> BypassRules {
     // `MacOs` because CFNetwork was asked. `Suffix` is the majority reading, and taking it
     // here would rest on no evidence but that majority: the only evidence within reach was
     // Chromium's macOS reader, which is a reimplementation and not the OS.
-    // `tests/mac_exceptions_list.rs` put the rows to `CFNetworkCopyProxiesForURL` on a macOS
-    // runner instead — it takes the settings dictionary as an argument, so no store, no
-    // write and no network — and three of them came back against the suffix reading, every
-    // one of them fail-open. The dialect carries which three.
+    // `tests/mac_exceptions_list.rs` put the rows to `CFNetworkCopyProxiesForURL` on a
+    // macOS runner instead (it takes the settings dictionary as an argument, so no store,
+    // no write and no network), and three of them came back against the suffix reading,
+    // every one of them fail-open. The dialect carries which three.
     //
     // `expand_abbreviated_cidr` stays in front of it: the same runs confirmed `169.254/16`
     // covers `169.254.1.1` and not `169.0.0.254`, which is the padding this does and not
     // the URL-standard reading Chromium applies to the same text.
+    //
+    // Limitation: CFNetwork compares an IPv4 destination written other than as four decimal
+    // octets as text, and every entry point here reads the destination folded, so `10.1.2.3`,
+    // `10.*` and `10.0.0.0/8` report a bypass for `012.1.2.3`, which the Mac proxies.
     let (entries, unreadable) = dict.list(EXCEPTIONS_LIST).unwrap_or((&[], 0));
     for entry in entries {
         rules.push_entry_in(&expand_abbreviated_cidr(entry), BypassDialect::MacOs);
     }
     rules.dedup_patterns();
-    // A member the Core Foundation reader could not carry across is one bypass rule the user
-    // configured and will not get — the same direction as the unusable-list case above, and
-    // recorded the same way rather than left to a warning, because the missing rules are
-    // exactly what a caller cannot reconstruct from `patterns`. One record per member: the
-    // number lost is the part that carries the information, since nothing of the members
-    // themselves may be quoted. `dedup_patterns` above does not reach `rejected`, so the
-    // repeats survive.
+    // A member the Core Foundation reader could not carry across is one bypass rule the
+    // user configured and will not get, the same direction as the unusable-list case
+    // above, and recorded the same way rather than left to a warning, because the missing
+    // rules are what a caller cannot reconstruct from `patterns`. One record per member:
+    // the number lost is the part that carries the information, since nothing of the
+    // members themselves may be quoted. `dedup_patterns` above does not reach `rejected`,
+    // so the repeats survive.
     for _ in 0..unreadable {
         rules.rejected.push(RejectedValue::new(
             RejectionKind::UnsupportedMapping,
@@ -837,7 +855,7 @@ fn bypass_from_dict(dict: &ProxyDict) -> BypassRules {
     rules
 }
 
-// Losing this rule sends traffic *through* the proxy rather than past it — the opposite
+// Losing this rule sends traffic *through* the proxy rather than past it, the opposite
 // direction from every other drop here, and still not one the endpoint fails to survive.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 fn warn_unusable_exclude_simple_hostnames(key: &str) {
@@ -846,9 +864,16 @@ fn warn_unusable_exclude_simple_hostnames(key: &str) {
 
 // Pad an abbreviated IPv4 CIDR to its full four octets: macOS ships `169.254/16` in the
 // default `ExceptionsList`, a spelling `IpNet` rejects outright. Chromium accepts it and
-// means something else — `ParseCIDRBlock` uses the URL standard's IPv4 parser, which
+// means something else: `ParseCIDRBlock` uses the URL standard's IPv4 parser, which
 // spreads a short form's last component over the trailing bytes, so `169.254/16` is
 // `169.0.0.254/16` there rather than the link-local range Apple wrote.
+//
+// Padding takes CFNetwork's reading over Chromium's, where `BypassDialect::MacOs` refuses a
+// CIDR address the two read apart (`012.1.2.0/24`). The short form is a spelling Apple
+// writes itself, in the list every Mac ships with, so refusing it would drop the link-local
+// bypass from an unconfigured Mac. The default list writes no leading zero, and
+// CFNetwork's decimal reading of one is what its parser happens to do rather than a
+// spelling Apple uses.
 //
 // Read whole rather than trimmed, because `BypassDialect::MacOs` does not trim either and
 // this runs in front of it: padding a short CIDR here would hand `parse_in` an entry the
@@ -878,20 +903,20 @@ fn expand_abbreviated_cidr(entry: &str) -> Cow<'_, str> {
 }
 
 // Resolve an independently read `Setup:` and `State:` scope of the global proxies key into
-// one [`ProxyConfig`], `State:` first. Apple documents no precedence between the two — the
-// discussion section of `SCDynamicStoreCopyProxies` is a key/type table — and the call
+// one [`ProxyConfig`], `State:` first. Apple documents no precedence between the two (the
+// discussion section of `SCDynamicStoreCopyProxies` is a key/type table), and the call
 // itself reads only `SCDynamicStoreKeyCreateProxies`, the global proxies entity in the
 // `State:` domain (configd `SystemConfiguration.fproj/SCProxies.c`), so it never sees
 // `Setup:` at all. Every reference goes through that one call (Chromium
 // `proxy_config_service_mac.cc`, libproxy `config-osx.c`), which is what makes `State:` the
 // view the rest of the machine acts on. It is also already the *output* of a resolution
 // that saw `Setup:`: configd's IPMonitor builds it from the primary service, and the
-// function that takes a service's proxies entity — `get_proxies_changes`, registered
-// against `kSCEntNetProxies` in `Plugins/IPMonitor/ip_plugin.c` — is handed that service's
+// function that takes a service's proxies entity, `get_proxies_changes`, registered
+// against `kSCEntNetProxies` in `Plugins/IPMonitor/ip_plugin.c`, is handed that service's
 // `State:` and `Setup:` dictionaries both. Which of the two wins *there* is left unstated
 // because nothing below depends on it: what makes `State:` the effective scope here is
-// that every reference reads it and none reads `Setup:`. `Setup:` stays in `sources` — a
-// configured-but-not-yet-in-effect setting is worth showing — and it does not win against
+// that every reference reads it and none reads `Setup:`. `Setup:` stays in `sources` (a
+// configured-but-not-yet-in-effect setting is worth showing), and it does not win against
 // `State:`. With no `State:` scope at all, though, there is nothing for it to lose to and
 // it becomes the effective mode: reporting `Direct` while the machine holds a configured
 // proxy would be the worse answer.
@@ -899,16 +924,17 @@ fn expand_abbreviated_cidr(entry: &str) -> Cow<'_, str> {
 // That asymmetry is also what decides a `Setup:` scope the reader could not interpret at
 // all, which is why `setup` arrives as a `Result`: a failure there costs the report and
 // not the answer, so with a `State:` scope to fall back on it is warned about and the
-// scope is dropped from `sources`. `State:` is unaffected — it is the only scope
-// `effective` was ever built from when it exists — so nothing observable changes but the
+// scope is dropped from `sources`. `State:` is unaffected (it is the only scope
+// `effective` was ever built from when it exists), so nothing observable changes but the
 // entry that could not be built. With no `State:` scope the failure is the whole read's,
-// exactly as the paragraph above makes `Setup:` the effective mode there.
+// as the paragraph above makes `Setup:` the effective mode there.
 //
-// No error kind is exempt, and that is the opposite of [`group_policy_source`]'s rule on
-// Windows, which softens only [`Error::Io`]. The two differ because the precedence does:
-// group policy is the scope that *overrides*, so softening a value it handed over and the
-// crate refused would reinstate the per-user proxy the policy exists to replace. `Setup:`
-// overrides nothing.
+// No error kind is exempt, which is also [`group_policy_source`]'s rule on Windows, and for
+// the same reason: neither scope is ever `effective` while the other one exists, so
+// failing the read over it would fail a call whose answer it does not decide.
+//
+// iOS hands over one dictionary with no scopes, so only macOS merges.
+#[cfg_attr(all(target_os = "ios", not(test)), expect(dead_code))]
 pub(crate) fn merge_setup_and_state(
     setup: Result<Option<ProxyMode>, Error>,
     state: Option<ProxyMode>,
@@ -923,9 +949,9 @@ pub(crate) fn merge_setup_and_state(
                 "the Setup: proxies scope could not be read; reporting the State: scope \
                  alone, which is the one in effect"
             );
-            // What the paragraph above calls costing the report and not the answer. The
-            // cost is now itemised: without this, a scope that failed to read and a
-            // machine with no `Setup:` scope at all produce the same `sources`.
+            // Record the failed `Setup:` read in `fallbacks`; otherwise its `sources` are
+            // indistinguishable from a machine with no `Setup:` scope. The effective State
+            // scope still supplies the answer.
             fallbacks.push(ProxyConfigSource::SystemConfigurationSetup);
             None
         }
@@ -945,6 +971,7 @@ pub(crate) fn merge_setup_and_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::PasswordState;
 
     // Build a dictionary from `(key, value)` literals, `Text` for `&str` and `Number`
     // for integers.
@@ -991,14 +1018,14 @@ mod tests {
             "HTTPProxy" => "proxy.corp",
             "HTTPPort" => 8080i64,
             "HTTPUser" => "alice",
-            // A key Apple has never shipped, which is the point: `SCSchemaDefinitions.h`
-            // has no `Proxies…Password` at any version, and the six `*User` keys it does
-            // have all arrived in macOS 15.0. So this stands in for *any* key outside
-            // this module's schema, not for a real one it forgot — and an unvetted key is
-            // exactly what must not reach `Debug`.
+            // A key Apple has never shipped: `SCSchemaDefinitions.h` has no
+            // `Proxies…Password` at any version, and the six `*User` keys it does have all
+            // arrived in macOS 15.0. So this stands in for *any* key outside this module's
+            // schema, not for a real one it forgot, and an unvetted key is what must not
+            // reach `Debug`.
             "HTTPProxyPassword" => SECRET,
             "SomeFutureList" => &[SECRET][..],
-            // An unread key can arrive as a number too — `to_proxy_dict` copies whatever
+            // An unread key can arrive as a number too: `to_proxy_dict` copies whatever
             // Core Foundation held. `GopherEnable` / `GopherProxy` are read, for the
             // record they owe; the port under an unroutable family is read by nothing.
             "GopherPort" => 7070i64,
@@ -1029,9 +1056,9 @@ mod tests {
 
     // The reduction above must key off the name, not off the value's type. `to_dict_value`
     // decides the `DictValue` from the Core Foundation runtime type alone, so nothing stops
-    // either sensitive key from arriving as a list or a number — and the reductions that
+    // either sensitive key from arriving as a list or a number, and the reductions that
     // cover every *other* key are guarded by `!is_known_key`, which is false for these two.
-    // That leaves exactly this combination with no arm of its own.
+    // That leaves this combination with no arm of its own.
     #[test]
     fn a_sensitive_key_is_reduced_even_when_its_value_is_the_wrong_type() {
         const SECRET: &str = "hunter2";
@@ -1061,9 +1088,9 @@ mod tests {
             assert!(!rendered.contains("7070"), "{rendered}");
         }
 
-        // The controls: the `Text` reductions still run — a URL that really did arrive as
-        // one keeps its host and path, which is the whole point of reducing rather than
-        // dropping — and an unread key with a list still reports its length.
+        // The controls: the `Text` reductions still run (a URL that did arrive as one
+        // keeps its host and path, which is why the value is reduced rather than dropped)
+        // and an unread key with a list still reports its length.
         let mut dict = ProxyDict::new();
         dict.insert(AUTO_CONFIG_URL, DictValue::Text(carrier.clone()));
         dict.insert(
@@ -1102,7 +1129,7 @@ mod tests {
 
     // macOS recognises a Gopher and an RTSP proxy; this crate has no [`Scheme`] for
     // either, so nothing can be routed through one and `endpoint_for` must stay empty.
-    // Dropping it without a trace is the other half — the fail-open `parse::proxy_server`
+    // Dropping it without a trace is the other half, the fail-open `parse::proxy_server`
     // refuses on Windows for `gopher=proxy:80`, so an enabled family with a host has to
     // leave a record behind here too.
     #[test]
@@ -1131,16 +1158,16 @@ mod tests {
 
     // What the record above is allowed to *cost*, which is the half the test above does not
     // reach: `affected_scheme` is `None` for all three of [`record_unroutable_schemes`]'s
-    // pushes, and this test is the only thing holding that against `Scheme::All` — the value
+    // pushes, and only this test checks that the value is not `Scheme::All`, the value
     // every other unreadable switch in this file takes.
     //
     // `All` is the widest thing a record can say. `ProxyMode::with_rejected` files an `All`
     // drop as a [`ProxyEntry::Unusable`] in the slot every unmatched lookup falls back to, so
     // a Mac whose only oddity is a Gopher proxy would answer [`Error::ProxyEntryUnusable`]
-    // for every request it has — including `http://`, which no Gopher key was ever going to
+    // for every request it has, including `http://`, which no Gopher key was ever going to
     // route. Gopher and RTSP have no [`Scheme`] variant at all, so nothing was routed by
     // them and nothing lost an answer; the record exists to say a key was seen, not to
-    // refuse a request. `resolve`'s answer is the assertion that says so — a record that did
+    // refuse a request. `resolve`'s answer is the assertion that says so; a record that did
     // refuse would surface here as `ProxyEntryUnusable`; the attribution is restated as well only
     // because that block compiles away without the `resolve` feature, and a build that
     // cannot reach the cost should still hold the field it comes from.
@@ -1179,9 +1206,9 @@ mod tests {
     // The same argument as the test above, one key to the left. An `HTTPEnable` holding
     // text that is not a number is a proxy the user switched on in a spelling this crate
     // cannot read, and [`ProxyDict::flag`] folds it into the same `None` as a key that was
-    // never set — so the scheme is skipped and `Direct` comes back with nothing to show for
+    // never set, so the scheme is skipped and `Direct` comes back with nothing to show for
     // it. The sibling reader refuses that fold: [`ProxyDict::port_is_unusable`] tells
-    // "absent" from "present and unreadable" precisely so the second can be recorded.
+    // "absent" from "present and unreadable" so the second can be recorded.
     #[test]
     fn an_enable_flag_this_crate_cannot_read_is_still_recorded() {
         for value in ["yes", "on"] {
@@ -1203,7 +1230,7 @@ mod tests {
             );
             assert_eq!(rejected[0].redacted_input(), value);
             assert_eq!(rejected[0].affected_scheme(), Some(Scheme::Http));
-            // Unreadable is not "on": nothing is routed through a flag nobody could read.
+            // Unreadable is not "on": nothing is routed through an unreadable flag.
             assert!(mode.endpoint_for(Scheme::Http).is_none(), "{mode:?}");
         }
 
@@ -1239,7 +1266,7 @@ mod tests {
         );
         assert_eq!(rejected[0].redacted_input(), "8080");
         assert_eq!(rejected[0].affected_scheme(), Some(Scheme::Http));
-        // Unreadable is not a host: nothing is routed through a value nobody could read.
+        // Unreadable is not a host: nothing is routed through an unreadable value.
         assert!(mode.endpoint_for(Scheme::Http).is_none(), "{mode:?}");
         // And not `Disabled` either, which `resolve` reads as a deliberate "no proxy here":
         // the entry *is* the record, which is how a lookup reaches it at all.
@@ -1250,7 +1277,7 @@ mod tests {
         assert_eq!(entry.rejected(), Some(&rejected[0]), "{entry:?}");
 
         // A list under a host key reaches the same `None` by the other arm, and is reduced
-        // to its shape rather than carried — an array under `HTTPProxy` can name hosts.
+        // to its shape rather than carried: an array under `HTTPProxy` can name hosts.
         let listed = dict! {
             "HTTPEnable" => 1i64,
             "HTTPProxy" => &["proxy.corp", "other.corp"][..],
@@ -1311,17 +1338,17 @@ mod tests {
             assert_eq!(rejected[0].redacted_input(), "yes");
             // `All`, not unattributed: a PAC or WPAD switch decides every request, so the
             // widest drop of the three would otherwise be the only one `resolve` could not
-            // find — see the test below for what that costs.
+            // find, see the test below for what that costs.
             assert_eq!(rejected[0].affected_scheme(), Some(Scheme::All), "{key}");
         }
     }
 
-    // Everything the Core Foundation boundary loses arrives as one value, and the point of
-    // it arriving at all is that each reader then answers from the *key*. `to_proxy_dict`
-    // must not drop it: dropped, an `HTTPEnable` the user switched on is in the same state as
-    // a machine where HTTP was never configured — with a `trace::warning!` as the only trace
-    // of it, and that macro compiles to `()` on every build without the `tracing` feature,
-    // which is every default one.
+    // Everything the Core Foundation boundary loses arrives as one value, so that each
+    // reader then answers from the *key*. `to_proxy_dict` must not drop it: dropped, an
+    // `HTTPEnable` the user switched on is in the same state as a machine where HTTP was
+    // never configured, with a `trace::warning!` as the only trace of it, and that
+    // macro compiles to `()` on every build without the `tracing` feature, which is
+    // every default one.
     //
     // The recorded token is pinned too, and it is the same for all of them: a value this
     // crate could not read is one it must not quote, so there is nothing to record but the
@@ -1369,7 +1396,7 @@ mod tests {
             assert_eq!(rejected[0].redacted_input(), UNREADABLE, "{key}");
         }
 
-        // The fifth reader, `list_is_unusable`, files its record on the rules instead — a
+        // The fifth reader, `list_is_unusable`, files its record on the rules instead; a
         // bypass key names no scheme for `resolve` to refuse for. Paired with a working
         // proxy on purpose: with nothing switched on the answer is Direct, and an exception
         // list that excludes hosts from nothing has lost none of them.
@@ -1387,7 +1414,7 @@ mod tests {
 
     // A list that arrived shorter than it was sent. This is the drop the whole-list reader
     // above cannot see: the key holds an array, so `list_is_unusable` answers `None` and the
-    // surviving entries parse into real patterns — the record has to come from the count.
+    // surviving entries parse into real patterns; the record has to come from the count.
     //
     // Held here rather than only on the macOS side because the count is carried across a
     // module boundary: `strings_in` produces it, this file is what has to turn it into
@@ -1426,7 +1453,7 @@ mod tests {
 
     // The half of the record above that only `resolve` can show, and the reason the record
     // carries a scheme at all: an unreadable `Proxy*Enable` leaves nothing in `per_scheme`,
-    // so without the attribution every request falls through to `Direct` — the answer the
+    // so without the attribution every request falls through to `Direct`, the answer the
     // user turned PAC or WPAD on to avoid.
     #[cfg(feature = "resolve")]
     #[test]
@@ -1452,10 +1479,7 @@ mod tests {
         }
     }
 
-    // The scheme a helper records is the one it was called for, and every test that pins
-    // that uses `HTTP*`, which cannot tell it from a hard-coded [`Scheme::Http`]. One
-    // non-HTTP key through each helper closes that: the request that loses an answer must
-    // be the one whose key was dropped, and no other.
+    // Non-HTTP keys verify that each helper records the scheme whose setting was lost.
     #[cfg(feature = "resolve")]
     #[test]
     fn a_drop_under_one_scheme_takes_no_other_schemes_answer() {
@@ -1508,7 +1532,7 @@ mod tests {
 
     // The other side of the line: what the new reader must *not* call unusable. A blank
     // string is how "never filled in" reads at this layer, and a host key under a scheme
-    // the user switched off is a key nobody was going to read.
+    // the user switched off is a key that will not be read.
     #[test]
     fn a_blank_or_switched_off_host_is_not_recorded() {
         let blank = dict! {
@@ -1525,8 +1549,8 @@ mod tests {
     }
 
     // The collapse above names `parse::windows_manual` as the half it does *not* share, and
-    // nothing pinned the difference — two reviews in a row read the two as one rule. The
-    // routing answer is what may not drift; the mode is deliberately not the same value.
+    // nothing pinned the difference; two reviews in a row read the two as one rule. The
+    // routing answer is what may not drift; the mode is not the same value.
     #[test]
     fn a_switched_off_scheme_collapses_here_and_stays_manual_on_windows() {
         let dict = dict! {
@@ -1540,9 +1564,9 @@ mod tests {
         assert!(!windows.is_direct(), "{windows:?}");
         assert_eq!(windows.entry_for(Scheme::Http), Some(&ProxyEntry::Disabled));
 
-        // The half that needs the router. The mode assertions above are the point of the
-        // test and hold without it, so only this block is gated — every sibling here does
-        // the same, and the feature matrix builds four configurations with `resolve` off.
+        // The half that needs the router. The mode assertions above hold without the
+        // router, so only this block is gated; every sibling here does the same, and the
+        // feature matrix builds four configurations with `resolve` off.
         #[cfg(feature = "resolve")]
         {
             let url = url::Url::parse("http://example.net/").unwrap();
@@ -1560,7 +1584,7 @@ mod tests {
     }
 
     // The record is about a value the reader could not make sense of. A flag key that is
-    // simply absent, or one holding digits it can read, is nothing to report.
+    // absent, or one holding digits it can read, is nothing to report.
     #[test]
     fn a_flag_that_is_absent_or_readable_is_not_recorded() {
         let absent = dict! { "HTTPProxy" => "proxy.corp" };
@@ -1574,7 +1598,7 @@ mod tests {
         assert_eq!(mode_from_dict(&text_digits).unwrap(), ProxyMode::Direct);
     }
 
-    // The record is about a proxy that is actually on. A family left disabled, or enabled
+    // The record is about a proxy that is on. A family left disabled, or enabled
     // with no host to go to, is nothing to report.
     #[test]
     fn an_unroutable_proxy_that_is_off_or_hostless_is_not_recorded() {
@@ -1616,11 +1640,10 @@ mod tests {
             "SOCKSProxy" => "socks.corp",
         };
         let mode = mode_from_dict(&dict).unwrap();
-        // 80 for all three: every one of these families names an *HTTP* proxy, so 443/21
-        // — the ports of the destination protocol — would dial the wrong service. See
-        // the comments on `SCHEMES` for the two references that agree.
+        // HTTPS takes the 443 `SCDynamicStoreCopyProxies` fills in; FTP keeps 80, as an
+        // HTTP proxy. See the comments on `SCHEMES`.
         assert_eq!(mode.endpoint_for(Scheme::Http).unwrap().port, 80);
-        assert_eq!(mode.endpoint_for(Scheme::Https).unwrap().port, 80);
+        assert_eq!(mode.endpoint_for(Scheme::Https).unwrap().port, 443);
         assert_eq!(mode.endpoint_for(Scheme::Ftp).unwrap().port, 80);
         let socks = mode.endpoint_for(Scheme::Socks).unwrap();
         assert_eq!(socks.port, 1080);
@@ -1633,18 +1656,23 @@ mod tests {
             "HTTPEnable" => 1i64,
             "HTTPProxy" => "proxy.corp",
             "HTTPPort" => 0i64,
+            "HTTPSEnable" => 1i64,
+            "HTTPSProxy" => "secure.corp",
+            "HTTPSPort" => 0i64,
         };
         let mode = mode_from_dict(&dict).unwrap();
         assert_eq!(mode.endpoint_for(Scheme::Http).unwrap().port, 80);
-        // `0` is Apple's "never filled in" for `HTTPPort`, so it is not the unusable case.
+        assert_eq!(mode.endpoint_for(Scheme::Https).unwrap().port, 443);
+        // `0` is Apple's "never filled in" for a port, so it is not the unusable case.
         assert!(dict.port_is_unusable("HTTPPort").is_none());
+        assert!(dict.port_is_unusable("HTTPSPort").is_none());
     }
 
     // A port that cannot be a port drops the scheme and records the value, rather than
     // dialling the scheme default: `proxy.corp:80` is a service the user never named. The
     // other backends read the port out of the host string, where `split_host_port` refuses
     // it, so this is what makes the two spellings of one configuration agree. Chromium
-    // truncates instead (`70000` → 4464) and this crate deliberately does not follow it.
+    // truncates instead (`70000` → 4464) and this crate does not follow it.
     #[test]
     fn an_out_of_range_port_drops_the_scheme_and_is_recorded() {
         for value in [70000i64, -1i64] {
@@ -1828,7 +1856,7 @@ mod tests {
 
     // The half of the drop above that only `resolve` can show: SOCKS is also
     // `apply_socks_fallback`'s catch-all for every scheme with no proxy of its own, so an
-    // unusable `SOCKSProxy` costs HTTP that fallback too — not just `socks://` itself. The
+    // unusable `SOCKSProxy` costs HTTP that fallback too, not just `socks://` itself. The
     // rejection must be attributed as widely as what it took away (`Scheme::All`), or a
     // request for a scheme SOCKS would have covered resolves silently to Direct instead of
     // reporting the drop.
@@ -1853,7 +1881,7 @@ mod tests {
     // unticked are present as explicit zeros, and each of them is a scheme
     // `apply_socks_fallback` would have overwritten had `SOCKSProxy` been readable. A
     // `Disabled` kept for one of those answers Direct before `resolve` ever reaches
-    // `rejected`, so the drop above becomes invisible exactly where SOCKS was the only
+    // `rejected`, so the drop above becomes invisible where SOCKS was the only
     // proxy configured.
     #[cfg(feature = "resolve")]
     #[test]
@@ -1887,14 +1915,9 @@ mod tests {
         );
     }
 
-    // Spells out every family's `…Port` and `…User` key, because [`SCHEMES`] is the only
-    // place in the crate they appear: without this, four of the eight could be misspelled
-    // and nothing would go red. Both failures are silent — a `…Port` nobody finds falls
-    // back to the scheme default, a `…User` nobody finds drops the username — and neither
-    // records a rejection, so on macOS the first symptom is traffic on the wrong port or
-    // an unauthenticated proxy. Each dialled port differs from that family's default, so
-    // reading the wrong key cannot produce the expected answer. The spellings are Apple's
-    // `kSCPropNetProxies…` constants; `…User` is macOS 15.0+.
+    // [`SCHEMES`] owns the `…Port` and `…User` spellings. A missing key silently changes
+    // the port or drops the username; each expected port differs from its scheme default.
+    // The spellings follow Apple's `kSCPropNetProxies…` constants; `…User` is macOS 15.0+.
     #[test]
     fn every_scheme_reads_its_own_port_and_user_key() {
         for (scheme, enable, host, port, user, dialled) in [
@@ -1950,6 +1973,11 @@ mod tests {
             // A `…User` key is a username and nothing else: macOS keeps the password in
             // the keychain, which this crate does not read.
             assert!(!auth.has_password(), "{scheme:?}");
+            assert_eq!(
+                auth.password_state(),
+                PasswordState::InKeychain,
+                "{scheme:?}"
+            );
         }
     }
 
@@ -1997,9 +2025,9 @@ mod tests {
     }
 
     // The two PAC returns were the one exit that threw the record list away. Nothing above
-    // them is unreachable: `ProxyAutoDiscoveryEnable` present but unreadable is recorded and
-    // *then* folded into "off", which lands on exactly this branch, so the drop that hid a
-    // WPAD switch left with it. `Manual`'s exit has always carried the list.
+    // them is unreachable: `ProxyAutoDiscoveryEnable` present but unreadable is recorded
+    // and *then* folded into "off", which lands on this branch, so the drop that hid a WPAD
+    // switch left with it. `Manual`'s exit has always carried the list.
     #[test]
     fn a_drop_on_the_way_to_a_pac_answer_survives_it() {
         let cases = [
@@ -2067,26 +2095,10 @@ mod tests {
         );
     }
 
-    // The configuration that reads like a fail-open: the PAC switch on with neither payload
-    // key filled in, and nothing else set. It answers `Direct` with an empty record. This
-    // pins that as the contract, because the reference falls through the same way.
-    //
-    // The reference falls through the same way. `proxy_config_service_mac.cc` reads
-    // `kSCPropNetProxiesProxyAutoConfigURLString` only to skip setting a PAC URL when the
-    // key is not there, then goes on to the per-scheme keys exactly as this reader does —
-    // no PAC was named, so there is no PAC to lose. And this file already draws the same
-    // line one family over: an enabled `HTTPEnable` whose `HTTPProxy` is absent takes
-    // `Disabled` because "there was nothing to route to", and a dictionary holding nothing
-    // else collapses past it to `Direct`. Recording here would make PAC the one family
-    // where switching a flag on and filling nothing in counts as a drop.
-    //
-    // The blank spelling sits beside the absent one because `text_is_unusable` folds the
-    // two together deliberately, and this is the configuration where that fold decides the
-    // answer rather than merely agreeing with it. Each entry has its own control, and they
-    // are different ones: giving the `get` in `text_is_unusable` an `Unreadable` fallback
-    // fails the first, and an arm that reads a blank string as unreadable fails the second.
-    // Both land as `Manual` carrying two rejections — which is what the proposed fix would
-    // have made this configuration return.
+    // `proxy_config_service_mac.cc` skips a PAC URL when
+    // `kSCPropNetProxiesProxyAutoConfigURLString` is absent, then checks per-scheme keys.
+    // With no PAC URL or proxy host, an enabled switch alone yields `Direct` without a
+    // rejection. Both absent and blank URL strings exercise that rule.
     #[test]
     fn the_pac_switch_alone_is_direct_because_no_pac_was_ever_named() {
         for dict in [
@@ -2113,6 +2125,132 @@ mod tests {
         ));
     }
 
+    // CFNetwork bypasses `localhost`, `127.0.0.1` and `::1` only while the settings carry a
+    // bypass key; with neither, it proxies them too.
+    #[test]
+    fn the_implicit_set_follows_the_presence_of_a_bypass_key() {
+        let empty: &[&str] = &[];
+        for (dict, expected) in [
+            (
+                dict! { "HTTPEnable" => 1i64, "HTTPProxy" => "proxy.corp" },
+                ImplicitBypass::Empty,
+            ),
+            (
+                dict! {
+                    "HTTPEnable" => 1i64,
+                    "HTTPProxy" => "proxy.corp",
+                    "ExceptionsList" => empty,
+                },
+                ImplicitBypass::CfNetwork,
+            ),
+            (
+                dict! {
+                    "HTTPEnable" => 1i64,
+                    "HTTPProxy" => "proxy.corp",
+                    "ExcludeSimpleHostnames" => 1i64,
+                },
+                ImplicitBypass::CfNetwork,
+            ),
+            (
+                dict! {
+                    "HTTPEnable" => 1i64,
+                    "HTTPProxy" => "proxy.corp",
+                    "ExcludeSimpleHostnames" => 0i64,
+                },
+                ImplicitBypass::Empty,
+            ),
+        ] {
+            let mode = mode_from_dict(&dict).unwrap();
+            let bypass = mode.bypass().expect("manual mode has bypass rules");
+            assert_eq!(bypass.implicit, expected, "{dict:?}");
+            assert_eq!(
+                // Dotted, so `ExcludeSimpleHostnames` cannot answer it.
+                bypass.matches_authority("127.0.0.1"),
+                expected == ImplicitBypass::CfNetwork,
+                "{dict:?}"
+            );
+        }
+    }
+
+    // As CFNetwork measured: a trailing dot is the DNS root on either side, and an
+    // IPv4-mapped spelling is another address.
+    #[test]
+    fn an_exception_sheds_a_root_dot_and_reads_a_mapped_destination_as_written() {
+        let list: &[&str] = &["intra.example", "10.0.0.1", "dotted.example."];
+        let dict = dict! {
+            "HTTPEnable" => 1i64,
+            "HTTPProxy" => "proxy.corp",
+            "ExceptionsList" => list,
+        };
+        let mode = mode_from_dict(&dict).unwrap();
+        let bypass = mode.bypass().expect("manual mode has bypass rules");
+        assert!(bypass.matches_authority("intra.example"));
+        assert!(bypass.matches_authority("intra.example."));
+        assert!(bypass.matches_authority("10.0.0.1"));
+        assert!(!bypass.matches_authority("[::ffff:10.0.0.1]"));
+        assert!(bypass.matches_authority("dotted.example"));
+        assert!(bypass.matches_authority("dotted.example."));
+        assert!(bypass.rejected.is_empty(), "{:?}", bypass.rejected);
+        // The implicit set does not shed it: CFNetwork proxied `localhost.`.
+        assert!(bypass.matches_authority("localhost"));
+        assert!(!bypass.matches_authority("localhost."));
+    }
+
+    // As CFNetwork measured: `ExcludeSimpleHostnames` goes by the dot alone, so an IPv6
+    // literal is simple and an IPv4 one, mapped included, is not.
+    #[test]
+    fn exclude_simple_hostnames_bypasses_a_dotless_ipv6_literal() {
+        let empty: &[&str] = &[];
+        for (switch, simple) in [(1i64, true), (0i64, false)] {
+            let dict = dict! {
+                "HTTPEnable" => 1i64,
+                "HTTPProxy" => "proxy.corp",
+                "ExceptionsList" => empty,
+                "ExcludeSimpleHostnames" => switch,
+            };
+            let mode = mode_from_dict(&dict).unwrap();
+            let bypass = mode.bypass().expect("manual mode has bypass rules");
+            for host in ["[fe80::1]", "[febf::1]", "[fec0::1]", "intranet"] {
+                assert_eq!(bypass.matches_authority(host), simple, "{host} {dict:?}");
+            }
+            for host in ["[::ffff:127.0.0.1]", "127.0.0.2", "169.254.1.1"] {
+                assert!(!bypass.matches_authority(host), "{host} {dict:?}");
+            }
+        }
+    }
+
+    // CFNetwork compares an IPv4 entry not written as four decimal octets with the
+    // destination as text: `012.1.2.3` met only `012.1.2.3`, and `10.1.2.3` none of the
+    // other spellings. A CIDR address it reads as decimal, `012.1.2.0/24` as `12.1.2.0/24`,
+    // where Chromium reading the same list folds it to `10.1.2.0/24`. `0xa` is no address
+    // to CFNetwork. `tests/mac_exceptions_list.rs` holds the rows on a macOS runner.
+    #[test]
+    fn a_non_decimal_ipv4_exception_is_refused() {
+        let list: &[&str] = &[
+            "012.1.2.3",
+            "0xa.1.2.3",
+            "10.66051",
+            "10.1.2.03",
+            "012.1.2.0/24",
+            "010.1.2.0/24",
+            "0xa.1.2.0/24",
+            "10.1.2.4",
+        ];
+        let dict = dict! {
+            "HTTPEnable" => 1i64,
+            "HTTPProxy" => "proxy.corp",
+            "ExceptionsList" => list,
+        };
+        let mode = mode_from_dict(&dict).unwrap();
+        let bypass = mode.bypass().expect("manual mode has bypass rules");
+        assert_eq!(bypass.patterns.len(), 1, "{bypass:?}");
+        assert_eq!(bypass.rejected.len(), 7, "{bypass:?}");
+        for dest in ["10.1.2.3", "10.1.2.5", "12.1.2.5"] {
+            assert!(!bypass.matches_authority(dest), "{dest}: {bypass:?}");
+        }
+        assert!(bypass.matches_authority("10.1.2.4"));
+    }
+
     #[test]
     fn exceptions_and_simple_hostnames_become_bypass_rules() {
         let list: &[&str] = &[
@@ -2133,10 +2271,12 @@ mod tests {
         assert!(bypass.excludes_simple_hostnames());
         assert!(bypass.matches_authority("printer.local"));
         assert!(bypass.matches_authority("intranet"), "<local> equivalent");
-        // The abbreviated form on a range that is not already bypassed. `169.254/16` is the
-        // spelling Apple ships and is below too, but it cannot carry this: link-local is in
-        // the implicit set, so `169.254.1.2` bypasses whether the entry parsed or not, and an
-        // assertion on it here would hold nothing.
+        // The abbreviated form, both the spelling Apple ships and a /24. CFNetwork's implicit
+        // set holds no link-local address, so `169.254.1.2` bypasses on the entry alone.
+        assert!(
+            bypass.matches_authority("169.254.1.2"),
+            "abbreviated CIDR, Apple's"
+        );
         assert!(bypass.matches_authority("192.168.7.9"), "abbreviated CIDR");
         assert!(
             !bypass.matches_authority("192.168.8.9"),
@@ -2154,7 +2294,7 @@ mod tests {
     }
 
     // The rest of that reading: three spellings CFNetwork matches no destination with.
-    // Storing one as a live rule is fail-open on its own — the crate would report
+    // Storing one as a live rule is fail-open on its own: the crate would report
     // [`ProxyStep::Direct`] for traffic the Mac hands the proxy.
     #[test]
     fn an_exception_entry_macos_matches_nothing_with_is_recorded_rather_than_stored() {
@@ -2181,12 +2321,12 @@ mod tests {
         assert!(!bypass.matches_authority("www.example.com"));
         // A star past the one that opened the entry is a character again, and one that
         // leaves a name no destination carries is refused rather than stored as the dead
-        // glob it would be — the rule the guards in `HostPattern::parse_in` all share.
+        // glob it would be, the rule the guards in `HostPattern::parse_in` all share.
         assert!(!bypass.matches_authority("www.corp.example"));
         // A port does not narrow an entry there, it kills it.
         assert!(!bypass.matches_authority("example.com:8080"));
 
-        // A trailing `.*` is the one star that survives, and it takes the host with it —
+        // A trailing `.*` is the one star that survives, and it takes the host with it:
         // except that the glob needs the dot, so `corp` alone is the row this reads more
         // narrowly than the machine. Held here because it is the only divergence left, and
         // it is the safe direction: reported proxied, actually bypassed.
@@ -2198,10 +2338,10 @@ mod tests {
 
     // The fourth spelling of the same fail-open, on a different axis: not what the entry
     // says but what surrounds it. Do not let `BypassDialect::trim` cut either end for
-    // macOS — CFNetwork cuts neither, so a padded entry is dead there, and trimming it
+    // macOS, CFNetwork cuts neither, so a padded entry is dead there, and trimming it
     // here would make it live (`tests/mac_exceptions_list.rs` holds that on a runner).
     //
-    // An array element is a whole entry — nothing splits it — so the padding a plist carries
+    // An array element is a whole entry (nothing splits it), so the padding a plist carries
     // reaches the parser intact, which is what makes this reachable rather than theoretical.
     #[test]
     fn an_exception_entry_padded_with_whitespace_is_dead_on_macos_and_recorded() {
@@ -2217,18 +2357,15 @@ mod tests {
         assert!(!bypass.matches_authority("example.com"));
         // The CIDR row goes through `expand_abbreviated_cidr` first, so it has its own
         // control: pad a leading-space entry there and `parse_in` receives `10.0.0.0/16`
-        // with no whitespace left in it, which is live here and dead on the Mac. Not
-        // `169.254/16`, the spelling Apple actually ships, because link-local is in the
-        // implicit set — that row would pass whatever this list holds.
+        // with no whitespace left in it, which is live here and dead on the Mac.
         assert!(!bypass.matches_authority("10.0.1.1"));
 
         // Refused rather than dropped, so a reader sees what became of them.
         assert_eq!(bypass.rejected.len(), 3, "{:?}", bypass.rejected);
     }
 
-    // A malformed `<Scheme>Proxy` host drops only that one
-    // scheme and is recorded on `Manual.rejected`, instead of failing the whole
-    // dictionary the way `?` used to.
+    // A malformed `<Scheme>Proxy` host drops only that one scheme and is recorded on
+    // `Manual.rejected`; the rest of the dictionary still maps.
     #[test]
     fn a_malformed_scheme_host_is_dropped_and_recorded_while_the_rest_survive() {
         let dict = dict! {
@@ -2263,7 +2400,7 @@ mod tests {
     // `an_unexpanded_http_proxy_is_reported_rather_than_resolved_direct`: the one case
     // where answering `Direct` would state the opposite of what the Mac does. `HTTPEnable`
     // says yes, the host is a value this crate cannot read, and with no `SOCKSProxy` there
-    // is nothing else to cover HTTP — so the drop is the reason the request has no answer.
+    // is nothing else to cover HTTP, so the drop is the reason the request has no answer.
     #[cfg(feature = "resolve")]
     #[test]
     fn an_unreadable_host_under_an_enabled_scheme_is_reported_rather_than_resolved_direct() {
@@ -2327,7 +2464,7 @@ mod tests {
     // The wider version of the drop above: not one entry this crate cannot read but a
     // whole list that is not a list, and a simple-hostname switch that is not a flag.
     // Letting either reach the trace and nothing else leaves `bypass.rejected` empty, and a
-    // Mac whose exceptions could not be read indistinguishable from one that had none — the
+    // Mac whose exceptions could not be read indistinguishable from one that had none, the
     // outcome the crate root names as the reason records exist at all.
     #[test]
     fn a_bypass_key_of_the_wrong_type_is_recorded_rather_than_read_as_absent() {
@@ -2368,7 +2505,7 @@ mod tests {
     // Reading a `CFString` where the reference insists on a `CFNumber` is a deliberate
     // divergence: Chromium's `GetBoolFromDictionary` would leave the scheme unconfigured
     // and `ProxyDictionaryToProxyChain` would fall back to port 80. The tolerance stops at
-    // the port *grammar*, though — a string port is still `1*DIGIT`, so the sign this
+    // the port *grammar*, though, a string port is still `1*DIGIT`, so the sign this
     // crate's own authority parser rejects is rejected here too, and to the same effect:
     // `split_host_port("h:+80")` is an error rather than a missing port, so the scheme is
     // dropped with a record here rather than dialled on 80.
@@ -2411,12 +2548,11 @@ mod tests {
         assert_eq!(expand_abbreviated_cidr("a.b/16"), "a.b/16");
         assert_eq!(expand_abbreviated_cidr("10./8"), "10./8");
         // A prefix length is what makes the short form a CIDR at all, and the emptiness
-        // check is the only thing that sees it missing — `"".bytes().all(..)` is true, so
-        // the digit check reads a blank prefix as digits. This row is the only thing holding
-        // it. `169.254/` is not the shape Apple ships, so padding it invents
-        // three octets, and since the `/` guard in `HostPattern::parse` refuses it either
-        // way, the only trace it leaves is a `BypassRules::rejected` record naming a
-        // network nobody wrote.
+        // check is the only thing that sees it missing, `"".bytes().all(..)` is true, so
+        // the digit check reads a blank prefix as digits. No other test checks it.
+        // `169.254/` is not the shape Apple ships, so padding it invents three octets, and
+        // since the `/` guard in `HostPattern::parse` refuses it either way, the only trace
+        // it leaves is a `BypassRules::rejected` record naming an unconfigured network.
         assert_eq!(expand_abbreviated_cidr("169.254/"), "169.254/");
     }
 
@@ -2461,7 +2597,7 @@ mod tests {
             ),
             (None, None, direct.clone(), vec![]),
             // Both scopes present and disagreeing: `State:` wins, because that is the
-            // key `SCDynamicStoreCopyProxies` — and so every reference — reads.
+            // key `SCDynamicStoreCopyProxies`, and so every reference, reads.
             (
                 Some(setup_pac.clone()),
                 Some(state_wpad.clone()),
@@ -2493,20 +2629,20 @@ mod tests {
             assert_eq!(config.effective, *effective);
             assert_eq!(config.sources, *sources);
             // Every row here is a read that worked, including the ones where a scope is
-            // simply not there. None of them is a degradation.
+            // not there. None of them is a degradation.
             assert!(config.fallbacks.is_empty());
         }
     }
 
     // The scope that decides nothing must not be able to fail the read. `Setup:` never
     // reaches `effective` while a `State:` scope exists, so a `Setup:` the reader cannot
-    // interpret — a malformed `ProxyAutoConfigURLString` is the one value in this schema
-    // that fails rather than degrades — costs the `sources` entry and nothing else.
+    // interpret (a malformed `ProxyAutoConfigURLString` is the one value in this schema
+    // that fails rather than degrades) costs the `sources` entry and nothing else.
     // The two error kinds a `Setup:` read can fail with, for the pair of tests below. The
-    // rule the function documents is that no kind is exempt — the opposite of
-    // `group_policy_source` on Windows — and one kind alone cannot hold that: a softening arm
-    // narrowed to `InvalidProxyUrl` is invisible to a single-kind test, while a `Setup:`
-    // scope that fails on I/O takes a perfectly readable `State:` scope down with it.
+    // rule the function documents is that no kind is exempt, as for `group_policy_source`
+    // on Windows, and one kind alone cannot hold that: a softening arm narrowed to
+    // `InvalidProxyUrl` is invisible to a single-kind test, while a `Setup:` scope that
+    // fails on I/O takes a perfectly readable `State:` scope down with it.
     fn unreadable_setup_scopes() -> [Error; 2] {
         [
             Error::invalid_proxy_url("http://", url::ParseError::EmptyHost),

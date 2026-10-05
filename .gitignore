@@ -19,3 +19,20 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Node bindings: the built addon and installed packages
+*.node
+node_modules/
+
+# Written beside a binding's manifest by `cargo xtask stage-licenses` or `cargo xtask package`
+# for one package build; the licenses themselves live at the repository root.
+/bindings/*/LICENSE-*
+/bindings/*/THIRD-PARTY-LICENSES.txt
+/bindings/node/npm/*/LICENSE-*
+/bindings/node/npm/*/THIRD-PARTY-LICENSES.txt
+
+# Python bindings: bytecode, test cache and a local venv for `maturin develop`
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

@@ -1,16 +1,18 @@
 //! XDG portal fallback when [`super::sandbox`] says GSettings would lie (`mode = 'none'`).
 //!
-//! `org.freedesktop.portal.ProxyResolver.Lookup` via `gio` D-Bus. Probes rebuild
-//! [`ProxyMode::Manual`] (bypass always empty; PAC already resolved by host), or
-//! [`ProxyMode::Direct`] when every probe answered `direct://`. No change
-//! signal — needs [`WatchOptions::poll_interval`](crate::WatchOptions::poll_interval).
+//! `org.freedesktop.portal.ProxyResolver.Lookup` over GDBus ([`super::gio_dl`]). Probes
+//! rebuild [`ProxyMode::Manual`] (bypass always empty, with no implicit set; PAC already
+//! resolved by host), or [`ProxyMode::Direct`] when every probe answered `direct://`. No
+//! change signal: needs
+//! [`WatchOptions::poll_interval`](crate::WatchOptions::poll_interval).
 //!
 //! <div class="warning">
 //!
 //! **Unverified:** no real Flatpak or Snap runtime has ever exercised this fallback. The
-//! read itself is exercised — `tests/portal_watch.rs` puts a fake `ProxyResolver` on a
-//! private session bus and drives [`read_mode`] through it — so what no test can reach is
-//! the *routing*: whether a real runtime is detected as a sandbox and sent here at all.
+//! read itself is exercised (`tests-gnome/tests/portal_watch.rs` puts a fake
+//! `ProxyResolver` on a private session bus and drives [`read_mode`] through it), so what
+//! no test can reach is the *routing*: whether a real runtime is detected as a sandbox and
+//! sent here at all.
 //! The tests below cover the pure parts ([`first_choice`] and the probe table).
 //! **Risk:** the portal is asked about a fixed probe host, not the caller's real
 //! destination, so a host-side PAC that branches on the host name can answer `direct://`
@@ -18,15 +20,15 @@
 //! [`ProxyMode::Direct`], and the caller cannot tell that from a host with no proxy at
 //! all. A reply the probes cannot rebuild is *not* that case: an unparseable proxy string
 //! propagates its parse error, and an unreachable bus or a failed call raises
-//! [`Error::Sandboxed`](crate::Error::Sandboxed) — all three the caller does see.
+//! [`Error::Sandboxed`](crate::Error::Sandboxed), all three the caller does see.
 //! **Also lost:** `Lookup` answers with a list, and `direct://` inside it is a permission
-//! rather than noise — "Direct connection should not be attempted unless it is part of the
+//! rather than noise: "Direct connection should not be attempted unless it is part of the
 //! returned array of proxies"
 //! ([`ProxyResolver.lookup`](https://docs.gtk.org/gio/method.ProxyResolver.lookup.html)).
 //! [`first_choice`] keeps the head and [`ProxyMode::Manual`] holds one endpoint per scheme,
 //! so an answer of `["PROXY p", "direct://"]` is reported as "use `p`", never as "use `p`,
 //! and connecting directly is permitted if `p` will not carry you". What is dropped is the
-//! fallback and not the choice — the head is the entry GLib itself would connect with — and
+//! fallback and not the choice (the head is the entry GLib itself would connect with), and
 //! carrying the rest would take an ordered candidate list per source, which no public type
 //! here has.
 //! **Symptom:** inside the sandbox the crate reports no proxy while the host clearly
@@ -37,13 +39,12 @@
 
 use std::collections::HashMap;
 
-use gio::prelude::*;
-
-use crate::bypass::BypassRules;
+use crate::bypass::{BypassRules, ImplicitBypass};
 use crate::endpoint::{ProxyEndpoint, ProxyEntry, Scheme};
 use crate::error::Error;
 use crate::mode::ProxyMode;
 
+use super::gio_dl::{self, DBusConnection, Variant};
 use super::sandbox::Sandbox;
 
 // The portal's well-known bus name.
@@ -64,13 +65,13 @@ const REPLY_SIGNATURE: &str = "(as)";
 //
 // The value is a choice rather than a measurement. Nothing here knows whether the portal
 // answers from its own resolver's cache or goes and fetches a PAC script first, and no
-// Flatpak or Snap runtime has ever run this code — see the module documentation.
+// Flatpak or Snap runtime has ever run this code; see the module documentation.
 const TIMEOUT_MS: i32 = 5_000;
 
 const DIRECT: &str = "direct://";
 
 // RFC 2606 reserves `.invalid`; RFC 6761 §6.4 has resolvers and caching servers answer it
-// locally, but at SHOULD strength — only the registrar prohibition is a MUST. So a probe
+// locally, but at SHOULD strength: only the registrar prohibition is a MUST. So a probe
 // under it is very unlikely to reach a real nameserver rather than guaranteed not to. The
 // name is never connected to, only asked about.
 macro_rules! probe_host {
@@ -82,17 +83,17 @@ macro_rules! probe_host {
 // One probe: the scheme it establishes and the URI used to ask about it.
 //
 // `none` is not a transport. It is the scheme `ProxyResolver.lookup` documents for asking
-// without naming one — "If you don't know what network protocol is being used on the socket,
-// you should use `none` as the URI protocol. In this case, the resolver might still return a
-// generic proxy type (such as SOCKS), but would not return protocol-specific proxy types
-// (such as http)" — which is the question [`Scheme::All`] is the answer to, and `resolve.rs`
+// without naming one: "If you don't know what network protocol is being used on the socket,
+// you should use `none` as the URI protocol. In this case, the resolver might still return
+// a generic proxy type (such as SOCKS), but would not return protocol-specific proxy types
+// (such as http)", which is the question [`Scheme::All`] is the answer to, and `resolve.rs`
 // sends every URL scheme this crate does not model there. Without this row a sandboxed
 // caller reads `Direct` for `gopher://` and its like while the host has a generic proxy.
 //
 // Nothing on the path can refuse it, so the row cannot turn a working read into
 // [`Error::Sandboxed`]: xdg-desktop-portal hands the URI to `g_proxy_resolver_lookup`
-// unexamined (`desktop-portal/proxy-resolver.c`), and `g_simple_proxy_resolver_lookup` —
-// what glib-networking's GNOME backend delegates to — lowercases the text before the first
+// unexamined (`desktop-portal/proxy-resolver.c`), and `g_simple_proxy_resolver_lookup`,
+// what glib-networking's GNOME backend delegates to, lowercases the text before the first
 // `:`, misses its per-scheme table, and falls to the default proxy. It has no failure path
 // at all, and that default is the SOCKS proxy when one is configured, which is the "generic
 // proxy type" the page promises.
@@ -109,16 +110,26 @@ const DEFAULT_PORT: u16 = 80;
 
 // Probe the portal and reconstruct a [`ProxyMode`].
 pub(crate) fn read_mode(sandbox: Sandbox) -> Result<ProxyMode, Error> {
-    let connection =
-        gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).map_err(|error| {
-            let message = safe_message(&error);
-            crate::trace::warning!(
-                sandbox = sandbox.name(),
-                error = %message,
-                "the session bus is not reachable, so the portal cannot be probed"
-            );
-            sandboxed(sandbox, "the session bus is not reachable", &message)
-        })?;
+    let Some(g) = gio_dl::gio() else {
+        crate::trace::warning!(
+            sandbox = sandbox.name(),
+            "GLib is not loadable, so the portal cannot be probed"
+        );
+        return Err(sandboxed(
+            sandbox,
+            "GLib is not loadable",
+            "there is no D-Bus client to reach the portal with",
+        ));
+    };
+    let connection = DBusConnection::session(g).map_err(|error| {
+        let message = safe_message(&error);
+        crate::trace::warning!(
+            sandbox = sandbox.name(),
+            error = %message,
+            "the session bus is not reachable, so the portal cannot be probed"
+        );
+        sandboxed(sandbox, "the session bus is not reachable", &message)
+    })?;
 
     let mut per_scheme = HashMap::new();
     for (scheme, uri) in PROBES {
@@ -143,18 +154,17 @@ pub(crate) fn read_mode(sandbox: Sandbox) -> Result<ProxyMode, Error> {
             Some(proxy) => {
                 per_scheme.insert(
                     scheme,
-                    ProxyEntry::Use(ProxyEndpoint::parse(proxy, DEFAULT_PORT)?),
+                    ProxyEntry::Use(ProxyEndpoint::parse(as_spoken(proxy), DEFAULT_PORT)?),
                 );
             }
-            // Not left absent, and since the `none` probe this decides an answer rather than
-            // only recording one. `per_scheme` now holds a [`Scheme::All`], and
-            // [`ProxyMode::entry_for`] stops at a `Disabled` it finds instead of falling
-            // through to the catch-all — so a scheme the portal answered `direct://` for
-            // reads as Direct, while one left absent would inherit the generic proxy. A host
-            // whose PAC proxies the generic question but not FTP must not have FTP silently
-            // proxied. `per_scheme` is a public field too, so the same distinction is one a
-            // caller can read directly, which is why the loop in `tests/portal_watch.rs`
-            // asserts the entry rather than the endpoint.
+            // Record an explicit disabled entry because the `none` probe supplies a
+            // [`Scheme::All`] catch-all in `per_scheme`. [`ProxyMode::entry_for`] stops at
+            // `Disabled` instead of falling through, so a scheme answered with `direct://`
+            // remains Direct; an absent entry would inherit the generic proxy. A PAC that
+            // proxies the generic question but not FTP must not cause FTP to be proxied.
+            // The public `per_scheme` field exposes this distinction, so the loop in
+            // `tests-gnome/tests/portal_watch.rs` asserts the entry rather than the
+            // endpoint.
             None => {
                 per_scheme.insert(scheme, ProxyEntry::Disabled);
             }
@@ -165,8 +175,7 @@ pub(crate) fn read_mode(sandbox: Sandbox) -> Result<ProxyMode, Error> {
         warn_every_probe_answered_direct();
         return Ok(ProxyMode::Direct);
     }
-    // The bypass list is deliberately empty; see the module documentation.
-    let mode = ProxyMode::manual(per_scheme, BypassRules::new());
+    let mode = ProxyMode::manual(per_scheme, rebuilt_bypass());
     crate::trace::debug!(
         mode = %crate::trace::ModeSummary(&mode),
         "reconstructed a mode from the portal's answers"
@@ -174,23 +183,44 @@ pub(crate) fn read_mode(sandbox: Sandbox) -> Result<ProxyMode, Error> {
     Ok(mode)
 }
 
+// The bypass list is empty; see the module documentation. So is the implicit
+// set: the host resolves with GLib, which has none, and loopback is direct there only if
+// the host's own `ignore-hosts` says so, which the probes cannot see.
+fn rebuilt_bypass() -> BypassRules {
+    let mut bypass = BypassRules::new();
+    bypass.implicit = ImplicitBypass::Empty;
+    bypass.ipv4_mapped_as_ipv4 = false;
+    bypass.strip_trailing_dot = false;
+    bypass
+}
+
 // One `Lookup` call.
-fn lookup(connection: &gio::DBusConnection, uri: &str) -> Result<Vec<String>, glib::Error> {
+fn lookup(connection: &DBusConnection, uri: &str) -> Result<Vec<String>, String> {
+    let g = gio_dl::gio().expect("a connection exists only once GLib is loaded");
     let reply = connection.call_sync(
-        Some(BUS_NAME),
+        BUS_NAME,
         OBJECT_PATH,
         INTERFACE,
         METHOD,
-        Some(&(uri,).to_variant()),
-        Some(glib::VariantTy::new(REPLY_SIGNATURE).expect("(as) is a valid signature")),
-        gio::DBusCallFlags::NONE,
+        &Variant::string_tuple(g, uri),
+        REPLY_SIGNATURE,
         TIMEOUT_MS,
-        gio::Cancellable::NONE,
     )?;
-    let (proxies,): (Vec<String>,) = reply
-        .get()
-        .expect("the reply was type-checked against (as) by call_sync");
-    Ok(proxies)
+    // `call_sync` checked the reply against `(as)`, so child 0 is an `as`.
+    Ok(reply.child(0).strv())
+}
+
+// The proxy as the transport it is spoken to in. glib-networking builds `ftp://host:port`
+// for GNOME's `ftp` child (`gproxyresolvergnome.c:334`), and the portal hands that string
+// on, but the key names the proxy *for* FTP destinations: no client speaks FTP to a proxy,
+// and GIO's own socket client refuses the scheme. Read as the bare `host:port`, the same
+// HTTP proxy the GSettings path reads from those keys. Refused instead, it would fail the
+// whole read for a setting the administrator made on purpose.
+fn as_spoken(proxy: &str) -> &str {
+    match proxy.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("ftp") => rest,
+        _ => proxy,
+    }
 }
 
 // The host's first choice, when that names a proxy: `None` for an empty list, and for one
@@ -198,15 +228,16 @@ fn lookup(connection: &gio::DBusConnection, uri: &str) -> Result<Vec<String>, gl
 //
 // Position is rank. Skipping a leading `direct://` to take the proxy behind it is the
 // tempting reading, on the ground that `ProxyResolver.lookup`'s page documents no order for
-// the array — which it does not. But silence in the page is not a licence to reorder, and
+// the array, which it does not. But silence in the page is not a licence to reorder, and
 // the two implementations that bracket the array both read position as rank. GLib's own
 // consumer walks it forward from index 0 and never rewinds (`next_enumerator` in
 // `gio/gproxyaddressenumerator.c` advances with `*priv->next_proxy++`), connecting directly
 // the moment it reaches a `direct` entry; upstream, libproxy appends each PAC result in the
-// script's own order (`px_manager_run_pac` in `src/backend/px-manager.c` splits the response
-// on `;`), and glib-networking passes that through unreordered. So a PAC as ordinary as
-// `DIRECT; PROXY p:8080` arrives here as `["direct://", "http://p:8080"]`, and taking `p`
-// from it hands the destination's name to a proxy the host ranked below connecting directly.
+// script's own order (`px_manager_run_pac` in `src/backend/px-manager.c` splits the
+// response on `;`), and glib-networking passes that through unreordered. So a PAC as
+// ordinary as `DIRECT; PROXY p:8080` arrives here as `["direct://", "http://p:8080"]`, and
+// taking `p` from it hands the destination's name to a proxy the host ranked below
+// connecting directly.
 fn first_choice(answers: &[String]) -> Option<&str> {
     answers
         .iter()
@@ -227,10 +258,9 @@ fn warn_every_probe_answered_direct() {
     );
 }
 
-// A [`glib::Error`]'s message, made safe to store in a public [`Error`] or write to a
-// log.
-fn safe_message(error: &glib::Error) -> String {
-    crate::util::redact_and_sanitize_untrusted(&error.to_string())
+// A `GError`'s message, made safe to store in a public [`Error`] or write to a log.
+fn safe_message(error: &str) -> String {
+    crate::util::redact_and_sanitize_untrusted(error)
 }
 
 // `message` must already be [`safe_message`]'d (same string for log + public Error).
@@ -248,6 +278,39 @@ fn sandboxed(sandbox: Sandbox, reason: &str, message: &str) -> Error {
 mod tests {
     use super::*;
 
+    // The rebuilt mode bypasses nothing: no entry and no implicit set, so loopback and
+    // link-local reach the proxy the portal named unless the host's own list said otherwise,
+    // which the probes cannot see.
+    #[test]
+    fn the_rebuilt_bypass_sends_nothing_direct() {
+        let rules = rebuilt_bypass();
+        assert!(rules.patterns.is_empty());
+        for destination in [
+            "localhost",
+            "localhost.",
+            "127.0.0.1",
+            "[::1]",
+            "[::ffff:127.0.0.1]",
+            "169.254.169.254",
+            "[fe80::1]",
+        ] {
+            assert!(!rules.matches_authority(destination), "{destination}");
+        }
+    }
+
+    // What glib-networking builds for GNOME's `ftp` child reaches here as `ftp://h:p`, which
+    // `ProxyEndpoint::parse` refuses as a scheme it cannot speak; read through `as_spoken`
+    // it is the HTTP proxy the GSettings path reads from the same keys.
+    #[test]
+    fn an_ftp_answer_is_the_http_proxy_for_ftp_destinations() {
+        assert!(ProxyEndpoint::parse("ftp://px.corp:3128", DEFAULT_PORT).is_err());
+        let endpoint = ProxyEndpoint::parse(as_spoken("FTP://px.corp:3128"), DEFAULT_PORT).unwrap();
+        assert_eq!(endpoint.authority(), "px.corp:3128");
+        assert_eq!(endpoint.scheme_hint, None);
+        assert_eq!(as_spoken("socks://s:1080"), "socks://s:1080");
+        assert_eq!(as_spoken("http://h:1"), "http://h:1");
+    }
+
     #[test]
     fn direct_answers_are_recognised() {
         assert_eq!(first_choice(&["direct://".to_owned()]), None);
@@ -255,10 +318,10 @@ mod tests {
         assert_eq!(first_choice(&["  ".to_owned()]), None);
     }
 
-    // The shape an earlier rule got wrong, and it is not an exotic one: libproxy builds the
-    // array in the PAC script's order, so `DIRECT; PROXY p` — a script anyone might write —
-    // arrives exactly like this. Reaching past the head to `proxy.corp` would send the
-    // destination's name to a proxy the host ranked below connecting directly.
+    // Not an exotic shape: libproxy builds the array in the PAC script's order, so
+    // `DIRECT; PROXY p`, a script anyone might write, arrives like this. Reaching past
+    // the head to `proxy.corp` would send the destination's name to a proxy the host
+    // ranked below connecting directly.
     #[test]
     fn a_leading_direct_is_the_answer_and_not_something_to_reach_past() {
         let answers = ["direct://".to_owned(), "http://proxy.corp:8080".to_owned()];
@@ -279,7 +342,7 @@ mod tests {
 
     // Two independent properties of the table, because the host alone leaves the pairing
     // free: swap the `Scheme::Http` and `Scheme::Https` rows and every URI still names the
-    // reserved host, while the answers land under each other's scheme — a caller asking
+    // reserved host, while the answers land under each other's scheme; a caller asking
     // for the HTTP proxy would be handed the HTTPS one and told nothing.
     #[test]
     fn every_probe_asks_about_the_scheme_it_records_at_the_reserved_host() {

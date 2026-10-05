@@ -27,16 +27,16 @@ const SCHEME_VARS: [(Scheme, &str); 4] = [
 const NO_PROXY_VAR: &str = "no_proxy";
 
 /// Env snapshot of `*_proxy` / `no_proxy` (not a [`Stream`](crate::Stream);
-/// [`ProxyWatcher`](crate::ProxyWatcher) does not merge these in — except where an OS
+/// [`ProxyWatcher`](crate::ProxyWatcher) does not merge these in, except where an OS
 /// setting names them, which KDE's `ProxyType=4` does).
 ///
 /// Lowercase beats uppercase; empty value → [`ProxyEntry::Disabled`]; port explicit, else
 /// the `scheme://` default, else 80 (so `all_proxy=socks5://h` is 1080, `http_proxy=h` is
-/// 80) — the rule [`ProxyEndpoint::parse`] states. On Windows only,
-/// any other letter case the variable was actually set in (`Http_Proxy`) is read too, after
-/// both conventional spellings. `no_proxy` via [`parse::no_proxy`]. Bad `*_proxy` →
-/// [`rejected`](Self::rejected). A **non-empty** `REQUEST_METHOD` + `http_proxy` →
-/// [`Error::CgiHttpProxy`]. Merge with a watcher is caller-defined precedence.
+/// 80), the rule [`ProxyEndpoint::parse`] states. On Windows only, any other letter case
+/// the variable was set in (`Http_Proxy`) is read too, after both conventional spellings.
+/// `no_proxy` via [`parse::no_proxy`]. Bad `*_proxy` → [`rejected`](Self::rejected). A
+/// **non-empty** `REQUEST_METHOD` + `http_proxy` → [`Error::CgiHttpProxy`]. Merge with a
+/// watcher is caller-defined precedence.
 #[derive(Clone)]
 pub struct ProxyEnv {
     per_scheme: HashMap<Scheme, ProxyEntry>,
@@ -48,17 +48,16 @@ pub struct ProxyEnv {
 impl ProxyEnv {
     /// Read the snapshot from the current process environment.
     ///
-    /// [`std::env::vars`] panics on a variable whose name or value is not valid Unicode,
-    /// so this reads [`std::env::vars_os`] instead: one unrelated variable elsewhere in
-    /// the process must not be able to take the whole snapshot down. What that costs is
-    /// split by half: a variable whose *name* is not valid Unicode is none of the ones
-    /// read here, so it is dropped, while a mangled *value* is kept and refused — it
-    /// lands in [`rejected`](Self::rejected) rather than reading as unset.
+    /// [`std::env::vars`] panics on a variable whose name or value is not valid Unicode.
+    /// This uses [`std::env::vars_os`] so an unrelated variable cannot cause the snapshot
+    /// to panic. A non-Unicode name cannot match a variable read here and is dropped. A
+    /// non-Unicode value is retained in [`rejected`](Self::rejected) instead of being
+    /// treated as unset.
     ///
     /// # Errors
     ///
     /// [`Error::CgiHttpProxy`] in a CGI environment carrying an `http_proxy`
-    /// variable. A malformed value is no longer one of these, but the two kinds are
+    /// variable. A malformed value is never one of these, but the two kinds are
     /// recorded apart: a dropped `*_proxy` endpoint lands in
     /// [`rejected`](Self::rejected), a dropped `no_proxy` entry in
     /// [`bypass()`](Self::bypass)`.rejected`. Reading only the first and finding it
@@ -67,7 +66,8 @@ impl ProxyEnv {
         Self::from_vars(std::env::vars_os().filter_map(readable_var))
     }
 
-    /// Explicit map for tests (avoids mutating the process-global env).
+    /// Explicit map for tests (avoids mutating the process-global env). A name given twice
+    /// keeps its first value, as `getenv` does.
     ///
     /// ```
     /// # use proxy_watch::{ProxyEnv, Scheme};
@@ -94,13 +94,17 @@ impl ProxyEnv {
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        let map: HashMap<String, String> = vars
-            .into_iter()
-            .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()))
-            .collect();
+        // A name given twice keeps its first value, as `getenv` answers (and with it
+        // `std::env::var_os`, curl, Python's `os.environ` and Node's `process.env`), so
+        // this read agrees with the process's other HTTP stacks on a duplicated `environ`.
+        let mut map: HashMap<String, String> = HashMap::new();
+        for (k, v) in vars {
+            map.entry(k.as_ref().to_owned())
+                .or_insert_with(|| v.as_ref().to_owned());
+        }
 
         // CGI marker: exact + Windows any-case, and it has to carry a method. Presence
-        // alone is not the test — Go reads it as `os.Getenv("REQUEST_METHOD") != ""`
+        // alone is not the test; Go reads it as `os.Getenv("REQUEST_METHOD") != ""`
         // (`httpproxy.FromEnvironment`), and RFC 3875 §4.1.12 has no empty production for
         // it (`method = "GET" | "POST" | "HEAD" | extension-method`), so no conforming
         // CGI server ever sets it empty. Refuse any-case `http_proxy` (`min` for a stable
@@ -209,29 +213,27 @@ impl ProxyEnv {
         self.per_scheme.is_empty() && self.rejected.is_empty()
     }
 
-    /// Whether these variables *specify* a configuration — something the environment asked
-    /// for, as opposed to something it merely mentioned.
+    /// Whether these variables specify a configuration, as opposed to only mentioning one.
     ///
-    /// This neither implies [`is_empty`](Self::is_empty) nor follows from it, which is why
-    /// both exist. `is_empty` answers "was any scheme variable set", counting a value that
-    /// failed to parse and ignoring `no_proxy`; this one ignores the failures and counts
-    /// `no_proxy`:
+    /// This neither implies [`is_empty`](Self::is_empty) nor follows from it. `is_empty`
+    /// checks whether any scheme variable is set, including malformed values and ignoring
+    /// `no_proxy`; `is_configured` ignores malformed values and includes `no_proxy`:
     ///
     /// | environment | `is_empty` | `is_configured` |
     /// | --- | --- | --- |
     /// | nothing set | `true` | `false` |
     /// | `http_proxy=http://p:8080` | `false` | `true` |
-    /// | `http_proxy=` — a deliberate direct for http | `false` | `true` |
+    /// | `http_proxy=` (a deliberate direct for http) | `false` | `true` |
     /// | `no_proxy=.corp.example` alone | `true` | `true` |
     /// | every scheme variable malformed | `false` | `false` |
     ///
-    /// The last two rows are the ones with consequences, and both follow Chromium's
+    /// The treatment of `no_proxy` alone and malformed scheme variables follows Chromium's
     /// `net/proxy_resolution/proxy_config_service_linux.cc`. A `no_proxy` on its own is a
-    /// configuration there — "having no rules specified only means the user explicitly asks
-    /// for direct connections" — and a value that fails to parse is logged and then treated
-    /// exactly as if the variable were unset. A malformed value is a diagnostic, kept in
-    /// [`rejected`](Self::rejected); reading it as an instruction would let a typo in
-    /// `http_proxy` mask a working OS proxy.
+    /// configuration there: "having no rules specified only means the user explicitly asks
+    /// for direct connections". A value that fails to parse is logged and treated as if the
+    /// variable were unset. A malformed value is retained in [`rejected`](Self::rejected)
+    /// as a diagnostic; treating it as an instruction would let a typo in `http_proxy` mask
+    /// a working OS proxy.
     ///
     /// [`ProxyConfig::with_env`](crate::ProxyConfig::with_env) is what acts on the
     /// distinction. [`to_mode`](Self::to_mode) does not: a `no_proxy` with no proxy to
@@ -248,9 +250,10 @@ impl ProxyEnv {
     #[must_use]
     pub fn endpoint_for(&self, scheme: Scheme) -> Option<&ProxyEndpoint> {
         // Written the same way as [`ProxyMode::entry_for`], which is what the doc above
-        // claims, and for the `All` case for the reason given there. `entry_for`'s one further
-        // rule — step over a drop and let a later slot answer — has nothing to act on in this
-        // map, which never holds one; the two stay the same lookup as long as that holds.
+        // claims, and for the `All` case for the reason given there. `entry_for`'s one
+        // further rule (step over a drop and let a later slot answer) has nothing to act on
+        // in this map, which never holds one; the two stay the same lookup as long as that
+        // holds.
         self.per_scheme
             .get(&scheme)
             .or_else(|| self.per_scheme.get(&Scheme::All))?
@@ -285,7 +288,7 @@ impl ProxyEnv {
     }
 }
 
-// Not a derive, only so that `per_scheme` prints in a fixed order — a `HashMap` seeds its
+// Not a derive, only so that `per_scheme` prints in a fixed order: a `HashMap` seeds its
 // iteration order per instance, so a derive would render the same snapshot differently on
 // each run. [`ProxyMode`]'s own `Debug` says the rest.
 impl fmt::Debug for ProxyEnv {
@@ -321,16 +324,16 @@ impl Eq for ProxyEnv {}
 //
 // The two halves are not the same question. A *name* that is not valid Unicode cannot be
 // any of the variables in [`SCHEME_VARS`] or [`NO_PROXY_VAR`], which are ASCII, so it is
-// one of the unrelated variables sharing the process environment and dropping it changes
-// no answer. A *value* is where `into_string().ok()` would be the misreading this crate
-// keeps finding: it cannot tell "unset" from "set to bytes that are not UTF-8", and those
-// are opposite answers here — a dropped `http_proxy` leaves the snapshot saying nobody
-// configured a proxy at all, with nothing in [`ProxyEnv::rejected`] to say otherwise. So
-// the value is converted the lossy way instead, which is what
-// [`sys::linux::desktop::text_if_set`](crate::sys) and `kde`'s `ProxyType = 4` lookup do
-// for the same reason: the replacement characters are what
+// one of the unrelated variables sharing the process environment and dropping it changes no
+// answer. A *value* is where `into_string().ok()` would be the misreading this crate keeps
+// finding: it cannot tell "unset" from "set to bytes that are not UTF-8", and those are
+// opposite answers here; a dropped `http_proxy` leaves the snapshot saying no proxy is
+// configured at all, with nothing in [`ProxyEnv::rejected`] to say otherwise. So the value
+// is converted the lossy way instead, which is what `kde`'s `ProxyType = 4` lookup does for
+// the same reason (`sys::linux::desktop::text_if_set` converts the same way to keep a
+// mangled desktop name present): the replacement characters are what
 // [`ProxyEndpoint::parse`] refuses the address on, so the variable is recorded rather than
-// vanishing. That refusal reads the whole authority and not only the host — see the check
+// vanishing. That refusal reads the whole authority and not only the host; see the check
 // itself for why a password in the authority is part of what it refuses on.
 //
 // Taking the pair rather than reading the environment so the split can be tested without
@@ -344,8 +347,8 @@ fn readable_var(
     ))
 }
 
-// Lowercase name first, uppercase name second — then, on Windows only, whatever other
-// letter case the variable was actually set in.
+// Lowercase name first, uppercase name second; then, on Windows only, whatever other
+// letter case the variable was set in.
 fn lookup<'a>(map: &'a HashMap<String, String>, lower: &str) -> Option<&'a str> {
     map.get(lower)
         .or_else(|| map.get(&lower.to_ascii_uppercase()))
@@ -353,7 +356,7 @@ fn lookup<'a>(map: &'a HashMap<String, String>, lower: &str) -> Option<&'a str> 
         .map(String::as_str)
 }
 
-// The entry whose key equals `name` ignoring case — on Windows only, where that is the
+// The entry whose key equals `name` ignoring case, on Windows only, where that is the
 // same variable rather than a different one.
 fn any_case_on_windows<'a>(
     map: &'a HashMap<String, String>,
@@ -367,20 +370,20 @@ fn any_case_on_windows<'a>(
         .min_by_key(|(key, _)| *key)
 }
 
-// The tests below need an `OsString` that is not valid Unicode, and only Windows and Unix can
-// build one; anywhere else they would run on an ordinary string and prove nothing. The gate
-// is on the module and not on each test because an empty `mod tests` still carries its
-// `use super::*`, and on `wasm32-unknown-unknown` — the one target that reaches `sys::stub` —
-// that unused import is an error under `-D warnings`.
+// The tests below need an `OsString` that is not valid Unicode, and only Windows and Unix
+// can build one; anywhere else they would run on an ordinary string and prove nothing. The
+// gate is on the module and not on each test because an empty `mod tests` still carries its
+// `use super::*`, and on `wasm32-unknown-unknown` (the one target that reaches
+// `sys::stub`), that unused import is an error under `-D warnings`.
 #[cfg(all(test, any(windows, unix)))]
 mod tests {
     use super::*;
 
     // The impl above is hand-written for the whole struct, and its comment names only the
-    // scheme order as the reason, so this test is the only thing holding the field list.
-    // `captured_at` is the field `PartialEq` refuses to compare and `to_config` carries over
-    // on purpose — it is how old the reading is — so a snapshot printed without it has no
-    // age, and two taken minutes apart render identically.
+    // scheme order as the reason, so only this test checks the field list. `captured_at` is
+    // the field `PartialEq` refuses to compare and `to_config` carries over on purpose (it
+    // is how old the reading is), so a snapshot printed without it has no age, and two
+    // taken minutes apart render identically.
     //
     // Exact string, so a label, a field order or the scheme order cannot change unseen. The
     // entries, the bypass rules and the timestamp keep their own renderings, which this impl
@@ -406,10 +409,10 @@ mod tests {
         );
     }
 
-    // A variable set to bytes with no UTF-8 reading is *set*, and the answer this crate
-    // exists to avoid is "nobody configured a proxy" when somebody did. Read with
+    // A variable set to bytes with no UTF-8 reading is *set*, and this crate must not
+    // report "no proxy is configured" when one is configured. Read with
     // `into_string().ok()` the variable arrived as absent, so a mangled `http_proxy` was
-    // indistinguishable from an unset one — not even a `rejected` entry to look at.
+    // indistinguishable from an unset one, not even a `rejected` entry to look at.
     #[test]
     fn an_http_proxy_that_is_not_unicode_is_refused_rather_than_dropped() {
         #[cfg(windows)]
@@ -483,7 +486,7 @@ mod tests {
     }
 
     // The other half: a name that cannot be one of the ASCII variables this crate reads is
-    // dropped, and dropping it has to stay silent — every process carries some of these.
+    // dropped, and dropping it has to stay silent; every process carries some of these.
     #[test]
     fn a_variable_whose_name_is_not_unicode_is_dropped_without_a_trace() {
         #[cfg(windows)]

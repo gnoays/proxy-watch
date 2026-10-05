@@ -7,17 +7,17 @@
 //! `changed`.
 //!
 //! ```text
-//! cargo test --test gsettings_writable_watch
+//! cargo test -p proxy-watch-gnome-tests --test gsettings_writable_watch
 //! ```
 //!
 //! This file is the only thing holding the `connect_writable_changed` half of `subscribe`.
-//! `tests/gsettings_lock.rs` covers the *reading* of a lock, but it builds its fixture
+//! `tests-gnome/tests/gsettings_lock.rs` covers the *reading* of a lock, but it builds its fixture
 //! before the watcher exists, so the subscription never has to notice one arriving.
 //!
 //! The lock here is not dconf's. dconf reads `DCONF_PROFILE` once, when its engine is first
 //! used, so a profile cannot gain a lock mid-process. GLib's keyfile backend takes
 //! writability from the filesystem instead, and from the *directory* rather than the store
-//! file — `g_keyfile_settings_backend_keyfile_writable` queries `access::*` on `kfsb->dir`
+//! file: `g_keyfile_settings_backend_keyfile_writable` queries `access::*` on `kfsb->dir`
 //! and demands both write and execute, and the backend's own `GFileMonitor` on that
 //! directory calls it again on every event (`gio/gkeyfilesettingsbackend.c`, glib 2.72).
 //! So `chmod 0555` on the settings directory is a lock this test can apply while a watcher
@@ -25,10 +25,11 @@
 //! `GSettings` object a dconf lock would raise.
 //!
 //! No session bus: the keyfile backend writes nothing through `ca.desrt.dconf`. A separate
-//! binary from the other GNOME suites because `GSETTINGS_BACKEND` is process-wide and they
-//! need dconf.
+//! binary from the other GNOME suites because `GSETTINGS_BACKEND` and `DCONF_PROFILE` are
+//! process-wide and each suite sets its own.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::fs;
@@ -47,12 +48,12 @@ fn a_lock_that_moves_no_value_still_wakes_the_watcher() {
     let store = root.join("glib-2.0/settings");
     fs::create_dir_all(&store).expect("creating the fixture directory");
     // An empty store, i.e. nothing written: every key stands at the schema default, so
-    // `was_written`'s first and third questions both answer no and only the second one —
-    // the writability this test moves — is left to answer.
+    // `was_written`'s first and third questions both answer no and only the second one,
+    // the writability this test moves, is left to answer.
     fs::write(store.join("keyfile"), "").expect("writing the empty keyfile store");
 
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and it runs before any GSettings call — so no backend exists yet to read them.
+    // in it, and it runs before any GSettings call, so no backend exists yet to read them.
     unsafe {
         std::env::set_var("GSETTINGS_BACKEND", "keyfile");
         std::env::set_var("XDG_CONFIG_HOME", &root);
@@ -91,7 +92,7 @@ fn a_lock_that_moves_no_value_still_wakes_the_watcher() {
         "a store nobody has touched must not produce a second snapshot"
     );
 
-    // The lock. No value moves — the store is still empty and still readable — so `changed`
+    // The lock. No value moves (the store is still empty and still readable), so `changed`
     // has nothing to say and only `writable-changed` fires.
     fs::set_permissions(&store, fs::Permissions::from_mode(0o555))
         .expect("making the settings directory read-only");
@@ -100,7 +101,7 @@ fn a_lock_that_moves_no_value_still_wakes_the_watcher() {
     // for the crate. `ProxyWatcher::with_options` reads before it subscribes, so the first
     // `GSettings` in the process is built here, on the test thread, and the keyfile
     // backend's `GFileMonitor` over the settings directory is attached to *this* thread's
-    // default context — which a test that only blocks on the watcher never iterates.
+    // default context, which a test that only blocks on the watcher never iterates.
     // Without this loop the wake never arrives. dconf has no such affinity, its
     // change source being a GDBus subscription on GLib's own worker thread, so nothing here
     // stands in for work the crate would otherwise do: the last hop, from the backend to

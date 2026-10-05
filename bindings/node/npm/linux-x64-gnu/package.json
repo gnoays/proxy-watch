@@ -1,0 +1,39 @@
+{
+  "name": "proxy-watch-linux-x64-gnu",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "proxy-watch.linux-x64-gnu.node",
+  "files": [
+    "proxy-watch.linux-x64-gnu.node",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD-PARTY-LICENSES.txt"
+  ],
+  "description": "The operating system's proxy settings, layered with *_proxy, for Node.js",
+  "keywords": [
+    "proxy",
+    "pac",
+    "wpad",
+    "http_proxy",
+    "system-proxy",
+    "proxy-settings",
+    "no_proxy"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gnoays/proxy-watch.git",
+    "directory": "bindings/node"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

@@ -1,50 +1,47 @@
 //! Gate: no comment tells the reader what the comment, the doc, the test, the row, the
-//! line or the file it sits in stated before. Prose whose subject is the text's own past —
-//! a correction addressed to a reader who never saw the text being corrected — is the whole
-//! of what this looks for.
+//! line or the file it sits in stated before. Prose whose subject is the text's own past (a
+//! correction addressed to a reader who never saw the text being corrected) is the whole of
+//! what this looks for.
 //!
 //! The cost it exists to stop is one-sided. A sentence about a wrong belief someone held is
 //! read by every future reader of the file and instructs none of them: a reader cannot act
 //! on a version of the text they have never seen, so the sentence spends attention and
-//! returns nothing. The forward sentence is available in every case, and it is shorter —
+//! returns nothing. The forward sentence is available in every case, and it is shorter:
 //! what a reader must not do, and the mechanism that makes it wrong. Where a wrong move is
-//! genuinely tempting, saying so forward ("not X: X does Y") carries the same warning
-//! without the archaeology, and reads as a rule rather than as a confession.
+//! tempting, saying so forward ("not X: X does Y") carries the same warning without the
+//! archaeology, and reads as a rule rather than as a confession.
 //!
-//! # What is deliberately out of scope
+//! # What is out of scope
 //!
 //! A negation is not the target. "Does not allocate", "is not thread-safe",
 //! "`contoso.com` does not bypass `api.contoso.com`" each carry what a reader would
-//! otherwise assume the opposite of, and no forward sentence replaces them. Of the 154
-//! negative doc-comment lines under `src/` when this gate was written, [`PHRASES`] matched
-//! none.
+//! otherwise assume the opposite of, and no forward sentence replaces them.
 //!
 //! The system's own past is not the target either, and separating the two is the whole
 //! design of [`PHRASES`]. "The parser used to leave HTTP going direct" and "the failure
 //! reason echoed whatever sat past the last `:`" are facts about the code, and a regression
 //! test's reason for existing rests on them: a reader who cannot see that the defect was
-//! reachable is a reader who deletes the test as redundant. A first list that reached those
-//! sentences too matched 50 comment blocks across this tree; naming the text as the subject
-//! brings it to 21, and the 29 it drops are that category in full. Which of those still
-//! reads better forward is a judgement for review, not for a scanner — a scanner that
-//! forces a true sentence to be reworded leaves the sentence worse than it found it.
+//! reachable is a reader who deletes the test as redundant. Requiring the text as the
+//! subject is what leaves that category out. Which of those still reads better forward is a
+//! judgement for review, not for a scanner; a scanner that forces a true sentence to be
+//! reworded leaves the sentence worse than it found it.
 //!
 //! # No exemption table
 //!
-//! There is deliberately nowhere to register a match. The repair is to reword, always. If a
-//! phrase here ever matches a sentence that is not about the text's past, that phrase will
-//! do it again, so the repair is to narrow the phrase with the reason written beside it —
-//! not to exempt the one sentence and leave the pattern to misfire on the next. Its sibling
-//! `claim_counts.rs` carried two excuse verdicts and deleted both, on the ground that each
-//! was a place to park a claim no test read; this gate starts without the place.
+//! There is nowhere to register a match. The repair is to reword, always. If a phrase here
+//! ever matches a sentence that is not about the text's past, that phrase will do it again,
+//! so the repair is to narrow the phrase with the reason written beside it, not to exempt
+//! the one sentence and leave the pattern to misfire on the next. An exemption is a place
+//! to park a claim no test reads.
 //!
 //! # What is scanned
 //!
-//! [`SCANNED`] reaches the whole Rust tree — `src`, `examples`, `tests`, and this directory
-//! — where `claim_counts.rs` stops at the surface a consumer reads. The harms differ. A
-//! miscounted numeral in `tests/` misleads nobody who is not already editing the file, which
-//! is why that gate dropped `tests/`. Text archaeology has its whole effect on somebody who
-//! *is* editing the file, and it concentrates there.
+//! [`SCANNED`] reaches the whole Rust tree (`src`, `examples`, `tests`, `tests-gnome`,
+//! `bindings`, the root `build.rs` and all of `xtask`), where `claim_counts.rs` stops at
+//! the surface a consumer reads. The harms differ. A miscounted numeral in `tests/`
+//! misleads only people already editing the file, which is why that gate dropped `tests/`.
+//! Text archaeology does all its harm to the person who *is* editing the file, so `tests/`
+//! stays in scope here.
 //!
 //! Reaching this directory puts the gate inside its own scope, so the prose here answers to
 //! the rule it enforces ([`this_gate_is_inside_the_tree_it_scans`]). What that costs is one
@@ -53,15 +50,14 @@
 //!
 //! # What it does not see
 //!
-//! Three silences, each measured rather than assumed.
+//! Three silences, each measured rather than assumed. A comment after code on the same line
+//! is not one of them: [`comment_blocks`] reads it as a block of its own.
 //!
 //! By subject word: [`PHRASES`] is a closed list of the nouns this tree uses for its own
-//! text, so a sentence that withdraws a claim without naming what made it walks past. There
-//! was one — `tests/windows_watch.rs` named a fix and then took it back with a bare "That
-//! was wrong", which no entry here reaches; it was reworded by hand in the same pass that
-//! added this gate. Widening to the bare demonstrative is what would have caught it, and it
-//! is also what reaches "that was wrong about the port", a fact about the code. The list
-//! buys its precision by requiring a subject, and this is what the precision costs.
+//! text, so a sentence that withdraws a claim without naming what made it walks past: a
+//! bare "That was wrong" after a named fix is one. Widening to the bare demonstrative
+//! reaches it, and it also reaches "that was wrong about the port", a fact about the code.
+//! The list requires a subject for precision, so it misses the bare demonstrative.
 //!
 //! By comment syntax: [`comment_blocks`] reads `//`, `///` and `//!` and nothing else.
 //! [`the_tree_states_its_prose_in_line_comments`] measures that this is the whole of the
@@ -81,13 +77,13 @@ use std::path::{Path, PathBuf};
 
 // Phrases whose subject is the text rather than the system it describes.
 //
-// The distinction is the point. A sentence about what the code did before is a fact about
-// the code, and a regression test can need it; a sentence about what the surrounding prose
-// declared before instructs nobody, because its reader never held the belief being
-// withdrawn. So every entry here names a piece of text — the comment, the doc, the test,
-// the row, the line, the file, or a version of one — and the general "used to" is left
-// alone, since English spells "employed in order to" the same way and the past of a value
-// ("U+FFFD where the undecodable bytes had been") the same way again.
+// A sentence about what the code did before is a fact about the code, and a regression test
+// can need it; a sentence about what the surrounding prose declared before provides no
+// useful instruction, because its reader never held the belief being withdrawn. So every
+// entry here names a piece of text (the comment, the doc, the test, the row, the line, the
+// file, or a version of one) and the general "used to" is left alone, since English spells
+// "employed in order to" the same way and the past of a value ("U+FFFD where the
+// undecodable bytes had been") the same way again.
 //
 // The article is part of the phrase and carries none of the meaning, so a noun spelled with
 // a demonstrative is spelled with an article too. "The docs" names what "this doc" names
@@ -117,6 +113,16 @@ const PHRASES: &[&str] = &[
     "this line read",
     "this line used to",
     "this file used to",
+    "the comment claimed",
+    "the comment said",
+    "the comment used to",
+    "the test claimed",
+    "the test asserted",
+    "the test used to",
+    "the row used to",
+    "the line read",
+    "the line used to",
+    "the file used to",
     "was simply wrong",
     "had never been tried",
 ];
@@ -132,7 +138,12 @@ struct Hit {
 // Every `.rs` file under `dir`, recursively, as repo-relative paths.
 fn rust_files(root: &Path, dir: &str) -> Vec<(String, PathBuf)> {
     let mut files = Vec::new();
-    let mut pending = vec![root.join(dir)];
+    // An entry of `SCANNED` may name one file (`build.rs`) rather than a directory.
+    let start = root.join(dir);
+    if start.is_file() {
+        return vec![(dir.to_owned(), start)];
+    }
+    let mut pending = vec![start];
 
     while let Some(current) = pending.pop() {
         for entry in fs::read_dir(&current).expect("a source directory is readable") {
@@ -164,7 +175,15 @@ fn manifest_dir() -> PathBuf {
 }
 
 // The whole Rust tree. Widening this is free; narrowing it needs a reason written here.
-const SCANNED: &[&str] = &["src", "examples", "tests", "xtask/tests"];
+const SCANNED: &[&str] = &[
+    "src",
+    "examples",
+    "tests",
+    "tests-gnome",
+    "xtask",
+    "bindings",
+    "build.rs",
+];
 
 // The comment blocks of `text`: each maximal run of consecutive comment lines, joined into
 // one lowercased, whitespace-collapsed string, with the line the run opens on.
@@ -189,14 +208,47 @@ fn comment_blocks(text: &str) -> Vec<(usize, String)> {
                 }
                 joined.push_str(&word.to_lowercase());
             }
-        } else if let Some(block) = open.take() {
-            blocks.push(block);
+        } else {
+            if let Some(block) = open.take() {
+                blocks.push(block);
+            }
+            // A comment after code on the same line is a block of its own.
+            if let Some(comment) = trailing_comment(line) {
+                let words: Vec<String> =
+                    comment.split_whitespace().map(str::to_lowercase).collect();
+                if !words.is_empty() {
+                    blocks.push((index + 1, words.join(" ")));
+                }
+            }
         }
     }
     if let Some(block) = open.take() {
         blocks.push(block);
     }
     blocks
+}
+
+// The text after a `//` that follows code on `line`, outside any string literal. Quotes are
+// tracked with their escapes; a raw string holding a `"` can end the literal early, which
+// only ever makes a phrase inside it look like prose, the reading that fails loud.
+fn trailing_comment(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => i += 1,
+            // `'"'` is a character, not the start of a string.
+            b'\'' if !in_string && bytes.get(i + 2) == Some(&b'\'') => i += 2,
+            b'"' => in_string = !in_string,
+            b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => {
+                return Some(&line[i + 2..]);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 // Whether `haystack` holds `needle` with a non-word character on each side.
@@ -355,6 +407,19 @@ fn the_scanner_reads_the_comment_shapes_this_tree_uses() {
     let blocks = comment_blocks(sample);
     assert_eq!(blocks.len(), 1, "the three markers join into one run");
     assert_eq!(blocks[0].1, "module item plain");
+
+    // A comment after code is read too, and a `//` inside a string, escaped quote and all,
+    // is not one.
+    let trailing =
+        "foo(); // The comment claimed X\nlet s = \"a \\\" // b\";\nlet c = '\"'; // tail\n";
+    let blocks = comment_blocks(trailing);
+    assert_eq!(
+        blocks,
+        [
+            (1, "the comment claimed x".to_owned()),
+            (3, "tail".to_owned())
+        ]
+    );
 }
 
 // The block-comment silence, measured rather than assumed.

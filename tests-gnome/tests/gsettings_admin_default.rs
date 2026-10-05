@@ -1,34 +1,34 @@
-//! An administrator default nobody wrote and nobody locked, built without root.
+//! An administrator default with no user-layer write and no lock, built without root.
 //!
 //! `gnome::was_written` asks three questions, and [`gsettings_lock`](../gsettings_lock.rs)
-//! covers the second. This file covers the third — `g_settings_get_default_value` differing
+//! covers the second. This file covers the third: `g_settings_get_default_value` differing
 //! from the schema's own compiled default, which is how a site-wide dconf profile speaks
 //! when it neither writes into the user's layer nor locks anything.
 //!
 //! ```text
-//! cargo test --test gsettings_admin_default
+//! cargo test -p proxy-watch-gnome-tests --test gsettings_admin_default
 //! ```
 //!
 //! Nothing else asks that third question. The only administrator default any other fixture
-//! carries is one *equal* to the schema default — which the question is defined not to
-//! notice. What the question buys is a store that answers
-//! `mode='none'` for a reason: with it, `ProxyConfigSource::GSettings` reports Direct as a
-//! decision somebody made; without it the whole GNOME source reads as `Reading::Unset` and
-//! falls out of the report, so a caller looking for why its traffic goes direct is told
-//! GNOME said nothing at all.
+//! carries is one *equal* to the schema default, which the question is defined not to
+//! notice. What the question distinguishes is a store that answers `mode='none'` for a
+//! reason: with it, `ProxyConfigSource::GSettings` reports Direct as a configured choice;
+//! without it the whole GNOME source reads as `Reading::Unset` and falls out of the report,
+//! so a caller looking for why its traffic goes direct is told GNOME said nothing at all.
 //!
-//! The fixture is built the way `gsettings_lock` builds its own — `DCONF_PROFILE`,
-//! `file-db:` and `dconf compile`, all as the ordinary user — and it is deliberately the
-//! complement of that one: nothing is locked here, so `is_writable` cannot answer, and
-//! `ignore-hosts` rather than `mode` carries the administrator default, so the resulting
-//! mode stays Direct and `configured_mode`'s `!mode.is_direct()` cannot answer either. Only
-//! the third question is left.
+//! The fixture is built the way `gsettings_lock` builds its own (`DCONF_PROFILE`,
+//! `file-db:` and `dconf compile`, all as the ordinary user), and it is the complement of
+//! that one: nothing is locked here, so `is_writable` cannot answer, and `ignore-hosts`
+//! rather than `mode` carries the administrator default, so the resulting mode stays Direct
+//! and `configured_mode`'s `!mode.is_direct()` cannot answer either. Only the third
+//! question is left.
 //!
 //! A separate binary rather than another test in `gsettings_lock`: dconf reads
 //! `DCONF_PROFILE` once, when its engine is first used, so two profiles cannot coexist in
 //! one process.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::path::Path;
@@ -59,7 +59,7 @@ fn an_administrator_default_nobody_wrote_is_a_configured_source() {
     };
 
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and it runs before any GSettings call — dconf reads `DCONF_PROFILE` once,
+    // in it, and it runs before any GSettings call: dconf reads `DCONF_PROFILE` once,
     // when its engine is first used, so a later write would not be read at all.
     unsafe {
         std::env::set_var("DCONF_PROFILE", &profile);

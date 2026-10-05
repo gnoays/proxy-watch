@@ -1,0 +1,24 @@
+[package]
+name = "proxy-watch-gnome-tests"
+version = "0.0.0"
+edition = "2024"
+# gtk-rs 0.22's floor; the crate under test builds on 1.88.
+rust-version = "1.92"
+publish = false
+
+# The integration tests that drive GLib themselves: a fake portal served over GDBus,
+# administrator locks, and schema probes. They link GLib at build time, which the crate
+# under test does not, so they live outside its dev-dependencies.
+
+[features]
+default = ["resolve", "linux-gnome", "linux-kde"]
+resolve = ["proxy-watch/resolve"]
+linux-gnome = ["proxy-watch/linux-gnome"]
+linux-kde = ["proxy-watch/linux-kde"]
+
+[dependencies]
+proxy-watch = { path = "..", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gio = "0.22"
+glib = "0.22"

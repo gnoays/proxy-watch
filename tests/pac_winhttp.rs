@@ -17,10 +17,10 @@
 //! Nothing here depends on the machine's own proxy configuration, on a corporate network
 //! or on internet access:
 //!
-//! * the PAC scripts that are actually *evaluated* are served by a throw-away
+//! * the PAC scripts that are *evaluated* are served by a throw-away
 //!   [`PacServer`] on `127.0.0.1`, built out of `std::net::TcpListener` alone;
 //! * the WPAD test accepts every outcome, because whether DHCP option 252 or a
-//!   `wpad.<domain>` record exists is a property of the network, not of this crate — it
+//!   `wpad.<domain>` record exists is a property of the network, not of this crate; it
 //!   only asserts that the call terminates inside its budget and yields a sane shape;
 //!   and
 //! * the failure tests use RFC 5737 / RFC 6890 addresses that are guaranteed not to be
@@ -31,27 +31,29 @@
 
 #![cfg(all(windows, feature = "pac-windows-native"))]
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use proxy_watch::pac::{WinHttpPacResolver, WinHttpPacSource};
+use proxy_watch::pac::{PacPolicy, PacResolver, PacScript, WinHttpPacResolver, WinHttpPacSource};
 use proxy_watch::{
     Error, ProxyConfig, ProxyConfigSource, ProxyMode, ProxyStep, Url, parse, resolve,
 };
 
-/// The budget the *success* paths run under. Generous on purpose: nothing here measures
-/// it, and every one of these tests only has to let WinHTTP fetch a few hundred bytes from
-/// a server inside this process. Three seconds looked like plenty and was not — WinHTTP's
-/// autoproxy service takes its own time to warm up, and the whole file failed as
-/// `PacTimeout` whenever it did, which reads exactly like a real regression and never is.
+#[path = "support/pac_server.rs"]
+mod pac_server;
+use pac_server::PacServer;
+
+/// The budget the *success* paths run under. Generous: nothing here measures it, and every
+/// one of these tests only has to let WinHTTP fetch a few hundred bytes from a server
+/// inside this process. A few seconds is not enough: WinHTTP's autoproxy service takes its
+/// own time to warm up, and a tight budget fails the whole file as `PacTimeout`, which
+/// reads like a real regression and never is.
 const BUDGET: Duration = Duration::from_secs(30);
 
-/// The budget the *give-up* paths measure against. Small on purpose: their point is that
-/// the deadline is enforced, and [`BUDGET`] is far too loose to prove that.
+/// The budget the *give-up* paths measure against. Small: their point is that the deadline
+/// is enforced, and [`BUDGET`] is far too loose to prove that.
 const GIVE_UP_BUDGET: Duration = Duration::from_secs(3);
 
 /// The URL whose routing is being asked about. Never connected to.
@@ -65,140 +67,6 @@ fn resolver() -> WinHttpPacResolver {
 
 fn give_up_resolver() -> WinHttpPacResolver {
     WinHttpPacResolver::with_timeout(GIVE_UP_BUDGET).expect("opening a WinHTTP session")
-}
-
-// ---------------------------------------------------------------------------
-// A PAC file server in ~40 lines of std.
-// ---------------------------------------------------------------------------
-
-/// Serves one fixed body on `127.0.0.1` to every request, until dropped.
-struct PacServer {
-    address: SocketAddr,
-    /// Tells this server's URL apart from every other one's — see [`PacServer::url`].
-    serial: u64,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl PacServer {
-    /// Bind an ephemeral loopback port and start serving `body`.
-    fn start(body: &'static str) -> Self {
-        Self::spawn(Some(body))
-    }
-
-    /// Bind a port that accepts connections and then says nothing, ever.
-    ///
-    /// The deterministic way to make a resolution overrun its budget without depending
-    /// on how the machine treats an unroutable address.
-    fn stalling() -> Self {
-        Self::spawn(None)
-    }
-
-    fn spawn(body: Option<&'static str>) -> Self {
-        let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("binding a loopback port");
-        let address = listener.local_addr().expect("reading the bound port");
-        // Non-blocking accept is what lets the thread notice `stop` and exit.
-        listener
-            .set_nonblocking(true)
-            .expect("switching the listener to non-blocking");
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = {
-            let stop = Arc::clone(&stop);
-            thread::spawn(move || {
-                // Accepted-but-unanswered sockets, held open so that the peer sees a
-                // stall rather than an immediate EOF.
-                let mut stalled = Vec::new();
-                while !stop.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((stream, _)) => match body {
-                            Some(body) => serve_one(stream, body),
-                            None => stalled.push(stream),
-                        },
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            })
-        };
-
-        Self {
-            address,
-            serial: SERIAL.fetch_add(1, Ordering::Relaxed),
-            stop,
-            thread: Some(thread),
-        }
-    }
-
-    /// The URL WinHTTP should download the script from.
-    ///
-    /// The serial and the process id are in the path because WinHTTP caches a downloaded
-    /// script under the URL it came from, and that cache belongs to the autoproxy service
-    /// rather than to the session this file opens — dropping a [`WinHttpPacResolver`] does
-    /// not clear it. Every server here binds an ephemeral port, so the OS is free to hand a
-    /// later one the port a finished one released; with a fixed path that made the URL
-    /// repeat, and WinHTTP then answered out of the cache without ever contacting the new
-    /// server. What that looks like is not a timeout but a *wrong success*: a test reading
-    /// the previous script's answer and reporting it as its own. It was first seen that way
-    /// — `a_server_that_never_answers_is_abandoned_and_the_resolver_still_works` receiving
-    /// `proxy.corp.example:8080`, `an_ipv6_proxy_literal_survives_the_round_trip` receiving
-    /// the timeout test's `after-timeout.example:8080`, results shifted by one test — in
-    /// about one run of the whole target in six. Forcing the condition rather than waiting
-    /// for it (a literal port here, and this path back to a constant) makes it every run and
-    /// every test: each one reads whichever script the run downloaded first. The timing
-    /// races the tests below document are a separate thing, and none of them predicts a
-    /// resolution that succeeds with someone else's answer.
-    fn url(&self) -> Url {
-        Url::parse(&format!(
-            "http://{}/proxy-{}-{}.pac",
-            self.address,
-            std::process::id(),
-            self.serial
-        ))
-        .unwrap()
-    }
-}
-
-/// Source of [`PacServer::serial`]. Unique within the run; the process id in the path
-/// covers the rest.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-impl Drop for PacServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Read the request headers (and discard them), then write the PAC file back.
-fn serve_one(mut stream: TcpStream, body: &str) {
-    stream
-        .set_nonblocking(false)
-        .expect("switching the accepted socket to blocking");
-    let mut reader = BufReader::new(stream.try_clone().expect("cloning the accepted socket"));
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        line.clear();
-    }
-
-    let response = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: application/x-ns-proxy-autoconfig\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +92,7 @@ fn a_served_script_is_downloaded_and_its_chain_comes_back_in_order() {
         "proxy.corp.example:8080"
     );
     // WinHTTP reports the bare `SOCKS` keyword as its single SOCKS scheme, which this
-    // crate reads as SOCKS4 — the same rule `parse_find_proxy_result` applies.
+    // crate reads as SOCKS4, the same rule `parse_find_proxy_result` applies.
     assert_eq!(steps[1].scheme(), Some("socks4"));
     assert_eq!(
         steps[1].endpoint().unwrap().authority(),
@@ -237,15 +105,14 @@ fn a_served_script_is_downloaded_and_its_chain_comes_back_in_order() {
 ///
 /// `wpad_auto_detect_terminates_and_never_returns_an_empty_chain` below already loops over
 /// the chain looking for a repeat, and its comment calls that the thing the call can still
-/// get wrong. It is not, on any machine measured: dropping the `seen.insert` half of the
-/// membership test in `ProxyResult::to_steps` left that test — and the whole tree — green,
-/// because the WPAD this network answers with names one hop and the runner's names none.
-/// The assertion is a guard on a shape that never arrives, so this one serves the script
-/// itself and makes the repeat certain.
+/// get wrong. It cannot see that: a WPAD answer names one hop or none, so dropping the
+/// `seen.insert` half of the membership test in `ProxyResult::to_steps` leaves that test
+/// green. The assertion there is a guard on a shape that does not arrive, so this one
+/// serves the script itself and makes the repeat certain.
 ///
 /// It also settles the question that assertion cannot: WinHTTP does **not** fold a repeated
 /// proxy itself. With the membership test removed the four tokens below come back as three
-/// steps — the two `PROXY` entries both survive, and it is the repeated `DIRECT` that
+/// steps: the two `PROXY` entries both survive, and it is the repeated `DIRECT` that
 /// WinHTTP collapses on its own. So the `DIRECT` pair measures WinHTTP rather than this
 /// crate; it stays in the script because that asymmetry is the reason the rule cannot be
 /// left to the platform.
@@ -286,10 +153,11 @@ fn a_hop_the_script_names_twice_is_tried_once() {
 /// alone; the same asymmetry holds one shape further out, and the return here arrives as its
 /// own entry rather than being collapsed by the platform.
 ///
-/// The row is not this file's alone. `duplicates_collapse` in `src/pac/result.rs` holds it for
-/// the parser every other platform reaches, and `to_steps` says the two are held identical
-/// on purpose — a chain that collapsed differently depending on which engine ran it would be
-/// a difference the script's author never asked for. This is the Windows side of that claim.
+/// The row is not this file's alone. `duplicates_collapse` in `src/pac/result.rs` holds it
+/// for the parser every other platform reaches, and `to_steps` says the two are held
+/// identical: a chain that collapsed differently depending on which engine ran it would be
+/// a difference the script's author never asked for. This is the Windows side of that
+/// claim.
 #[test]
 fn a_hop_the_script_returns_to_is_still_tried_once() {
     let server = PacServer::start(
@@ -350,9 +218,8 @@ fn the_script_actually_sees_the_url_and_host_arguments() {
 }
 
 /// WinHTTP's resolver refuses a WebSocket scheme, so `query_url` (`src/pac/winhttp.rs`)
-/// maps it before the call. That mapping had a unit test on the function and nothing on
-/// the path: `resolve_raw` calling `sanitize_url` directly instead would have left it
-/// green while every `ws:`/`wss:` destination came back as
+/// maps it before the call. The unit test on that function does not hold the path:
+/// `resolve_raw` calling `sanitize_url` directly instead would leave it green while every `ws:`/`wss:` destination came back as
 /// `ERROR_WINHTTP_UNRECOGNIZED_SCHEME` on a machine with a perfectly good answer for it.
 ///
 /// The script echoes the scheme it was shown into the proxy host, so the assertion names
@@ -381,23 +248,23 @@ fn a_websocket_destination_is_resolved_through_the_scheme_winhttp_understands() 
     );
 }
 
-/// `query_url` sanitizes before the call, and only the Boa engine had that held end to end
+/// `query_url` sanitizes before the call, and only the in-process engine has that held end to end
 /// (`pac::tests::the_script_is_handed_the_sanitized_url_end_to_end`). WinHTTP is a second
 /// engine down a second path, and its own unit test reads `query_url`'s return rather than
 /// what the platform did with it. The script is the only witness to the latter, and the
 /// test above already shows the argument reaching it.
 ///
 /// What it witnesses is the fragment, and that is a measurement rather than a choice.
-/// Handing `WinHttpGetProxyForUrlEx` the URL unsanitized, this machine's WinHTTP passed
-/// the fragment through to the script and removed the userinfo on its own — the credential
-/// branch below never fired, at either scheme. So the crate's stripping of a password is
-/// not observable here, and the fragment is exactly the cut that would otherwise reach a
-/// script with no test naming it. `http` rather than `https`, for the same reason measured
-/// the same way: WinHTTP reduces an `https` destination to its origin before the script
-/// runs, which leaves nothing for this to tell apart.
+/// Handed the URL unsanitized, `WinHttpGetProxyForUrlEx` passes the fragment through to the
+/// script and removes the userinfo on its own; the credential branch below does not fire,
+/// at either scheme. So the crate's stripping of a password is not observable here, and the
+/// fragment is the cut that would otherwise reach a script with no test naming it. `http`
+/// rather than `https`, for the same reason measured the same way: WinHTTP reduces an
+/// `https` destination to its origin before the script runs, which leaves nothing for this
+/// to tell apart.
 ///
 /// The branches are ordered so the returned proxy names which cut failed, not merely that
-/// one did — and the last of them is the opposite direction: an `http` destination keeps
+/// one did, and the last of them is the opposite direction: an `http` destination keeps
 /// its path and query, so a sanitiser that reached them would break routing on every
 /// script that reads the path, and that has to fail here too.
 #[test]
@@ -466,16 +333,15 @@ fn a_script_that_does_not_parse_is_an_error_not_a_silent_direct() {
 
 /// A script that runs and answers, but names nothing this crate can route.
 ///
-/// WinHTTP does not treat that as a failure — it returns success with zero entries, so the
-/// only place the emptiness becomes an error is the check at the end of `to_steps`, and this
-/// test is the only thing holding it: letting the empty `Vec` through leaves the rest of the
-/// tree green.
+/// WinHTTP does not treat that as a failure; it returns success with zero entries, so the
+/// only place the emptiness becomes an error is the check at the end of `to_steps`, and no
+/// other test checks it: letting the empty `Vec` through leaves the rest of the tree green.
 ///
 /// What that would cost is an answer that is neither a proxy nor a refusal. `resolve`
 /// promises an ordered chain to try, and a caller walking an empty one finds no step, no
-/// proxy and nothing saying why — the same silence as a successful Direct, from a script
+/// proxy and nothing saying why, the same silence as a successful Direct, from a script
 /// that never said Direct. Both bodies below are shapes a real script reaches by accident:
-/// a transport nobody here models, and a keyword whose address went missing.
+/// a transport this crate does not model, and a keyword whose address went missing.
 #[test]
 fn a_script_that_names_nothing_routable_is_an_error_not_an_empty_chain() {
     for body in [
@@ -513,14 +379,10 @@ fn a_pac_url_with_nothing_listening_fails_promptly() {
 
     // Inside the budget the refusal is the only thing that can have ended the call, so it
     // has to be reported as one: a timeout there would mean the refusal went unnoticed.
-    // Past the budget the two race, and on a loaded machine either can win — the deadline
-    // can expire before WinHTTP is even scheduled, or the refusal can simply arrive that
-    // late. Both are the budget being enforced rather than a hang, which is what the
-    // sibling tests below already say about their own races.
-    //
-    // Demanding the refusal unconditionally made this the one flaky test in the file:
-    // 0 failures in 20 runs idle, 16 in 20 at 2x CPU oversubscription. An idle run already
-    // spends 2.0s of the 3s budget here, so there was never much to lose.
+    // Past the budget the two race, and on a loaded machine either can win: the deadline
+    // can expire before WinHTTP is even scheduled, or the refusal can arrive that late.
+    // Both are the budget being enforced rather than a hang, which is what the sibling
+    // tests below already say about their own races.
     if elapsed < GIVE_UP_BUDGET {
         assert!(
             matches!(error, Error::Io { .. } | Error::PacEvaluation { .. }),
@@ -562,8 +424,8 @@ fn a_server_that_never_answers_is_abandoned_and_the_resolver_still_works() {
     assert!(elapsed < budget * 8, "took {elapsed:?}");
 
     // The real point: after giving up, the pending WinHTTP callback still fires against
-    // state this crate abandoned. If that were unsound — or if the cancelled handle left
-    // the session permanently wedged — no later resolution would ever succeed.
+    // state this crate abandoned. If that were unsound, or if the cancelled handle left
+    // the session permanently wedged, no later resolution would ever succeed.
     //
     // A resolution attempted immediately after does still fail: the abandoned operation
     // has not finished draining, and with a budget this tight the follow-up runs out of
@@ -608,8 +470,7 @@ fn an_unroutable_pac_url_gives_up_inside_the_budget() {
         matches!(error, Error::PacTimeout { .. } | Error::Io { .. }),
         "{error:?}"
     );
-    // The point of the test: the budget is real. A generous slack absorbs the WinHTTP
-    // worker thread's own scheduling.
+    // The budget is real; a generous slack absorbs the WinHTTP worker's own scheduling.
     assert!(elapsed < GIVE_UP_BUDGET * 3, "took {elapsed:?}");
 }
 
@@ -641,23 +502,24 @@ fn a_zero_budget_is_refused_at_construction() {
 #[test]
 fn wpad_auto_detect_terminates_and_never_returns_an_empty_chain() {
     let started = Instant::now();
-    // The tight budget on purpose: this asserts termination, and a failure to discover
-    // WPAD in time is one of the outcomes the match below already accepts.
-    let outcome = give_up_resolver().resolve(&target(), &WinHttpPacSource::AutoDetect);
+    // The budget is tight: this asserts termination, and a failure to discover WPAD in time
+    // is one of the outcomes the match below already accepts.
+    let outcome = give_up_resolver()
+        .with_wpad(true)
+        .resolve(&target(), &WinHttpPacSource::AutoDetect);
     let elapsed = started.elapsed();
 
     match outcome {
         // The usual answer on a network with no WPAD: not an error, just `Direct`.
         Ok(steps) => {
-            // Non-emptiness is enforced at the source — `ProxyResult::to_steps` returns
-            // `PacInvalidResult` rather than an empty chain — so this holds for every
+            // Non-emptiness is enforced at the source (`ProxyResult::to_steps` returns
+            // `PacInvalidResult` rather than an empty chain), so this holds for every
             // `Ok` the crate can construct. It stays as a guard on that contract, but it
             // is not what this call can still get wrong.
             assert!(!steps.is_empty(), "an empty chain is never a valid answer");
             // Neither is the loop below, though it reads like it. `to_steps` does drop
-            // repeated entries, but no measured network answers WPAD with one: removing
-            // that membership test left this test green here and on the runner alike, and
-            // what holds the rule is `a_hop_the_script_names_twice_is_tried_once`, which
+            // repeated entries, but a WPAD answer does not carry one, so removing that
+            // membership test leaves this test green. What holds the rule is `a_hop_the_script_names_twice_is_tried_once`, which
             // serves a script that makes the repeat certain. This stays as a guard on the
             // shape rather than as the thing that measures it.
             for (i, step) in steps.iter().enumerate() {
@@ -688,11 +550,11 @@ fn auto_detect_falling_back_to_a_url_still_reaches_the_url() {
         "function FindProxyForURL(url, host) { return 'PROXY fallback.example:9000'; }",
     );
 
-    let resolver = resolver();
+    let resolver = resolver().with_wpad(true);
     // Which of those two machines this is decides what the answer may be, so ask before
     // judging rather than accepting anything non-empty: `to_steps` refuses to build an
     // empty chain, so `!steps.is_empty()` is true of every `Ok` and asserts nothing about
-    // the fallback actually having happened.
+    // the fallback having happened.
     let wpad_alone = resolver.resolve(&target(), &WinHttpPacSource::AutoDetect);
 
     let steps = resolver
@@ -714,6 +576,28 @@ fn auto_detect_falling_back_to_a_url_still_reaches_the_url() {
             "{steps:?}"
         );
     }
+}
+
+#[test]
+fn wpad_is_refused_until_the_caller_turns_it_on() {
+    let resolver = resolver();
+    assert!(!resolver.wpad());
+    let url = Url::parse("http://unused.invalid/wpad.dat").unwrap();
+    for source in [
+        WinHttpPacSource::AutoDetect,
+        WinHttpPacSource::AutoDetectThenUrl(url),
+    ] {
+        let result = resolver.resolve(&target(), &source);
+        assert!(
+            matches!(result, Err(Error::PacNotSupported { mode: "wpad" })),
+            "{source:?}: {result:?}"
+        );
+    }
+    let result = resolver.resolve_config(&config(ProxyMode::WpadAutoDetect), &target());
+    assert!(
+        matches!(result, Err(Error::PacNotSupported { mode: "wpad" })),
+        "{result:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -795,7 +679,7 @@ fn an_inline_script_is_refused_because_winhttp_takes_no_body() {
     // The exception to the rule the test below pins: every other mode answers a hostless
     // URL Direct without asking WinHTTP anything, and this one still refuses. Direct here
     // would report "no proxy" for a script that was never consulted, and the caller cannot
-    // tell that answer from one the script gave. Which mode was refused is part of it —
+    // tell that answer from one the script gave. Which mode was refused is part of it:
     // fall through to the arm that names the unknown ones and the message stops telling
     // the caller their inline script is the thing this engine cannot take.
     let error = resolver()
@@ -841,7 +725,7 @@ fn a_url_without_a_host_never_reaches_winhttp() {
     // The `WpadAutoDetect` arm asked the same question with the same wrong predicate and is
     // reached by a different match arm, so `Pac` above does not cover it. No network is
     // needed for the passing side: the short-circuit answers before any discovery starts,
-    // which is the whole point of testing it here.
+    // which is why it is tested here.
     let wpad = config(ProxyMode::WpadAutoDetect);
     for url in [Url::parse("mailto:someone@example.net").unwrap(), emptied] {
         let steps = resolver()
@@ -912,4 +796,92 @@ fn sources_map_onto_the_auto_config_modes() {
         WinHttpPacSource::from_mode(&ProxyMode::pac_inline(String::new())),
         None
     );
+}
+
+// ---------------------------------------------------------------------------
+// `PacResolver` with WinHTTP attached: which engine each mode reaches.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_pac_resolver_hands_a_url_mode_to_winhttp() {
+    let server = PacServer::start(
+        "function FindProxyForURL(url, host) { return 'PROXY native.example:8080'; }",
+    );
+    let resolver = PacResolver::new(PacPolicy::new()).with_native(resolver());
+    let steps = resolver
+        .resolve_config(&config(ProxyMode::pac(server.url())), &target(), None)
+        .expect("WinHTTP downloads the script the mode names");
+    assert_eq!(
+        steps[0].endpoint().unwrap().authority(),
+        "native.example:8080"
+    );
+}
+
+// A native failure comes back as itself: not `PacFetchRequired`, which is what the JS arm
+// would have said had the call fallen through to it.
+#[test]
+fn a_pac_resolver_reports_a_native_failure_without_falling_back() {
+    let port = {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/missing.pac")).unwrap();
+    let error = PacResolver::new(PacPolicy::new())
+        .with_native(give_up_resolver())
+        .resolve_config(&config(ProxyMode::pac(url)), &target(), None)
+        .expect_err("an undownloadable script must not resolve");
+    assert!(
+        matches!(
+            error,
+            Error::PacTimeout { .. } | Error::Io { .. } | Error::PacEvaluation { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+// An inline body never reaches WinHTTP, which would refuse it as `PacNotSupported`, and a
+// script the caller supplies wins over the URL the mode names.
+#[test]
+fn a_pac_resolver_keeps_script_bodies_away_from_winhttp() {
+    let server = PacServer::start(
+        "function FindProxyForURL(url, host) { return 'PROXY native.example:8080'; }",
+    );
+    let resolver = PacResolver::new(PacPolicy::new()).with_native(resolver());
+    let inline = config(ProxyMode::pac_inline(
+        "function FindProxyForURL(u, h) { return 'PROXY inline.example:1'; }".to_owned(),
+    ));
+    let supplied =
+        PacScript::new("function FindProxyForURL(u, h) { return 'PROXY supplied.example:1'; }");
+
+    #[cfg(pac_quickjs)]
+    {
+        let steps = resolver.resolve_config(&inline, &target(), None).unwrap();
+        assert_eq!(steps[0].endpoint().unwrap().authority(), "inline.example:1");
+        let steps = resolver
+            .resolve_config(
+                &config(ProxyMode::pac(server.url())),
+                &target(),
+                Some(&supplied),
+            )
+            .unwrap();
+        assert_eq!(
+            steps[0].endpoint().unwrap().authority(),
+            "supplied.example:1"
+        );
+    }
+    #[cfg(not(pac_quickjs))]
+    {
+        let error = resolver
+            .resolve_config(&inline, &target(), None)
+            .unwrap_err();
+        assert!(matches!(error, Error::PacEngineUnavailable), "{error:?}");
+        let error = resolver
+            .resolve_config(
+                &config(ProxyMode::pac(server.url())),
+                &target(),
+                Some(&supplied),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::PacEngineUnavailable), "{error:?}");
+    }
 }

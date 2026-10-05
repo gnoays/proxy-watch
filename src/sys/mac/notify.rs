@@ -2,13 +2,13 @@
 //!
 //! <div class="warning">
 //!
-//! **CI-verified only** — no macOS dev machine. See [`super`], i.e.
+//! **CI-verified only**: no macOS dev machine. See [`super`], i.e.
 //! `src/sys/mac/mod.rs`, for what that leaves unverified and how it would show.
 //!
 //! </div>
 //!
 //! Stop: version-0 [`CFRunLoopSource`] + `CFRunLoopWakeUp` (attached before
-//! registration), then `join`. Deliberately no `CFRunLoopStop` — see [`Watch`]'s `Drop`.
+//! registration), then `join`. No `CFRunLoopStop`. See [`Watch`]'s `Drop`.
 //! [`WatchOptions::poll_interval`] shortens the run-loop wait; [`Watch::poll_now`] reuses
 //! the wake source. Debounce + equality skip on every trigger. Registration retries before
 //! `ready_tx`; outcome via `watch_fail_soft` (`poll_interval` → degrade).
@@ -57,12 +57,13 @@ fn idle_wait(poll_interval: Option<Duration>) -> Duration {
 }
 
 // The delay [`Registration::establish_store`] waits before each retry of a
-// [`RegistrationFailure::Retryable`] registration failure.
+// [`RegistrationFailure::Retryable`] registration failure. Matches Chromium's
+// `kRetryInterval` in `network_config_watcher_apple.cc`.
 pub(super) const REGISTRATION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 // How many times [`Registration::establish_store`] retries a
 // [`RegistrationFailure::Retryable`] registration failure before giving up. Matches
-// Chromium's `kMaxRetry`, for the same reason [`REGISTRATION_RETRY_INTERVAL`] does.
+// Chromium's `kMaxRetry` in the same file, for the same reason.
 pub(super) const REGISTRATION_MAX_RETRIES: u32 = 5;
 
 // Whether a [`RegistrationFailure::Retryable`] failure on the attempt numbered `attempt`
@@ -74,8 +75,8 @@ pub(super) fn should_retry(attempt: u32) -> bool {
 // A `CFRunLoopSource` that may be signalled from another thread.
 struct WakeSource(CFRunLoopSource);
 
-// SAFETY: see the type documentation — the value is only ever cloned, dropped and
-// signalled, and all three are thread safe for a Core Foundation object.
+// SAFETY: the value is only ever cloned, added to the watcher thread's run loop,
+// signalled and dropped, and all four are thread safe for a Core Foundation object.
 unsafe impl Send for WakeSource {}
 
 impl Clone for WakeSource {
@@ -160,8 +161,8 @@ pub(crate) struct Watch {
     run_loop: Option<CFRunLoop>,
     // Set from what the watcher thread reported once [`Watch::spawn`] returns `Ok`: `true`
     // when registration gave up and fell back to poll-only. Giving up is not always the end
-    // of a retry budget — a [`RegistrationFailure::Fatal`] ends it wherever it lands, which
-    // need not be the first attempt. Never updated afterwards — see [`Watch::health`].
+    // of a retry budget: a [`RegistrationFailure::Fatal`] ends it wherever it lands, which
+    // need not be the first attempt. Never updated afterwards. See [`Watch::health`].
     degraded: bool,
     thread: Option<JoinHandle<()>>,
 }
@@ -177,8 +178,8 @@ impl std::fmt::Debug for Watch {
 }
 
 impl Watch {
-    // Prepare the stop machinery. See the type documentation for why nothing is
-    // registered with the operating system yet: the window between
+    // Prepare the stop machinery. Nothing is registered with the operating system
+    // yet: the window between
     // [`crate::ProxyWatcher::with_options`]'s initial read and this subscription going
     // live is closed from the other side instead, by [`run`]'s unconditional opening
     // `publish`.
@@ -195,7 +196,7 @@ impl Watch {
 
     // Start the watcher thread (a dedicated `std::thread`, no runtime)
     // and wait for it to have finished registering the notification, one way or
-    // another (see the type documentation).
+    // another.
     pub(crate) fn spawn(
         &mut self,
         options: &WatchOptions,
@@ -212,7 +213,7 @@ impl Watch {
         let options = options.clone();
         // Capacity 1 and a single send: the thread never blocks on this channel, even
         // if `spawn` gave up waiting. The `bool` alongside the run loop is
-        // [`Watch::degraded`]'s value — see [`Registration::new`].
+        // [`Watch::degraded`]'s value; see [`Registration::new`].
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(CFRunLoop, bool), Error>>(1);
 
         let thread = thread::Builder::new()
@@ -256,13 +257,13 @@ impl Watch {
         }
     }
 
-    // Report which documented macOS notification routes were established — established,
+    // Report which documented macOS notification routes were established: established,
     // past tense, and that is the whole of what this answers. The `degraded` field above
     // points here for why it is never updated afterwards, so the reason belongs here: the
     // `SCDynamicStore` subscription is made once and needs no renewal, so there is no
-    // recurring call whose failure `Shared::degrade` could carry. Windows has one —
-    // `sys::win::notify`'s `rearm` re-registers after every notification and degrades the
-    // health when that fails — and the difference is the platform API's, not a choice made
+    // recurring call whose failure `Shared::degrade` could carry. Windows has one
+    // (`sys::win::notify`'s `rearm` re-registers after every notification and degrades the
+    // health when that fails), and the difference is the platform API's, not a choice made
     // here.
     //
     // The cost is that the two answers are not the same answer. A subscription that stops
@@ -301,11 +302,11 @@ impl Drop for Watch {
     // `run_in_mode` picks it up on entry. [`run`] re-reads `stop` after every wait, so
     // either way the next thing the thread does is return.
     //
-    // `CFRunLoopStop` would therefore add nothing, and it is the one call of the three
+    // `CFRunLoopStop` would therefore add nothing, and it is the only call of the three
     // that reference implementations keep on the owning thread: it stops whichever run is
-    // innermost on the target thread, which the dropping thread cannot know. Chromium
-    // marks the signal-and-wake path `// May be called on any thread.` and the
-    // `CFRunLoopStop` path `// Must be called on the run loop thread.`
+    // innermost on the target thread, which the dropping thread cannot know. Chromium marks
+    // the signal-and-wake path `// May be called on any thread.` and the `CFRunLoopStop`
+    // path `// Must be called on the run loop thread.`
     // (`MessagePumpCFRunLoopBase::ScheduleWork` and `MessagePumpCFRunLoop::DoQuit` in
     // `base/message_loop/message_pump_apple.mm`); libuv signals across threads in
     // `uv__cf_loop_signal` but calls `CFRunLoopStop` from inside the source callback
@@ -332,8 +333,8 @@ impl Drop for Watch {
 // Chromium is where the retry budget comes from, but not this split: its
 // `InitNotificationsHelper` is retried whole, so a NULL from
 // `SCDynamicStoreCreateRunLoopSource` gets all five attempts there and only one here. That
-// is a deliberate narrowing — a NULL run loop source is an allocation failure, not a round
-// trip that lost a race — and it only decides anything when `poll_interval` is `None`,
+// is a deliberate narrowing (a NULL run loop source is an allocation failure, not a round
+// trip that lost a race), and it only decides anything when `poll_interval` is `None`,
 // since otherwise `watch_fail_soft` degrades to polling either way.
 enum RegistrationFailure {
     // A round trip to `configd` failed. [`Registration::establish_store`] retries this,
@@ -355,11 +356,11 @@ struct Registration {
     _source: Option<CFRunLoopSource>,
     // The thread's own run loop. Always created and given the wake-up source, whether or
     // not the `SCDynamicStore` subscription itself came up: as the module docs' `Stop:`
-    // note says, the source is attached *before* registration, precisely so that `Drop`
+    // note says, the source is attached *before* registration, so that `Drop`
     // can stop a thread whose registration never succeeded.
     run_loop: CFRunLoop,
-    // Whether the subscription could not be established — after exhausting the retries, or
-    // at whatever attempt a [`RegistrationFailure::Fatal`] cut them short — and this
+    // Whether the subscription could not be established (after exhausting the retries, or
+    // at whatever attempt a [`RegistrationFailure::Fatal`] cut them short), and this
     // registration is running in degraded (poll-only) mode.
     degraded: bool,
 }
@@ -367,7 +368,7 @@ struct Registration {
 impl Registration {
     // Prepare this thread's run loop, then attempt to create the `SCDynamicStore` session,
     // subscribe to both [`SETUP_PROXIES_KEY`] and [`STATE_PROXIES_KEY`] (either scope
-    // changing must be able to change `effective`), and attach both sources to it —
+    // changing must be able to change `effective`), and attach both sources to it,
     // retrying a transient failure per [`establish_store`](Self::establish_store), and
     // falling back to a poll-only registration if every attempt fails and `poll_interval`
     // allows it.
@@ -424,7 +425,7 @@ impl Registration {
     // Attempt [`try_register_once`](Self::try_register_once) up to
     // `1 + REGISTRATION_MAX_RETRIES` times total, sleeping
     // [`REGISTRATION_RETRY_INTERVAL`] before each retry, stopping early on a
-    // [`RegistrationFailure::Fatal`] failure (see the module docs).
+    // [`RegistrationFailure::Fatal`] failure (see [`RegistrationFailure`]).
     fn establish_store(
         run_loop: &CFRunLoop,
         changed: Arc<AtomicBool>,
@@ -563,16 +564,16 @@ fn run(
         // The fixed window `WatchOptions::debounce` describes; that is what holds the
         // detection-latency SLO under a storm of changes.
         //
-        // Held by test elsewhere — `tests/linux_watch.rs` and `tests/windows_watch.rs` both
-        // storm their store for seconds and require the snapshot inside the window — and
-        // not here, deliberately. The only way to move this machine's proxy setting from a
+        // Held by test elsewhere (`tests/linux_watch.rs` and `tests/windows_watch.rs` both
+        // storm their store for seconds and require the snapshot inside the window) and
+        // not here. The only way to move this machine's proxy setting from a
         // test is `sudo networksetup`, one process per write, which is neither fast enough
         // to outrun a 200 ms window nor cheap enough to run in a loop on a billed runner.
         // What makes that acceptable is the shape rather than the coverage: the sliding
         // mistake is a *branch* reopening the deadline on a wake, and the loop below has no
-        // per-wake branch to put it in — `run_in_mode` returns into a body that only
+        // per-wake branch to put it in; `run_in_mode` returns into a body that only
         // recomputes `remaining` from a deadline it never touches. On Linux and on Windows
-        // the wake arrives in a `match` arm, which is exactly where that statement fits and
+        // the wake arrives in a `match` arm, which is where that statement fits and
         // where it fits unnoticed.
         let deadline = Instant::now() + effective_debounce(options.debounce);
         loop {
@@ -598,7 +599,7 @@ fn run(
 // Read the configuration once and hand the result to the stream side.
 fn publish(options: &WatchOptions, shared: &Shared) {
     match read_config(options) {
-        // Emit only when the snapshot actually differs from the previous one.
+        // Emit only when the snapshot differs from the previous one.
         Ok(config) => shared.emit(config),
         // A transient failure must not end the subscription.
         Err(error) => shared.fail(error),
@@ -625,7 +626,7 @@ mod tests {
     }
 
     // An unfloored `Duration::ZERO` would make `CFRunLoopRunInMode(mode, 0.0, true)`
-    // return immediately every call — a busy loop.
+    // return immediately every call, a busy loop.
     #[test]
     fn a_too_small_poll_interval_is_clamped_to_the_floor() {
         assert_eq!(
@@ -661,9 +662,9 @@ mod tests {
 
     // The worst case [`Watch::spawn`] can be blocked by retries, pinned so the two
     // constants cannot silently drift apart from the five seconds `crate::read` now
-    // promises on the public surface. That `ProxyWatcher::with_options` pays it twice —
-    // it reads through [`super::create_store`]'s own loop over these constants before it
-    // spawns — is stated on `with_options`, and is not repeated here.
+    // promises on the public surface. That `ProxyWatcher::with_options` pays it twice
+    // (it reads through [`super::create_store`]'s own loop over these constants before it
+    // spawns) is stated on `with_options`, and is not repeated here.
     #[test]
     fn the_documented_worst_case_retry_delay_is_five_seconds() {
         assert_eq!(

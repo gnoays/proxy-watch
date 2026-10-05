@@ -1,0 +1,19 @@
+[package]
+name = "proxy-watch-node"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Node.js bindings for proxy-watch"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+proxy-watch = { path = "../..", default-features = false }
+napi = { version = "3", features = ["napi5"] }
+napi-derive = "3"
+proxy-watch-shared = { path = "../shared" }
+
+[build-dependencies]
+napi-build = "2"

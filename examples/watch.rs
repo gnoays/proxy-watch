@@ -1,4 +1,4 @@
-//! Monitor OS proxy settings and print each update — a tiny CLI-shaped demo.
+//! Monitor OS proxy settings and print each update, a tiny CLI-shaped demo.
 //!
 //! This is an **example**, not a shipped binary. A standalone `proxy-watch` CLI would
 //! mostly duplicate `read` / `ProxyWatcher` for a niche that already has VPN-oriented
@@ -33,7 +33,7 @@ fn main() -> Result<(), proxy_watch::Error> {
                 n += 1;
                 eprintln!("--- #{n} error ---");
                 eprintln!("error: {error}");
-                // Last good state at delivery — recovery is not promised as the next item.
+                // Last good state at delivery; recovery is not promised as the next item.
                 print_health(&state.health);
                 println!();
             }
@@ -77,7 +77,7 @@ fn print_health(health: &WatchHealth) {
     let status = if health.is_fully_live() {
         "fully live"
     } else if health.is_frozen() {
-        "frozen (no live route, no poll_interval)"
+        "frozen (stopped, or no live route and no poll_interval)"
     } else {
         "degraded or partial"
     };

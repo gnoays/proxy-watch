@@ -12,10 +12,10 @@
 //! A machine configured with a PAC script or WPAD auto-detection makes this print an
 //! `Error::PacNotSupported` instead of a decision. That is not a gap: `resolve()` is
 //! *defined* never to evaluate a script, and refuses to guess "direct" on its behalf,
-//! because a wrong guess bypasses the proxy the administrator configured. Evaluation
-//! lives in `resolve_with_pac()` behind the `pac` feature and an engine
-//! (`pac-boa` or `pac-windows-native`) — see `cargo run --features pac-boa --example
-//! pac`.
+//! because a wrong guess bypasses the proxy the administrator configured. Evaluation lives
+//! in `pac::PacResolver`: `pac-native` hands the configuration to the OS's own resolver,
+//! and `pac-quickjs` runs a script body, the settings' own or one you fetched; see `cargo
+//! run --features pac-quickjs --example pac`.
 
 use proxy_watch::{ProxyStep, Url, read, resolve};
 
@@ -43,19 +43,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(steps) => {
                 let decision: Vec<String> = steps
                     .iter()
-                    // Deliberately not `to_url()`, for the two reasons its own doc gives.
-                    // It answers `None` for a host no URL can hold as well as for
-                    // `Direct`, and printing "DIRECT" for the first is the failure this
-                    // crate exists to avoid: telling the reader to bypass the proxy the
-                    // administrator configured. And the URL it builds carries the proxy's
-                    // credentials, which must not be written to a terminal or a log.
+                    // Not `to_url()`, for the two reasons its own doc gives. It answers
+                    // `None` for a host no URL can hold as well as for `Direct`, and
+                    // printing "DIRECT" for the first is the failure this crate exists to
+                    // avoid: telling the reader to bypass the proxy the administrator
+                    // configured. And the URL it builds carries the proxy's credentials,
+                    // which must not be written to a terminal or a log.
                     .map(|step| match step.endpoint() {
                         // `endpoint()` is `None` for `Direct` and for nothing else.
                         None => "DIRECT".to_owned(),
                         Some(endpoint) => match endpoint.scheme_hint {
                             // `Display` prints the hint's own scheme and never the
-                            // credentials. The hint is the scheme worth printing:
-                            // `socks5h` vs `socks5` says who resolves the host name.
+                            // credentials. The hint is the scheme to print: `socks5h` vs
+                            // `socks5` says who resolves the host name.
                             Some(_) => endpoint.to_string(),
                             // Without a hint it prints a bare `host:port`, so name the
                             // protocol from the step. (`scheme()` is `None` only for

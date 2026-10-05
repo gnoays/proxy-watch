@@ -10,7 +10,7 @@ use crate::mode::ProxyMode;
 #[non_exhaustive]
 pub enum ProxyConfigSource {
     /// The per-user WinINet settings, read through
-    /// `WinHttpGetIEProxyConfigForCurrentUser` — which answers for the *active* connection,
+    /// `WinHttpGetIEProxyConfigForCurrentUser`, which answers for the *active* connection,
     /// so a VPN or dial-up connectoid carrying its own proxy is what this reports while it
     /// is up. When that call fails the backend falls back to the plain
     /// `HKCU\…\Internet Settings` values, which are the LAN connection's: the label is
@@ -18,14 +18,14 @@ pub enum ProxyConfigSource {
     /// connectoid was in charge. This label alone does not say which of them answered.
     ///
     /// [`ProxyConfig::fallbacks`] says it for the failures where it is a loss. When the
-    /// call reports that no Internet Explorer proxy settings exist — the documented
-    /// `ERROR_FILE_NOT_FOUND` — the plain values are read from the same account's own
-    /// hive, so they are not a substitute for the answer but the answer itself, from a
-    /// store documented to hold the same settings, and nothing is recorded — except under
-    /// `ProxySettingsPerUser = 0`, where Windows answers from the per-machine `Connections`
-    /// blob instead and these per-user values are a store it is not reading. When it fails
-    /// any other way, settings may have existed and gone unread, so this source appears in
-    /// that list: the read did not learn the value it came for.
+    /// call reports that no Internet Explorer proxy settings exist (the documented
+    /// `ERROR_FILE_NOT_FOUND`), the plain values are read from the same account's own hive.
+    /// They are the answer itself, from a store documented to hold the same settings, and
+    /// nothing is recorded, except under `ProxySettingsPerUser = 0`. Under that setting,
+    /// Windows answers from the per-machine `Connections` blob instead and these per-user
+    /// values are a store it is not reading. When it fails any other way, settings may have
+    /// existed and gone unread, so this source appears in that list: the read did not learn
+    /// the value it came for.
     Registry,
     /// Group policy `HKLM\Software\Policies\…\Internet Settings`. Recorded but never
     /// [`effective`](ProxyConfig::effective), because Windows does not read the values this
@@ -34,9 +34,9 @@ pub enum ProxyConfigSource {
     /// (`C:\Windows\PolicyDefinitions\inetres.admx` defines `ProxySettingsPerUser` and
     /// nothing else under it), and `WinHttpGetIEProxyConfigForCurrentUser` answers the same
     /// with those values present as with the key empty. An administrator who wrote one by
-    /// hand meant something by it, so it is reported from
-    /// [`sources`](ProxyConfig::sources); acting on it would route through a proxy nothing
-    /// else on the machine uses.
+    /// hand may have meant it, so it is reported from
+    /// [`sources`](ProxyConfig::sources); acting on it would route through a proxy no other
+    /// component on the machine uses.
     GroupPolicy,
     /// WinHTTP machine defaults (`netsh winhttp set proxy`). Recorded but never
     /// [`effective`](ProxyConfig::effective): Microsoft scopes this store to service and
@@ -56,7 +56,7 @@ pub enum ProxyConfigSource {
     /// The process environment, read under the variable names a `kioslaverc` with
     /// `ProxyType = 4` chose: `httpProxy=MY_HTTP_VAR` names the *variable*, not the proxy.
     ///
-    /// Separate from [`Env`](Self::Env) because only the store is shared — the naming rule
+    /// Separate from [`Env`](Self::Env) because only the store is shared: the naming rule
     /// is the file's, so the two can be read on one machine and disagree. Merged under a
     /// single label they would both land in [`sources`](ProxyConfig::sources) and
     /// [`ProxyConfig::source`] would answer with whichever came first, silently.
@@ -66,9 +66,10 @@ pub enum ProxyConfigSource {
     /// read and not off the label it hands back.
     KioslavercEnv,
     /// XDG portal resolver. It answers already-resolved lookups, so a
-    /// [`ProxyMode::Manual`] from this source always carries an
-    /// empty [`BypassRules`](crate::BypassRules) — the portal applied the bypass itself
-    /// and never discloses it.
+    /// [`ProxyMode::Manual`] from this source always carries
+    /// [`BypassRules`](crate::BypassRules) with no entries and no implicit set
+    /// ([`ImplicitBypass::Empty`](crate::ImplicitBypass::Empty)): the portal applied the
+    /// bypass itself and never discloses it.
     ///
     /// The lookup names a fixed reserved probe host and not the destination you are asking
     /// about, because the portal resolves per destination and a snapshot has none to give
@@ -80,6 +81,14 @@ pub enum ProxyConfigSource {
     /// ([`ProxyEnv`](crate::ProxyEnv)). A `kioslaverc` that names its own variables
     /// reports [`KioslavercEnv`](Self::KioslavercEnv) instead.
     Env,
+    /// Android's `ConnectivityManager.getDefaultProxy()`: the proxy of the default network,
+    /// or the global one when set, as the Java framework hands it to every app. It is what
+    /// `java.net.ProxySelector.getDefault()` routes by, so a bypass list is read with that
+    /// selector's rules rather than Chromium's.
+    ConnectivityManager,
+    /// iOS's `CFNetworkCopySystemProxySettings()`: the proxy of the active network, keyed
+    /// like macOS's [`SystemConfigurationState`](Self::SystemConfigurationState).
+    CfNetworkSystemSettings,
 }
 
 /// Point-in-time system proxy snapshot.
@@ -108,20 +117,18 @@ pub struct ProxyConfig {
     /// rather than failing the whole read.
     ///
     /// A source absent from both lists was not configured; a source listed here is one
-    /// the machine may well be configured with, whose value this read did not learn. That
-    /// is the difference [`sources`](Self::sources) alone cannot express, and until this
-    /// field existed the only record of it was a log line — so a consumer built without
-    /// the `tracing` feature had none at all.
+    /// the machine may well be configured with, whose value this read did not learn.
+    /// [`sources`](Self::sources) alone cannot express that. The log line that also records
+    /// it reaches only a consumer built with the `tracing` feature.
     ///
     /// Backend snapshots only: nothing here is derived from the modes, so
     /// [`ProxyConfig::new`] and the constructors below leave it empty and
     /// [`ProxyConfig::with_fallbacks`] is what fills it in.
     ///
-    /// Unlike `captured_at` this **is** compared by [`PartialEq`], which is what makes a
-    /// watcher deliver the snapshot where a degradation appears or clears. Excluding it
-    /// would be worse than merely quiet: the watcher's equality skip keeps the snapshot it
-    /// already holds, so a degradation that healed would be reported for the rest of the
-    /// watcher's life.
+    /// Unlike `captured_at` this **is** compared by [`PartialEq`], so a watcher delivers
+    /// the snapshot where a degradation appears or clears. Excluded, it would leave the
+    /// watcher's equality skip holding the snapshot it already has, so a degradation that
+    /// healed would be reported for the rest of the watcher's life.
     pub fallbacks: Vec<ProxyConfigSource>,
     /// Capture time; excluded from equality.
     pub captured_at: SystemTime,
@@ -186,50 +193,47 @@ impl ProxyConfig {
     ///
     /// The environment enters *whole*: one entry in [`sources`](Self::sources), ranked
     /// against the OS sources rather than merged into them slot by slot. Setting only
-    /// `http_proxy` therefore does not leave the OS's https proxy in place — the winning
+    /// `http_proxy` therefore does not leave the OS's https proxy in place; the winning
     /// source answers for every scheme, and an environment with no https entry resolves
     /// https to direct. `all_proxy` is how the environment covers the schemes it did not
     /// name.
     ///
-    /// What the fold does depends on the environment's shape.
-    /// [`ProxyEnv::is_configured`] separates the first shape from the other two; what
-    /// separates those is whether anything was *dropped*, which [`ProxyEnv::rejected`] and
-    /// [`ProxyEnv::bypass`]'s own rejections answer.
+    /// The fold depends on the environment's shape. [`ProxyEnv::is_configured`] separates
+    /// the first shape from the other two; whether anything was *dropped* separates those,
+    /// and [`ProxyEnv::rejected`] and [`ProxyEnv::bypass`]'s own rejections answer that.
     ///
-    /// - **Configured** — it takes the rank `precedence` asks for. A `no_proxy` with no proxy
-    ///   variable beside it is this shape, and [`ProxyEnv::to_mode`] turns it into
+    /// - **Configured**: it takes the rank `precedence` asks for. A `no_proxy` with no
+    ///   proxy variable beside it is this shape, and [`ProxyEnv::to_mode`] turns it into
     ///   [`Direct`](ProxyMode::Direct): under [`BeforeSystem`](EnvPrecedence::BeforeSystem) it
     ///   does not *add* a bypass to the OS proxy, it outranks that proxy and every host
-    ///   resolves direct. The error is toward bypassing more than the caller listed, never
-    ///   toward proxying a host they asked to exclude.
-    /// - **Present but specifying nothing** — appended to `sources` and never made
+    ///   resolves direct. The result errs toward bypassing more than the caller listed,
+    ///   never toward proxying a host they asked to exclude.
+    /// - **Present but specifying nothing**: appended to `sources` and never made
     ///   [`effective`](Self::effective), so a typo cannot mask the OS. Where every `*_proxy`
     ///   value was malformed, [`ProxyEnv::to_mode`] answers `Manual` and the drops come back
     ///   out of [`source`](Self::source). Where instead a `no_proxy` lost every entry it held,
     ///   `to_mode` answers [`Direct`](ProxyMode::Direct), which has nowhere to hold an
     ///   exclusion list: the entry records only *that* the environment was there and lost
     ///   something, and the text of the drop stays on [`ProxyEnv::bypass`]`().rejected`.
-    /// - **Specifying nothing and dropping nothing** — `self` is returned untouched. Usually
+    /// - **Specifying nothing and dropping nothing**: `self` is returned untouched. Usually
     ///   that means the variables are unset, but a `no_proxy` that parses to no rules and no
     ///   rejections (`no_proxy=`, `no_proxy=","`) lands here too: it was set, and the
     ///   snapshot keeps no evidence that it was.
     ///
     /// Being configured and having dropped something are not exclusive. `no_proxy=.corp`
-    /// beside an `http_proxy` that does not parse is configured — the bypass list is the
-    /// configuration — so it takes the rank, and the dropped scheme rides in with it: `http`
-    /// then answers [`Error::ProxyEntryUnusable`](crate::Error::ProxyEntryUnusable) instead
-    /// of falling through to the OS proxy or to direct. Silently sending the scheme whose
-    /// value was typed wrong straight out is the failure this crate exists to make visible.
+    /// beside an `http_proxy` that does not parse is configured (the bypass list is the
+    /// configuration), so it takes the rank, and the dropped scheme rides in with it:
+    /// `http` then answers [`Error::ProxyEntryUnusable`](crate::Error::ProxyEntryUnusable)
+    /// instead of falling through to the OS proxy or to direct.
     ///
     /// Fold an environment in once. A second `with_env` can leave a second
     /// [`Env`](ProxyConfigSource::Env) entry in `sources`, and [`source`](Self::source)
-    /// answers with whichever is first — which the second environment's shape decides as much
-    /// as the precedence does.
+    /// answers with whichever is first, which the second environment's shape decides as
+    /// much as the precedence does.
     ///
     /// [`captured_at`](Self::captured_at) becomes the older of the two reads, except in the
-    /// third shape, where nothing is folded in: the result is only as fresh as its stalest
-    /// half. `effective` is otherwise left alone, including where that leaves it disagreeing
-    /// with `sources[0]`.
+    /// third shape, where nothing is folded in. `effective` is otherwise left alone,
+    /// including where that leaves it disagreeing with `sources[0]`.
     ///
     /// ```
     /// # use proxy_watch::{EnvPrecedence, ProxyConfig, ProxyConfigSource, ProxyEnv, ProxyMode};
@@ -243,36 +247,16 @@ impl ProxyConfig {
     /// ```
     #[must_use]
     pub fn with_env(mut self, env: &ProxyEnv, precedence: EnvPrecedence) -> Self {
-        // Left out entirely when the environment specifies nothing *and* recorded no drop.
-        // The two halves of that do not buy the same thing. A dropped *scheme* value comes
-        // back out: `to_mode` answers `Manual` for it and carries `rejected` across. A
-        // dropped `no_proxy` entry does not — `to_mode` answers `Direct`, which has nowhere
-        // to hold a bypass list, and [`ProxyEnv::rejected`] says so in as many words. For
-        // that half the source records only that the environment was there and lost
-        // something; the text of the drop stays on the `ProxyEnv` the caller still holds.
-        // Not the same as "the process set none of the variables" either: `no_proxy=` parses
-        // to no rules and no rejections, so it is set and still lands in this return.
+        // Left out only when the environment specifies nothing and dropped nothing, so a
+        // drop still leaves an `Env` record. `no_proxy=` parses to neither and is left out.
         if !env.is_configured() && env.rejected().is_empty() && env.bypass().rejected.is_empty() {
             return self;
         }
-        // `AfterSystem` is a rank, not a veto: with nothing for the environment to come
-        // after, it is the answer rather than nothing at all. "Nothing" is both halves below,
-        // and neither is the obvious one.
-        //
-        // What that rank comes after is the *OS* settings, which is not the same as a
-        // non-empty `sources`: the `else` below writes an `Env` entry for an environment
-        // that specified nothing, and a record kept so that a drop is not silent must not
-        // become the thing the next fold has to lose to. Testing the label instead is exact
-        // rather than approximate — no OS reader writes `Env`, KDE's `ProxyType = 4` being
-        // `KioslavercEnv` precisely so that it does not. A malformed-only environment takes
-        // the rank under neither half — see [`ProxyEnv::is_configured`].
-        //
-        // The labels alone are not enough either. [`ProxyConfig::new`] can hand over a
-        // resolved `effective` with no provenance behind it, and taking the rank off the
-        // labels would overwrite the one value that caller did supply. Snapshots this crate
-        // reads always leave `Direct` there when no OS source came back, so `is_direct`
-        // answers for configurations assembled by hand — and for one an earlier `with_env`
-        // already settled.
+        // `AfterSystem` takes over only when no OS source came back and `effective` is
+        // still `Direct`. An earlier `Env` record is not an OS source (KDE's
+        // environment-backed mode is labelled `KioslavercEnv`, so it is one), and the
+        // `is_direct` test keeps an `effective` that a caller of [`ProxyConfig::new`]
+        // supplied without sources.
         let wins = env.is_configured()
             && match precedence {
                 EnvPrecedence::BeforeSystem => true,
@@ -289,13 +273,8 @@ impl ProxyConfig {
             self.effective = mode.clone();
             self.sources.insert(0, (ProxyConfigSource::Env, mode));
         } else {
-            // `effective` stays where it was. A snapshot with no OS source at all, folded
-            // with an all-malformed environment, therefore stays `Direct` while the entry
-            // this push adds — the only one there — is a `Manual` carrying `Unusable` in
-            // every slot the drops named. The disagreement is the point: an environment that
-            // specified nothing must not take a working connection down, and recomputing
-            // would also overwrite an `effective` a caller of [`ProxyConfig::new`] chose
-            // deliberately.
+            // Malformed-only environment entries remain visible without replacing the
+            // effective mode chosen by the OS or by `ProxyConfig::new`.
             self.sources.push((ProxyConfigSource::Env, mode));
         }
         // The same correction [`ProxyEnv::to_config`] makes, for the same reason.
@@ -307,50 +286,51 @@ impl ProxyConfig {
 /// Where the process environment ranks against the OS settings in
 /// [`ProxyConfig::with_env`].
 ///
-/// A third ranking, "ignore the environment", is deliberately not a variant here: a caller
-/// who wants the environment ignored does not call `with_env`.
+/// A third ranking, "ignore the environment", is not a variant: a caller who wants the
+/// environment ignored does not call `with_env`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum EnvPrecedence {
     /// The environment outranks every OS source. What a consumer layering a `*_proxy`
-    /// reader over the system settings gets by default — Go's `golang.org/x/net/http/
+    /// reader over the system settings gets by default: Go's `golang.org/x/net/http/
     /// httpproxy` reads the variables and nothing else, so a caller who consults it first
     /// has already chosen this.
     BeforeSystem,
     /// The OS settings outrank the environment, which answers only when they produced no
-    /// configuration at all. Not per scheme: one OS source is enough to settle every scheme,
-    /// including the ones it says nothing about — [`ProxyConfig::with_env`] ranks sources,
-    /// it does not fill slots. Chromium's
-    /// `net/proxy_resolution/proxy_config_service_linux.cc` does this in the strong form —
+    /// configuration at all. Not per scheme: one OS source is enough to settle every
+    /// scheme, including the ones it says nothing about; [`ProxyConfig::with_env`] ranks
+    /// sources, it does not fill slots. Chromium's
+    /// `net/proxy_resolution/proxy_config_service_linux.cc` does this in the strong form:
     /// once the desktop settings have produced a configuration it never looks at the
     /// variables, a desktop mode of "none" counts as one, and reading `mode` always finds a
-    /// value, so a stock desktop nobody has ever configured still counts.
+    /// value, so a stock desktop with no proxy configured still counts.
     ///
-    /// This crate is deliberately a shade weaker on GNOME: it asks who wrote that `mode`, and
-    /// only one somebody actually set — the user's dconf layer, or an administrator's profile
-    /// — becomes a source. A machine where nobody has opened the proxy settings therefore
-    /// reaches this rank with an empty `sources`, and the environment answers. "Nobody
-    /// configured anything" and "somebody chose direct" are different answers, and only the
-    /// second should outrank a `*_proxy` an operator set on purpose.
+    /// This crate is a shade weaker on GNOME: it asks who wrote that `mode`, and only one
+    /// that was set (in the user's dconf layer, or an administrator's profile) becomes a
+    /// source. A machine whose proxy settings were never touched therefore reaches this
+    /// rank with an empty `sources`, and the environment answers. An unset `mode` and a
+    /// `mode` set to direct are different answers, and only the second should outrank a
+    /// `*_proxy` an operator set.
     ///
-    /// On Windows that leaves this a rank the environment never takes: `read` always reports
-    /// a `Registry` source, `ProxyEnable = 0` included, so there is never a snapshot for the
-    /// environment to answer for. macOS is nearly as closed: a scope the reader could
-    /// interpret becomes a source whatever it says, [`Direct`](ProxyMode::Direct) included, so
-    /// the environment answers only where *neither* `State:` nor `Setup:` came back — a
-    /// missing key, a NULL, or a value that is not a dictionary — and not merely where the
-    /// scopes name no proxy. Linux is where this rank earns its keep: desktop stores that
-    /// exist and are unset produce a snapshot with no source at all. So does the degraded case
-    /// beside it — the store this session's desktop would normally use compiled out of the
-    /// build while the other one is unset — where the empty `sources` means "never consulted"
-    /// rather than "found nothing", which only [`fallbacks`](ProxyConfig::fallbacks) records.
+    /// On Windows that leaves this a rank the environment never takes: `read` always
+    /// reports a `Registry` source, `ProxyEnable = 0` included, so there is never a
+    /// snapshot for the environment to answer for. macOS is nearly as closed: a scope the
+    /// reader could interpret becomes a source whatever it says,
+    /// [`Direct`](ProxyMode::Direct) included, so the environment answers only where
+    /// *neither* `State:` nor `Setup:` came back (a missing key, a NULL, or a value that is
+    /// not a dictionary); scopes that name no proxy do not qualify. Linux is where this
+    /// rank applies: desktop stores that exist and are unset produce a snapshot with no
+    /// source at all. So does the degraded case beside it (the store this session's desktop
+    /// would normally use compiled out of the build while the other one is unset), where
+    /// the empty `sources` means "never consulted" rather than "found nothing", which only
+    /// [`fallbacks`](ProxyConfig::fallbacks) records.
     /// A machine with no desktop store *at all* is not this case: `read` fails with
     /// [`Error::Unsupported`](crate::Error::Unsupported), so there is no snapshot to fold an
     /// environment into.
     ///
-    /// A rank the environment never takes is still not the "ignore" this enum leaves out,
-    /// which is a caller not folding at all. What a rank settles is `effective`; the rest of
-    /// the fold happens either way, so the environment lands in
+    /// Even a rank the environment never takes differs from the "ignore" this enum leaves
+    /// out, which is a caller not folding at all: a rank settles only `effective`, and the
+    /// rest of the fold happens either way, so the environment lands in
     /// [`sources`](ProxyConfig::sources) and [`captured_at`](ProxyConfig::captured_at) drops
     /// to the older of the two reads even where this one can never win.
     AfterSystem,
@@ -363,7 +343,7 @@ impl Default for ProxyConfig {
 }
 
 impl PartialEq for ProxyConfig {
-    // Everything but `captured_at` — see type docs, and `fallbacks` for why that field is
+    // Everything but `captured_at`; see type docs, and `fallbacks` for why that field is
     // on this side of the line rather than beside the timestamp.
     fn eq(&self, other: &Self) -> bool {
         self.effective == other.effective
@@ -389,11 +369,8 @@ mod tests {
         assert_eq!(config.sources, sources);
     }
 
-    // The distinction the field exists to carry, stated as the one place it has to hold:
-    // two snapshots that agree on every mode are still not the same answer when one of
-    // them was assembled without a source it could not read. Dropping `fallbacks` from
-    // `PartialEq` fails this, and with it the watcher's ability to ever report that a
-    // degradation cleared.
+    // Snapshots that agree on every mode still differ when one lost a source. Without
+    // `fallbacks` in `PartialEq`, the watcher never reports that a degradation cleared.
     #[test]
     fn a_source_that_could_not_be_read_is_not_the_same_snapshot_as_one_that_was_absent() {
         let complete = ProxyConfig::from_source(ProxyConfigSource::Registry, ProxyMode::Direct);

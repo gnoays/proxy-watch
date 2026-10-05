@@ -1,0 +1,15 @@
+[package]
+name = "proxy-watch-c"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "C ABI for proxy-watch"
+publish = false
+
+[lib]
+name = "proxy_watch_c"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+proxy-watch = { path = "../..", default-features = false }
+proxy-watch-shared = { path = "../shared" }

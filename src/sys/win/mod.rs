@@ -8,7 +8,7 @@
 //! registry `ProxyEnable` / `ProxyServer` / `ProxyOverride` / `AutoConfigURL` /
 //! `AutoDetect`. A failure that was not `ERROR_FILE_NOT_FOUND` also lands in
 //! [`ProxyConfig::fallbacks`](crate::ProxyConfig::fallbacks), because then the fallback is
-//! standing in for settings that may have existed — see [`read_user_mode`].
+//! standing in for settings that may have existed; see [`read_user_mode`].
 //!
 //! # Precedence
 //!
@@ -16,12 +16,12 @@
 //! [`WatchOptions::watch_group_policy`](crate::WatchOptions::watch_group_policy) and
 //! [`decides_whether_to_proxy`]) → informational [`ProxyConfigSource::WinHttpDefault`]
 //! (`netsh winhttp` / [`WinHttpGetDefaultProxyConfiguration`]). `effective` = first entry,
-//! so only the per-user store is ever it — see [`in_precedence_order`] for why neither of
-//! the other two leads. Per-connection: the IE call above is documented as returning "the proxy settings
-//! for the current active connection" — LAN, dial-up and VPN alike — so an active
-//! connectoid's settings are what this backend reads. What it never does is enumerate
-//! connectoids or read an inactive one, and the registry fallback reads the per-user LAN
-//! values rather than the `Connections` blobs those settings are stored in.
+//! so only the per-user store is ever it; see [`in_precedence_order`] for why neither of
+//! the other two leads. Per-connection: the IE call above is documented as returning "the
+//! proxy settings for the current active connection" (LAN, dial-up and VPN alike), so an
+//! active connectoid's settings are what this backend reads. What it never does is
+//! enumerate connectoids or read an inactive one, and the registry fallback reads the
+//! per-user LAN values rather than the `Connections` blobs those settings are stored in.
 
 // `pub(crate)` rather than private: the `pac-windows-native` evaluator
 // (`crate::pac::winhttp`) reuses the `Event` RAII wrapper, the UTF-16 helpers and the
@@ -51,28 +51,16 @@ use self::ffi::{RegKey, hresult_error, wide_ptr_to_string};
 // The per-user WinINet settings key.
 const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-// The per-machine group policy key (see the module docs above for how this crate orders it
-// against HKCU).
+// The per-machine group policy key, reported and never `effective`.
 //
-// Not the "Make proxy settings per-machine rather than per-user" GPO's doing, whatever the
-// name suggests: `inetres.admx` gives that policy one value here, `ProxySettingsPerUser`,
-// which selects between the per-user and per-machine stores rather than holding a proxy —
-// and this crate never reads it. No administrative template shipped with Windows writes any
-// of the values `mode_from_registry` looks for under this key, so what is read here was put
-// there directly. One of those names does ship: `inetres.admx` writes `AutoDetect` under
-// `…\Internet Settings\ZoneMap`, which is "automatically detect intranet network", a zone
-// setting — and nothing here opens a subkey, so a search by value name alone misreads it.
-//
-// Windows does not read them either. Under a process-local `RegOverridePredefKey` that puts
-// `ProxyEnable`, `ProxyServer` and `AutoConfigURL` under this key,
-// `WinHttpGetIEProxyConfigForCurrentUser` answers exactly as it does with the key empty. The
-// override does reach WinINet — adding `ProxySettingsPerUser = 0` to the same key flips the
-// `fAutoDetect` it returns, because that value *is* honoured and switches it to the
-// per-machine store — so the silence about the proxy values is a measurement and not a call
-// that never looked.
-//
-// So an entry from this key is reported and never `effective`: it says a value is present
-// that nothing on the machine acts on, which is worth reporting and is not an answer.
+// No administrative template shipped with Windows writes the values `mode_from_registry`
+// reads here. `inetres.admx` writes `ProxySettingsPerUser`, which selects between the
+// per-user and per-machine stores and which this crate does not read; its `AutoDetect` sits
+// under the `ZoneMap` subkey and is an intranet-zone setting. Windows ignores proxy values
+// here too: under a process-local `RegOverridePredefKey` that puts `ProxyEnable`,
+// `ProxyServer` and `AutoConfigURL` under this key, `WinHttpGetIEProxyConfigForCurrentUser`
+// answers as it does with the key empty, while `ProxySettingsPerUser = 0` in the same key
+// does change its answer.
 const POLICY_INTERNET_SETTINGS: &str =
     r"Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings";
 
@@ -102,46 +90,22 @@ pub(crate) fn read_config(options: &WatchOptions) -> Result<ProxyConfig, Error> 
     Ok(config)
 }
 
-// The sources [`read_config`] gathered, in descending precedence.
+// The sources [`read_config`] gathered, in descending precedence. The per-user entry
+// leads; the policy key and the WinHTTP machine default stay in `sources` and are never
+// `effective`.
 //
-// The WinHTTP machine default goes *after* the per-user entry, and is therefore never
-// `effective`. Not because Windows ranks the two below one another — it does not rank them
-// at all. Microsoft's guidance splits them by *environment*: a WinHTTP application in a
-// middle-tier server environment "should rely on a server administrator setting a default
-// proxy configuration in the registry", read back with `WinHttpGetDefaultProxyConfiguration`
-// or `WINHTTP_ACCESS_TYPE_PRECONFIG`, while "a WinHTTP application running on a client
-// desktop machine can attempt to examine Internet Explorer's proxy settings" (*Discovery
-// Without an Auto-Config File*, WinHTTP). Neither is offered as the other's fallback, and
-// the per-user call's own page says it "is only useful when called within a process that is
-// running under an interactive user account identity".
+// Windows does not rank the per-user and machine stores against each other. WinHTTP's
+// *Discovery Without an Auto-Config File* gives the machine default to server applications
+// (`WinHttpGetDefaultProxyConfiguration`) and the per-user settings to desktop ones. No
+// shipping reader makes the machine default a fallback: Chromium answers a failed
+// `WinHttpGetIEProxyConfigForCurrentUser` with `CreateDirect()`
+// (`proxy_config_service_win.cc`), and .NET's `WinInetProxyHelper` carries an empty
+// configuration. The policy entry cannot lead because Windows does not act on the proxy
+// values under [`POLICY_INTERNET_SETTINGS`].
 //
-// So the order is this crate's choice, and what settles it is that no shipping reader of the
-// per-user path makes the other one a fallback either. Chromium answers a failed
-// `WinHttpGetIEProxyConfigForCurrentUser` with `CreateDirect()` and never asks for the
-// machine default (`proxy_config_service_win.cc`); .NET's `WinInetProxyHelper` ignores the
-// error and carries an empty configuration. [`read_user_mode`] is already the more generous
-// of the three — it falls back to the plain HKCU values — and promoting the machine default
-// above even that would leave this crate alone in answering a desktop machine with a setting
-// its administrator wrote for services. A consumer that *is* a service is not left without
-// it: the entry is in `sources`, which is the whole reason it is read.
-//
-// The group policy entry goes *after* the per-user one for a different reason, measured
-// rather than chosen: nothing on Windows reads the values this crate reads from that key.
-// See [`POLICY_INTERNET_SETTINGS`] for the run. Ranking it first meant `effective` could be
-// a proxy no other program on the machine would route through, which is the one way a
-// precedence order can be wrong rather than merely unlike someone else's.
-//
-// It stays in `sources` because a value sitting under the policy key is still worth
-// reporting — an administrator put it there, and a consumer that wants to say so can.
-//
-// Here rather than inline in its one caller because the order *is* the answer —
-// [`ProxyConfig::from_ordered_sources`] makes the first entry `effective` — and the only
-// test that pinned it, `tests/read_once.rs`'s
-// `the_winhttp_machine_default_never_outranks_the_per_user_registry`, can compare no two
-// positions the host does not report. A machine that never ran `netsh winhttp set proxy`
-// reports no `WinHttpDefault` entry at all, so on that host the comparison is skipped and
-// swapping the two lines below stays green. Taking the entries as values puts every
-// combination in reach of every host, which is what the test beside this one uses.
+// A function of its own because [`ProxyConfig::from_ordered_sources`] makes the first entry
+// `effective`, and taking the entries as values lets a test check every order on a host
+// that reports no machine default.
 fn in_precedence_order(
     policy: Option<(ProxyConfigSource, ProxyMode)>,
     user: ProxyMode,
@@ -153,21 +117,9 @@ fn in_precedence_order(
     sources
 }
 
-// The group policy entry for [`read_config`], or `None` when there is none to report.
-//
-// `read` is [`read_group_policy_mode`], taken as a parameter so the rule below can be
-// exercised without an HKLM key to arrange. *Every* failure softens, and the reason is
-// [`in_precedence_order`]: this entry is never `effective`, so a read of it that failed
-// costs the caller a line in `sources` and changes no answer. Propagating would fail a call
-// that was going to route through HKCU either way — a spurious error on a machine that is
-// correctly configured for its user, thrown because a store nothing consults was
-// unreadable or held a malformed URL.
-//
-// That is a change of rule and not of taste. While the policy key led the order, refusing a
-// value it handed over was the only way to stop a mistyped policy `AutoConfigURL` from
-// silently reinstating the per-user proxy it was written to replace, and `ERROR_MORE_DATA`
-// had to propagate on top of that so a policy being edited mid-read did not hand the answer
-// to HKCU for as long as the editing lasted. Neither holds once HKCU is the answer.
+// Report a readable policy entry; record every read failure in `fallbacks` and omit the
+// entry. `in_precedence_order` never makes policy `effective`, so a policy failure cannot
+// prevent the per-user configuration from answering.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 fn group_policy_source(
     read: impl FnOnce() -> Result<Option<ProxyMode>, Error>,
@@ -193,11 +145,8 @@ fn group_policy_source(
     }
 }
 
-// Open the HKLM group policy key and read its mode, `Ok(None)` when the key is absent
-// or carries nothing that decides whether to proxy ([`decides_whether_to_proxy`]).
-//
-// This is the fallible core [`group_policy_source`] wraps and softens; kept separate so
-// the `?`-propagating logic reads exactly like [`read_user_mode`]'s.
+// Read the HKLM policy mode, returning `Ok(None)` for an absent or undecided key.
+// `group_policy_source` handles failures from this fallible core.
 fn read_group_policy_mode() -> Result<Option<ProxyMode>, Error> {
     let Some(key) = RegKey::open(
         HKEY_LOCAL_MACHINE,
@@ -218,24 +167,24 @@ fn read_group_policy_mode() -> Result<Option<ProxyMode>, Error> {
 // how the call failed, and no machine can be made to fail it both ways.
 //
 // Every failure still softens, and only some of them are recorded. The split is the one
-// Microsoft's own page draws: `ERROR_FILE_NOT_FOUND` is "No Internet Explorer proxy settings
-// can be found", and for the account that call ran under, the plain HKCU values read below
-// are then not a substitute for the answer — they *are* it, from the store that holds the
-// same settings. Under `ProxySettingsPerUser = 0` they are not: Windows answers from the
-// per-machine `Connections` blob, which this backend does not read, so what is read below is
-// a per-user store nothing consults. Any other code is a call that failed while
-// settings may well have existed, and what is read instead comes from a different
+// Microsoft's own page draws: `ERROR_FILE_NOT_FOUND` is "No Internet Explorer proxy
+// settings can be found", and for the account that call ran under, the plain HKCU values
+// read below are then not a substitute for the answer; they *are* it, from the store that
+// holds the same settings. Under `ProxySettingsPerUser = 0` they are not: Windows answers
+// from the per-machine `Connections` blob, which this backend does not read, so what is
+// read below is a per-user store nothing consults. Any other code is a call that failed
+// while settings may well have existed, and what is read instead comes from a different
 // connection: the API answers for the *active* connectoid, these values are the LAN one's.
 // That is the case [`ProxyConfigSource::Registry`]'s "still answered, from a store that is
 // documented to hold the same settings" does not cover, and the one this records.
 //
-// It records rather than propagates because the page's list is open — "Among the error codes
-// returned are the following" — so refusing every unlisted code would fail reads on machines
+// It records rather than propagates because the page's list is open ("Among the error codes
+// returned are the following") so refusing every unlisted code would fail reads on machines
 // Microsoft never enumerated, and because no shipping reader of this API propagates either
-// (Chromium answers a failed call with `CreateDirect()`, .NET's `WinInetProxyHelper` carries
-// an empty configuration). Recording keeps the answer those two also give while letting a
-// caller that cares see that the connectoid's view was lost, which is what neither of them
-// offers and what tracing alone did not: `fallbacks` is compared by
+// (Chromium answers a failed call with `CreateDirect()`, .NET's `WinInetProxyHelper`
+// carries an empty configuration). Recording keeps the answer those two also give while
+// letting a caller that cares see that the connectoid's view was lost, which is what
+// neither of them offers and what tracing alone did not: `fallbacks` is compared by
 // [`PartialEq`](ProxyConfig), so a watcher delivers the snapshot where this appears.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 fn read_user_mode(
@@ -286,11 +235,12 @@ fn read_user_mode(
 // Each read folds a value stored under a type that name does not carry into "absent"
 // ([`RegKey::dword_value`], [`RegKey::string_value`]). For `ProxyEnable` that costs more
 // than the one value: with no `AutoConfigURL` or `AutoDetect` beside it,
-// [`decides_whether_to_proxy`] sees a key that said nothing about *whether* to proxy, so the `ProxyServer` beside it is
-// never reached however well formed it is, and this returns `Ok(None)` — `Direct` under
-// HKCU, *no policy at all* under group policy. `ProxyEnable` is stored as a `REG_SZ` on
-// some real machines (psf/requests#4373, "no idea why, but it happens"); what Windows
-// itself makes of one is not settled here, and this crate guesses at neither reading.
+// [`decides_whether_to_proxy`] sees a key that said nothing about *whether* to proxy, so
+// the `ProxyServer` beside it is never reached however well formed it is, and this returns
+// `Ok(None)`: `Direct` under HKCU, *no policy at all* under group policy. `ProxyEnable` is
+// stored as a `REG_SZ` on some real machines (psf/requests#4373, "no idea why, but it
+// happens"); what Windows itself makes of one is not settled here, and this crate guesses
+// at neither reading.
 fn mode_from_registry(key: &RegKey) -> Result<Option<ProxyMode>, Error> {
     let enable = key.dword_value("ProxyEnable")?;
     let server = key.string_value("ProxyServer")?;
@@ -312,13 +262,13 @@ fn mode_from_registry(key: &RegKey) -> Result<Option<ProxyMode>, Error> {
 }
 
 // Whether the values read from an `Internet Settings` key are enough to decide a
-// [`ProxyMode`] at all. `ProxyServer` and `ProxyOverride` deliberately do not count: they
+// [`ProxyMode`] at all. `ProxyServer` and `ProxyOverride` do not count: they
 // say *which* proxy, not whether to use one, and a key carrying only those would otherwise
 // resolve to [`ProxyMode::Direct`].
 //
 // Only the group policy path can observe the difference. Under HKCU a `false` here becomes
 // `Direct` anyway ([`read_user_mode`]), so what this decides is whether a
-// [`ProxyConfigSource::GroupPolicy`] entry appears in `sources` at all — and since
+// [`ProxyConfigSource::GroupPolicy`] entry appears in `sources` at all, and since
 // [`in_precedence_order`] keeps that entry out of `effective`, the stake is a reported
 // source and not a masked answer. Whether `AutoDetect = 0` alone should count is open only
 // while the stake is the answer; as a matter of what to report, a key that named the
@@ -332,22 +282,11 @@ fn decides_whether_to_proxy(
     enable.is_some() || has_pac_url || auto_detect.is_some()
 }
 
-// Whether `ProxyEnable` switches the static `ProxyServer` beside it on. Exactly `1`; what
-// any other non-zero value would mean is not settled here. WinINet does read these plain
-// per-user values — writing `ProxyEnable = 1` and a `ProxyServer` to the real HKCU key
-// routes traffic through it — so the question is a real one, and a process-local
-// `RegOverridePredefKey` cannot answer it: an HKCU shadow is invisible to WinINet, which
-// keeps answering from the live key, so every shadowed value reports the same nothing. Read
-// a shadow back with `RegGetValueW` and all that is established is that the *calling
-// process* sees it. Chromium does not interpret the value either — it calls
-// `WinHttpGetIEProxyConfigForCurrentUser` and watches these keys only for change
-// notification. So `1` is the only reading with something behind it, and a value this crate
-// cannot read stays off rather than being promoted to a proxy nobody asked for. Both registry readers
-// ([`mode_from_registry`] and [`wpad_fallback_from_key`]) ask this one question, and an
-// answer settled in one copy alone leaves the other reading it differently. Whether the
-// server value is usable at all is a different question, asked by [`resolve_mode`] and
-// [`wpad_fallback_beneath`] because the WinHTTP path reaches them without a switch to
-// consult.
+// Only `ProxyEnable = 1` enables `ProxyServer`; other nonzero values have no established
+// meaning here. Chromium's `proxy_config_service_win.cc` delegates interpretation to
+// `WinHttpGetIEProxyConfigForCurrentUser`. Both `mode_from_registry` and
+// `wpad_fallback_from_key` use this rule; `resolve_mode` and `wpad_fallback_beneath`
+// separately decide whether the enabled server is usable.
 fn static_server_is_enabled(enable: Option<u32>) -> bool {
     enable == Some(1)
 }
@@ -372,7 +311,7 @@ fn resolve_mode(
     }
 }
 
-// Re-derive what WinINet would fall through to below auto-detect, in the per-user store —
+// Re-derive what WinINet would fall through to below auto-detect, in the per-user store:
 // [`read_user_mode`]'s own precedence, WinHTTP's view of it first and the plain registry
 // values as its fallback.
 //
@@ -399,7 +338,7 @@ pub(crate) fn wpad_fallback() -> Result<(Option<url::Url>, ProxyMode), Error> {
         Ok(config) => Ok(config.to_fallback_beneath()),
         Err(error) => {
             // Traced and not recorded, however it failed, because this runs only after
-            // [`read_config`] already answered `WpadAutoDetect` from this same store —
+            // [`read_config`] already answered `WpadAutoDetect` from this same store:
             // so a failure worth recording was recorded there, against the snapshot the
             // caller holds. There is no second snapshot here to put it in.
             crate::trace::fallback(
@@ -443,13 +382,13 @@ fn wpad_fallback_from_key(key: &RegKey) -> Result<(Option<url::Url>, ProxyMode),
 // The two steps configured *beneath* WPAD auto-detect: the `AutoConfigURL` WinHTTP can be
 // asked to try in the same call, and the mode left to answer with once neither WPAD nor
 // that URL has produced a usable script. Used only by [`wpad_fallback_from_key`] and
-// [`IeProxyConfig::to_fallback_beneath`] — both reach here with `auto_detect` already
+// [`IeProxyConfig::to_fallback_beneath`]: both reach here with `auto_detect` already
 // forced to `false` by construction, which is why this takes no such parameter.
 //
 // A pair rather than one [`ProxyMode`], because collapsing to the first step lost the
 // second. A key carrying both an `AutoConfigURL` and a `ProxyServer` came back as
 // `ProxyMode::Pac`, and `resolve_wpad_with_fallback` then answered a WPAD-plus-PAC miss
-// with `Direct` — sending a request out unproxied past a static proxy that was configured,
+// with `Direct`: sending a request out unproxied past a static proxy that was configured,
 // enabled and perfectly usable. Both references continue to that proxy instead:
 // Chromium's `ConfiguredProxyResolutionService::OnInitProxyResolverComplete` clears the
 // automatic settings and logs "Failed configuring with PAC script, falling-back to manual
@@ -460,7 +399,7 @@ fn wpad_fallback_from_key(key: &RegKey) -> Result<(Option<url::Url>, ProxyMode),
 //
 // What neither reference licenses is continuing after a script that *ran*: Chromium's
 // `DidFinishResolvingProxy` answers a non-mandatory resolver failure with `UseDirect()`,
-// and the outcome this pair serves is the other one — `ERROR_WINHTTP_AUTODETECTION_FAILED`,
+// and the outcome this pair serves is the other one: `ERROR_WINHTTP_AUTODETECTION_FAILED`,
 // which is a script that was never obtained.
 //
 // An `AutoConfigURL` this crate cannot parse comes back as `None` rather than an error: it
@@ -501,8 +440,8 @@ fn wpad_fallback_beneath(
 // it does not apply.
 //
 // `query` is injected for the same reason [`group_policy_source`] injects its read: the two
-// `None`s below are the whole point of the function and no machine can be made to produce
-// both of them.
+// `None`s below are the cases the function exists to return and no machine can be made to
+// produce both of them.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 fn winhttp_default_source(
     query: impl FnOnce() -> Result<WinHttpDefaultConfig, windows::core::Error>,
@@ -528,11 +467,11 @@ fn winhttp_default_source(
                 "reading the WinHTTP per-machine default proxy configuration failed; \
                  continuing without the WinHttpDefault source"
             );
-            // The arm above is a machine where nobody ever ran `netsh winhttp`, which is
-            // not a failure and is not recorded. This one is, and the difference matters
-            // most to exactly the consumer this source is read for: a service reading
-            // `sources` for the machine default cannot otherwise tell an administrator who
-            // set none from a call that did not answer.
+            // The arm above is a machine where `netsh winhttp` has never run, which is not
+            // a failure and is not recorded. This one is, and the difference matters most
+            // to the consumer this source is read for: a service reading `sources` for the
+            // machine default cannot otherwise tell an administrator who set none from a
+            // call that did not answer.
             fallbacks.push(ProxyConfigSource::WinHttpDefault);
             None
         }
@@ -603,7 +542,7 @@ impl IeProxyConfig {
 
     // [`wpad_fallback`]'s per-user branch: the same values [`to_mode`](Self::to_mode)
     // reads, run back through [`wpad_fallback_beneath`] so the steps *below* auto-detect
-    // come back instead. Cannot fail — there is no registry I/O left to do once the fields
+    // come back instead. Cannot fail: there is no registry I/O left to do once the fields
     // are in hand.
     #[cfg(feature = "pac-windows-native")]
     fn to_fallback_beneath(&self) -> (Option<url::Url>, ProxyMode) {
@@ -714,7 +653,7 @@ mod tests {
     }
 
     // The two answers `group_policy_source` passes through and the three failures it
-    // absorbs. None of the failures can reach the caller as an error any more — the entry
+    // absorbs. None of the failures can reach the caller as an error any more: the entry
     // they would have carried is never `effective`, so failing the whole read on their
     // account would refuse a machine whose per-user store answers perfectly well. The three
     // are still every distinct failure this backend can produce here: a refused open
@@ -776,7 +715,7 @@ mod tests {
         );
         // The row that found no policy must not be in here; the three that failed must all
         // be. Length alone is the assertion that a change softening one more thing into
-        // silence, or recording a machine that simply has no policy as degraded, fails.
+        // silence, or recording a machine that has no policy as degraded, fails.
         assert_eq!(
             fallbacks,
             [ProxyConfigSource::GroupPolicy; 3],
@@ -786,10 +725,10 @@ mod tests {
 
     // The same distinction one source over, where the two indistinguishable answers are
     // both `None` rather than both `Ok(None)`. `ERROR_FILE_NOT_FOUND` is the documented way
-    // WinHTTP says nobody ever ran `netsh winhttp set proxy`, which is a machine with no
-    // machine default and not a failure; anything else is a call that did not answer, and
-    // only that one is recorded. A service reading `sources` for the machine default has no
-    // other way to tell the two apart, because the entry is missing either way.
+    // WinHTTP reports that `netsh winhttp set proxy` has never run, which is a machine with
+    // no machine default and not a failure; anything else is a call that did not answer,
+    // and only that one is recorded. A service reading `sources` for the machine default
+    // has no other way to tell the two apart, because the entry is missing either way.
     #[test]
     fn only_a_winhttp_default_that_did_not_answer_is_recorded_as_degraded() {
         let mut fallbacks = Vec::new();
@@ -835,7 +774,7 @@ mod tests {
     // connection's values instead, from a store the API was not asked about, and a caller
     // reading a snapshot has no other way to learn that happened.
     //
-    // The mode is deliberately unasserted on the failing rows: the fallback reads this
+    // The mode is unasserted on the failing rows: the fallback reads this
     // host's own HKCU, so what comes back is whatever the machine is configured with, and a
     // host carrying an unparsable `AutoConfigURL` answers `Err`. What the rows are being
     // asked about is settled before any of that runs.
@@ -882,13 +821,13 @@ mod tests {
     }
 
     // Which store the caller ends up routing through, on a host that need not hold any of
-    // them. The order is the answer and not presentation — `effective` is `sources.first()`
-    // — and both of the other two stores are reported without ever being it: the WinHTTP
+    // them. The order is the answer and not presentation: `effective` is `sources.first()`,
+    // and both of the other two stores are reported without ever being it: the WinHTTP
     // default because it was written for services, the policy key because Windows itself
     // does not read the values this crate reads from it (`POLICY_INTERNET_SETTINGS`).
     //
     // `tests/read_once.rs` asks the same question of the real machine and cannot finish it:
-    // its comparison is guarded on the host actually reporting a `WinHttpDefault` entry,
+    // its comparison is guarded on the host reporting a `WinHttpDefault` entry,
     // which a machine that never ran `netsh winhttp set proxy` does not, and no host this
     // suite may write to reports a policy entry at all. The three modes here are distinct so
     // that `effective` alone says which one won.
@@ -958,8 +897,8 @@ mod tests {
     }
 
     // A group policy key that carries only *descriptive* values must not resolve to a mode
-    // at all, because `group_policy_source` would then report a `Direct` group policy that
-    // nobody configured. The switches stay decisive, `ProxyEnable = 0` included.
+    // at all, because `group_policy_source` would then report an unconfigured `Direct`
+    // group policy. The switches stay decisive, `ProxyEnable = 0` included.
     #[test]
     fn a_policy_key_with_no_switch_in_it_decides_nothing() {
         assert!(!decides_whether_to_proxy(None, None, None));
@@ -975,15 +914,15 @@ mod tests {
         assert!(decides_whether_to_proxy(None, None, Some(1)));
 
         // A blank AutoConfigURL is a present registry value that resolve_mode would
-        // throw away — it must not make the GP key decisive on its own.
+        // throw away; it must not make the GP key decisive on its own.
         assert!(!decides_whether_to_proxy(None, Some(""), None));
         assert!(!decides_whether_to_proxy(None, Some("   "), None));
     }
 
-    // The other switch, and the one these rows alone hold against a reading of "any non-zero
-    // value". `ProxyEnable = 2` is not a value WinINet documents, and this crate
+    // The other switch, and the one these rows alone hold against a reading of "any
+    // non-zero value". `ProxyEnable = 2` is not a value WinINet documents, and this crate
     // guesses at no meaning for it, so a `ProxyServer` beside it stays off rather than
-    // routing traffic on a switch nobody can read. `mode_from_registry` and
+    // routing traffic on an unreadable switch. `mode_from_registry` and
     // `wpad_fallback_from_key` both come here, which is the whole reason the question lives
     // in a function, so the stance cannot end up differing between them.
     //
@@ -999,7 +938,7 @@ mod tests {
     }
 
     // Regression guard: [`resolve_mode`] is on [`read_config`]'s main path and must stay
-    // fail-hard on an unparsable `AutoConfigURL` — only [`wpad_fallback_beneath`], on the
+    // fail-hard on an unparsable `AutoConfigURL`: only [`wpad_fallback_beneath`], on the
     // secondary path, may soften this into [`ProxyMode::Direct`].
     #[test]
     fn resolve_mode_still_fails_hard_on_an_unparsable_auto_config_url() {
@@ -1008,7 +947,7 @@ mod tests {
     }
 
     // An unparsable `AutoConfigURL` must degrade instead of propagating an `Err` that
-    // would abort the live WPAD probe before it even runs — over a PAC URL nothing was
+    // would abort the live WPAD probe before it even runs; over a PAC URL nothing was
     // going to use anyway.
     #[cfg(feature = "pac-windows-native")]
     #[test]
@@ -1030,7 +969,7 @@ mod tests {
 
     // The defect this pair exists for: a machine with WPAD ticked, an `AutoConfigURL`, and
     // an enabled static `ProxyServer` beneath both. While these two were one `ProxyMode`,
-    // the URL won and the server was gone by the time anyone could ask for it — so a PAC
+    // the URL won and the server was gone by the time anyone could ask for it, so a PAC
     // server that was down turned every request into a direct one, past a proxy that was
     // configured, enabled and reachable. Chromium and Microsoft's own `WinHttp` guidance
     // both continue to the static proxy for a script that could not be *obtained*; the
@@ -1103,7 +1042,7 @@ mod tests {
 
     // The wildcard arm stands for more than one thing, and a single value here covers only
     // the first of them: `4` is `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`, a
-    // value the SDK names and this match declines — not an unknown one. `2` is the unknown
+    // value the SDK names and this match declines: not an unknown one. `2` is the unknown
     // case; the SDK assigns it no name. Neither parses the server string it is handed.
     #[test]
     fn the_access_types_this_match_declines_are_direct() {
@@ -1122,6 +1061,7 @@ mod tests {
     // them on drop.
     #[cfg(feature = "pac-windows-native")]
     mod registry_guard {
+        use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
         use windows::Win32::System::Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_EXPAND_SZ, REG_SZ,
             REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
@@ -1145,9 +1085,9 @@ mod tests {
         ];
 
         // `HKCU\...\Internet Settings\Connections`, which holds the same configuration a
-        // second time as binary blobs. Nothing here writes it deliberately — Windows
-        // copies the plain values into it on its own — but it has to be restored anyway;
-        // see this module's doc comment.
+        // second time as binary blobs. Nothing here writes it directly; Windows
+        // copies the plain values into it on its own, but it has to be restored anyway,
+        // because the fixture's values are copied into it.
         const CONNECTIONS: &str =
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections";
 
@@ -1180,9 +1120,12 @@ mod tests {
                     Some(&mut len),
                 )
             };
-            if status.0 != 0 {
+            // Only an absent value is `None`: `restore` deletes what was `None`, so a present
+            // value that failed to read for any other reason would be deleted with it.
+            if status == ERROR_FILE_NOT_FOUND {
                 return None;
             }
+            assert_eq!(status.0, 0, "sizing {name}");
             let mut buf = vec![0u8; len as usize];
             // SAFETY: as above; `buf` is sized from the length the previous call
             // reported and stays valid for the duration of this call.
@@ -1254,7 +1197,7 @@ mod tests {
             key: HKEY,
             saved: Vec<SavedValue>,
             // `None` when this machine has no [`CONNECTIONS`] key at all. There is then
-            // nothing to restore, and this guard deliberately does not create one — it
+            // nothing to restore, and this guard does not create one; it
             // never writes the blobs itself, it only undoes Windows' copy into them.
             connections: Option<HKEY>,
             connections_saved: Vec<SavedValue>,
@@ -1337,7 +1280,7 @@ mod tests {
                 let name_w = wide(name);
                 let data_w = wide(value);
                 // SAFETY: `data_w` is a NUL terminated UTF-16 buffer; reinterpreting it
-                // as its own byte length is exactly what both string types expect.
+                // as its own byte length is what both string types expect.
                 let bytes: &[u8] =
                     unsafe { std::slice::from_raw_parts(data_w.as_ptr().cast(), data_w.len() * 2) };
                 // SAFETY: as `write_dword` above.
@@ -1398,7 +1341,7 @@ mod tests {
         guard.delete("AutoConfigURL");
 
         // `wpad_fallback` always forces `auto_detect = false` itself (that is the
-        // entire point), so the real `AutoDetect` value is deliberately left alone —
+        // entire point), so the real `AutoDetect` value is left alone:
         // the fallback it recovers must not depend on it either way.
         let (pac, beneath) =
             wpad_fallback().expect("recovering the WPAD fallback from HKCU must succeed");
@@ -1419,16 +1362,16 @@ mod tests {
         drop(guard);
     }
 
-    // End-to-end proof that [`wpad_fallback`] itself — not just [`wpad_fallback_beneath`]
-    // in isolation — survives a broken `AutoConfigURL` instead of returning `Err`. Such an
+    // End-to-end proof that [`wpad_fallback`] itself (not just [`wpad_fallback_beneath`]
+    // in isolation) survives a broken `AutoConfigURL` instead of returning `Err`. Such an
     // error at the `resolve_wpad_with_fallback` call site aborts the WPAD probe before it
     // ever runs, on a machine where WPAD itself might be perfectly healthy.
     //
-    // The assertion is deliberately weaker than the unit test's `assert_eq!(…, None)` on
+    // The assertion is weaker than the unit test's `assert_eq!(…, None)` on
     // the same shape, and the difference is the layer, not carelessness: this path reads
     // the registry back through WinHTTP's own view of it, so what reaches
     // `wpad_fallback_beneath` is what WinHTTP reports rather than the string written above.
-    // Predicting that is not this test's job. What is its job holds either way — a URL
+    // Predicting that is not this test's job. What is its job holds either way: a URL
     // that does not parse never comes back as one a caller would fetch.
     #[cfg(feature = "pac-windows-native")]
     #[test]
@@ -1455,7 +1398,7 @@ mod tests {
     // to a static proxy configured beneath auto-detect even when the `AutoConfigURL`
     // sitting above it is unparsable. Returning `Direct` from the unparsable-URL arm
     // without consulting `ProxyServer` would make `resolve_wpad_with_fallback` probe WPAD
-    // alone, miss, and confirm `Direct` — silently bypassing the administrator's static
+    // alone, miss, and confirm `Direct`: silently bypassing the administrator's static
     // proxy. The companion test above covers only the *no static server* half of this
     // registry state.
     #[cfg(feature = "pac-windows-native")]
@@ -1492,7 +1435,7 @@ mod tests {
     // `ProxyEnable = 0` with a `ProxyServer` still sitting beside it is an ordinary
     // machine, not a corrupt one: turning the proxy off clears the switch and leaves the
     // address where it was, ready for the next time it goes on. Both readers must drop
-    // that address, and no unit test can reach the question — [`resolve_mode`] and
+    // that address, and no unit test can reach the question: [`resolve_mode`] and
     // [`wpad_fallback_beneath`] are handed a server their caller has already filtered,
     // because the WinHTTP path reaches them with no switch to consult. So the filter is
     // only observable through a real key, and unfiltered it routes every request on that
@@ -1534,17 +1477,17 @@ mod tests {
         drop(guard);
     }
 
-    // Nothing else in this suite reads a string out of the registry. The per-user path takes
-    // WinHTTP's own view on a machine with a profile, so
+    // Nothing else in this suite reads a string out of the registry. The per-user path
+    // takes WinHTTP's own view on a machine with a profile, so
     // [`RegKey::string_value`](ffi::RegKey) reaches the per-user values only where
-    // `IeProxyConfig::query` failed — but the group policy read goes through
+    // `IeProxyConfig::query` failed, but the group policy read goes through
     // [`mode_from_registry`] on every call that asks for it, so this is a live path.
     // Both halves of what it promises are read back here through a real key instead.
     //
     // The stored terminator is not part of the value: `write_sz` stores one because that is
     // how Windows stores a string, and a reader that keeps it hands every parser downstream
     // a host ending in NUL. `REG_EXPAND_SZ` is an ordinary type for these values, read as
-    // configuration and returned exactly as stored — call it absent and a machine that
+    // configuration and returned exactly as stored; call it absent and a machine that
     // stores its proxy that way reports having none; expand it and a library asked to
     // report someone's settings starts substituting its own process environment into them.
     #[cfg(feature = "pac-windows-native")]
@@ -1582,10 +1525,11 @@ mod tests {
         drop(guard);
     }
 
-    // The other half of what [`RegKey::dword_value`](ffi::RegKey) promises, and the half this
-    // test alone holds: a `REG_DWORD` carrying more data than the type can hold keeps its low
-    // word rather than being refused. Nothing else here would notice the stricter reading —
-    // an exactly four-byte value only, which is what `base::win::RegKey::ReadValueDW` does.
+    // The other half of what [`RegKey::dword_value`](ffi::RegKey) promises, and the half
+    // this test alone holds: a `REG_DWORD` carrying more data than the type can hold keeps
+    // its low word rather than being refused. Nothing else here would notice the stricter
+    // reading: an exactly four-byte value only, which is what
+    // `base::win::RegKey::ReadValueDW` does.
     //
     // What that stricter reading costs is a machine whose `ProxyEnable` some other writer
     // left over-long: refused, it reads as unset, and a configured proxy silently becomes
@@ -1619,19 +1563,19 @@ mod tests {
 
     // The other direction of the same promise, and the one with teeth: a value stored under
     // a type its name does not carry reads as absent, and with `AutoConfigURL` and
-    // `AutoDetect` cleared below, an absent `ProxyEnable` silences the whole key rather than
-    // losing one value — [`decides_whether_to_proxy`] then sees a
-    // key that said nothing about *whether* to proxy, so the `ProxyServer` beside it is
-    // never reached and [`mode_from_registry`] answers `None`.
+    // `AutoDetect` cleared below, an absent `ProxyEnable` silences the whole key rather
+    // than losing one value: [`decides_whether_to_proxy`] then sees a key that said nothing
+    // about *whether* to proxy, so the `ProxyServer` beside it is never reached and
+    // [`mode_from_registry`] answers `None`.
     //
-    // This test is the only thing holding the `kind != REG_DWORD` half of the guard in
-    // [`RegKey::dword_value`](ffi::RegKey). `write_sz` stores
-    // `"1"` as exactly four bytes, so the length half of that guard does not catch it
-    // either — the value comes back as `Some(0x31)`, the UTF-16 code unit for `1` read as a
-    // number. Under a *policy* key that is the damaging shape: a junk-typed `ProxyEnable`
-    // there becomes a `GroupPolicy` entry resolving to `Direct`, reporting an administrator
-    // who wrote a proxy as having written none. [`in_precedence_order`] keeps that entry out
-    // of `effective`, so the stake is the reported source and not the answer.
+    // No other test checks the `kind != REG_DWORD` half of the guard in
+    // [`RegKey::dword_value`](ffi::RegKey). `write_sz` stores `"1"` as exactly four bytes,
+    // so the length half of that guard does not catch it either: the value comes back as
+    // `Some(0x31)`, the UTF-16 code unit for `1` read as a number. Under a *policy* key
+    // that is the damaging shape: a junk-typed `ProxyEnable` there becomes a `GroupPolicy`
+    // entry resolving to `Direct`, reporting an administrator who wrote a proxy as having
+    // written none. [`in_precedence_order`] keeps that entry out of `effective`, so the
+    // stake is the reported source and not the answer.
     #[cfg(feature = "pac-windows-native")]
     #[test]
     #[ignore = "rewrites this machine's real Internet Settings; CI runs it with --include-ignored"]

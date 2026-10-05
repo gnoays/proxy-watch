@@ -1,23 +1,19 @@
-# `cargo deny check` — the dependency graph's licenses, advisories, sources and duplicates.
-# `audit.yml` runs it on every pull request and once a week; locally, `cargo deny
-# --all-features check` is the same command.
+# `cargo deny check`: the dependency graph's licenses, advisories, sources and duplicates.
+# `audit.yml` runs it once a week and on a pull request that touches a manifest, the lock
+# file or this file; locally, `cargo deny --all-features --workspace check` is the same
+# command. `--workspace` makes every member a root, so the bindings' dependencies are in the
+# graph too.
 
 [graph]
-# The graph is evaluated for every target cargo-deny knows, so the Windows, macOS and
-# Linux backends are all in it at once. `all-features` here is what makes the optional
+# The graph is evaluated for every target cargo-deny knows, so every OS backend's
+# dependencies are in it at once. `all-features` here is what makes the optional
 # PAC engines and the `tokio` bridge part of the audited surface without a flag.
 all-features = true
 
 [advisories]
 # https://github.com/rustsec/advisory-db
 yanked = "deny"
-ignore = [
-  # `paste` is a proc-macro `boa_engine` 0.21 expands at compile time; it ships no code
-  # into the binary and its author archived it in a working state. It leaves the graph
-  # when `boa_engine` drops it, not before, so the advisory is acknowledged rather than
-  # left to fail every run until then.
-  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro reached only through boa_engine" },
-]
+ignore = []
 
 [licenses]
 # Permissive licenses only. Every crate that offers a copyleft alternative (`configparser`
@@ -37,13 +33,21 @@ allow = [
   "Zlib",
 ]
 confidence-threshold = 0.8
+# The workspace's own unpublished crates (`xtask`, `tests-gnome`, the bindings) are roots,
+# not dependencies: the license that binds is the one their artifacts declare, and
+# `xtask` and `tests-gnome` ship nothing to declare one for.
+private = { ignore = true }
 
 [bans]
-# Two versions of one crate are a fact of a graph this wide (`hashbrown`, `syn`,
-# `windows-sys` all arrive twice or more through crates this library does not pick).
+# Two versions of one crate are a fact of a graph this wide (`syn` arrives twice through
+# crates this library does not pick; the graph spans every target, so the `windows-sys`
+# that `jni` names for Windows counts too, though no build links it).
 # Reported, not refused: a library cannot flatten its dependents' choices.
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace's unpublished crates name each other by `path` alone; a wildcard that never
+# reaches a registry pins nothing anyone else resolves.
+allow-wildcard-paths = true
 deny = []
 
 [sources]

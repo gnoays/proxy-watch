@@ -2,12 +2,11 @@
 //! entries need a value-level case that hides the secret *and* keeps a named fragment
 //! (masking ≠ erasure). Platform/`pac` availability is per [`Registered::available`].
 //!
-//! A registry of impls cannot see text kept in a `#[derive(Debug)]` container, and that
-//! blind spot is where the last two leaks were: `KconfigEntry` and `GValue` held a KDE /
-//! GNOME value under a derive, and `KioslavercSettings` held the map key. [`DERIVED`] is
-//! the other half of the gate — every derived item in `src/` whose fields name a text type
-//! carries a row saying why its `Debug` is safe, and [`Reason`] decides what that row has
-//! to prove rather than merely assert.
+//! A registry of impls cannot see text kept in a `#[derive(Debug)]` container, such as the
+//! KDE / GNOME value `KconfigEntry` and `GValue` hold under a derive, or the map key
+//! `KioslavercSettings` holds. [`DERIVED`] is the other half of the gate: every derived
+//! item in `src/` whose fields name a text type carries a row saying why its `Debug` is
+//! safe, and [`Reason`] decides what that row has to prove rather than merely assert.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -31,10 +30,10 @@ enum Exposure {
     // It can reach a URL, a script body or a password, so it needs a case in
     // [`cases`] proving it does not print one.
     Secret,
-    // It holds no secret of its own and prints another registered impl's output. The
-    // string names that impl's type, which must itself be [`Exposure::Secret`] — checked
-    // by `every_verdict_that_skips_a_value_case_justifies_itself`, so this verdict
-    // cannot be used to park a type nobody checks.
+    // It holds no secret of its own and prints another registered impl's output. The string
+    // names that impl's type, which must itself be [`Exposure::Secret`], checked by
+    // `every_verdict_that_skips_a_value_case_justifies_itself`, so this verdict cannot
+    // exempt an unchecked type.
     Delegates(&'static str),
     // Nothing it prints can carry a secret. The string says what it does print, because
     // "inert" is a claim about the fields and the next person needs to be able to
@@ -84,6 +83,14 @@ const REGISTRY: &[Registered] = &[
         ty: "ProxyMode",
         exposure: Exposure::Secret,
         available: true,
+    },
+    Registered {
+        file: "pac/dispatch.rs",
+        ty: "PacResolver",
+        exposure: Exposure::Inert(
+            "the `PacPolicy` (flags, numbers, an address and a time), `attached` in place of              the evaluator, and the native resolver's session handle and timeout",
+        ),
+        available: cfg!(feature = "pac"),
     },
     Registered {
         file: "pac/mod.rs",
@@ -162,10 +169,16 @@ const REGISTRY: &[Registered] = &[
     },
     Registered {
         file: "watch.rs",
+        ty: "CapturedEnv",
+        exposure: Exposure::Inert("nothing at all — the struct name and `..`"),
+        available: true,
+    },
+    Registered {
+        file: "watch.rs",
         ty: "ProxyWatcher",
         // Prints `config.effective` and `health` off a single `self.state()`: a
         // `ProxyMode`, and a `WatchHealth` whose `Debug` is derived over a
-        // `Vec<ProxyConfigSource>`, two `bool`s and an `Option<Duration>` — none of which
+        // `Vec<ProxyConfigSource>`, two `bool`s and an `Option<Duration>`, none of which
         // can hold a secret. Constructing one means starting a real platform watcher, so
         // the delegation is checked structurally instead.
         exposure: Exposure::Delegates("ProxyMode"),
@@ -176,21 +189,21 @@ const REGISTRY: &[Registered] = &[
 // Why a `#[derive(Debug)]` item whose fields name a text type cannot print a secret.
 //
 // The three verdicts are graded by what a reader has to take on trust, and the ones that
-// ask for more are checked harder — the same shape as [`Exposure`], for the same reason:
+// ask for more are checked harder; the same shape as [`Exposure`], for the same reason:
 // the excuse from a value-level case is where a leak would be parked.
 enum Reason {
     // Every value *this crate* stores in the type is masked or refused first, so nothing it
     // read can be printed back. Needs a case in [`derived_cases`] built around [`SECRET`]:
     // "closed at fill" is a claim about a code path, and paths move.
     //
-    // It says nothing about a caller. Where the type is fillable from outside — `pub` fields,
-    // or a `pub enum` whose variants carry them — a downstream crate can write its own string
-    // in and print it out again: its own text, never a value read from a file, a registry or
-    // `configd`. A reason on such a type has to name that second way in rather than call the
-    // type sealed, because the constructor it cites is not the only way to fill one. Where
-    // construction is closed to other crates as well (`RejectedValue`: private fields,
-    // `#[non_exhaustive]`, a `pub(crate)` constructor), naming the constructor is the whole
-    // answer.
+    // It says nothing about a caller. Where the type is fillable from outside (`pub`
+    // fields, or a `pub enum` whose variants carry them), a downstream crate can write its
+    // own string in and print it out again: its own text, never a value read from a file, a
+    // registry or `configd`. A reason on such a type has to name that second way in rather
+    // than call the type sealed, because the constructor it cites is not the only way to
+    // fill one. Where construction is closed to other crates as well (`RejectedValue`:
+    // private fields, `#[non_exhaustive]`, a `pub(crate)` constructor), naming the
+    // constructor is the whole answer.
     ClosedAtFill(&'static str),
     // The only text it can print belongs to a registered [`Exposure::Secret`] impl, named
     // here and checked to be one. The second string says which way the containment runs,
@@ -199,7 +212,7 @@ enum Reason {
     ViaRegistered { ty: &'static str, why: &'static str },
     // The strings are written by this crate rather than read from a file, a registry, an
     // environment variable or `configd`. Nothing mechanical checks this, which makes it the
-    // bucket a wrong answer would hide in, so the reason has to name where they come from —
+    // bucket a wrong answer would hide in, so the reason has to name where they come from:
     // `KioslavercSettings`'s keys looked like this and were not.
     CrateText(&'static str),
 }
@@ -282,6 +295,17 @@ static DERIVED: &[Derived] = &[
         available: true,
     },
     Derived {
+        file: "pac/subprocess.rs",
+        ty: "SubprocessEvaluator",
+        reason: Reason::ClosedAtFill(
+            "`new` is the only constructor and the fields are private, so `worker` holds the \
+             path the caller chose and nothing this crate read. The rest is a `PacPolicy`: \
+             flags, numbers, an address and a time. The evaluator's own `allow_unsandboxed` \
+             is a flag",
+        ),
+        available: cfg!(feature = "pac-subprocess"),
+    },
+    Derived {
         file: "sys/linux/gsettings_map.rs",
         ty: "GnomeSettings",
         reason: Reason::ViaRegistered {
@@ -329,9 +353,9 @@ static DERIVED: &[Derived] = &[
 
 // The type a line like `impl fmt::Debug for Foo<'_> {` is written for, if it is one.
 //
-// Text, not syntax: the point is to see impls the current target does not compile, which
-// rules out anything that works from the item tree. `impl` must start the line so that
-// prose and doc comments mentioning the same words are skipped.
+// Text, not syntax: it has to see impls the current target does not compile, which rules
+// out anything that works from the item tree. `impl` must start the line so that prose and
+// doc comments mentioning the same words are skipped.
 fn impl_debug_target(line: &str) -> Option<&str> {
     let line = line.trim_start();
     if !(line.starts_with("impl ") || line.starts_with("impl<")) {
@@ -353,16 +377,16 @@ fn impl_debug_target(line: &str) -> Option<&str> {
 // the end of the line, or after it, leaving the type on the next one. The break after `for`
 // is refused whatever the trait is. `impl fmt::Debug for` and `impl<T: fmt::Debug> Show for`
 // are the same line to anything that has not read the next one, so a rule that tried to tell
-// them apart would be guessing about precisely the case it exists to catch. A `Debug` *bound*
+// them apart would be guessing about the case it exists to catch. A `Debug` *bound*
 // alone (`impl<T: fmt::Debug> …`) ends on `>` or `{` and is neither.
 //
 // Or a block comment, which hides a header two ways. Put one between the trait and `for`
 // and what is left either side of it is not the substring the parser splits on; put one in
-// front and the line no longer begins with `impl`. Cutting it out is not enough — that
-// leaves the parser's single space doubled — and a comment that opens on one line and
+// front and the line no longer begins with `impl`. Cutting it out is not enough: that
+// leaves the parser's single space doubled, and a comment that opens on one line and
 // closes on another is past a line-at-a-time reader however it is written.
 //
-// Or a `use` that renames the trait. That one hides no single header — it hides every impl
+// Or a `use` that renames the trait. That one hides no single header: it hides every impl
 // written against the new name at once, and unlike the shapes above there is nothing in the
 // header itself left to recognise, so the import is where it has to be caught.
 //
@@ -506,21 +530,21 @@ fn derived_item_name(line: &str) -> Option<&str> {
 
 // Whether `line` names a type that can carry text this crate did not write.
 //
-// A generic bound (`S: AsRef<str>`) counts, which over-reports rather than under-reports:
-// a row saying why the type is safe is cheap, and a missing row is a type nobody looked at.
+// A generic bound (`S: AsRef<str>`) counts, which over-reports rather than under-reports: a
+// row saying why the type is safe is cheap, and a missing row is an unreviewed type.
 //
 // `Host` is here because the scan reads names, not types, and so cannot follow one into
 // another crate: `url::Host<S = String>` carries its `String` through a default type
 // argument, and a field written `host: Host` names no text type at all. The blind spot is
-// not inert — "every leaf is scanned" is false for a leaf that is not in this crate to
+// not inert: "every leaf is scanned" is false for a leaf that is not in this crate to
 // scan. Any other borrowed text carrier has to be added by hand for the same reason.
 //
 // `Url` is that same blind spot with more at stake: a `#[derive(Debug)]` over a `url::Url`
-// field goes unseen here, while `url`'s own
-// `Debug` prints the string whole — userinfo included, which is where this crate's
-// passwords live. `MaskedUrl` and every registered impl carrying a URL exist because that
-// rendering is unsafe, so a container that reaches one under a derive has to say why it is
-// not. Nothing in `src/` trips this today; it is here for the next one.
+// field goes unseen here, while `url`'s own `Debug` prints the string whole: userinfo
+// included, which is where this crate's passwords live. `MaskedUrl` and every registered
+// impl carrying a URL exist because that rendering is unsafe, so a container that reaches
+// one under a derive has to say why it is not. Nothing in `src/` trips this today; it is
+// here for the next one.
 //
 // `aliases` is the third form of the same blind spot, and the only one this scan can close
 // by reading rather than by listing: see [`text_carrier_aliases`].
@@ -544,7 +568,7 @@ fn names_a_text_type(line: &str, aliases: &BTreeSet<String>) -> bool {
 }
 
 // The crate's own names for a text type. `type CredentialText = String;` makes
-// `CredentialText` one, and a field written with it names nothing on the list above — so a
+// `CredentialText` one, and a field written with it names nothing on the list above, so a
 // derive that prints the whole string is invisible to a scan that reads names.
 //
 // The same shape as the `Host` and `Url` entries above, one step closer: those live in
@@ -562,7 +586,7 @@ fn names_a_text_type(line: &str, aliases: &BTreeSet<String>) -> bool {
 // not something more passes would find.
 //
 // `pub` in front is skipped the way [`derived_item_name`] skips it. Reading only the bare
-// spelling made every exported alias invisible — and an alias worth exporting is the one a
+// spelling made every exported alias invisible, and an alias worth exporting is the one a
 // field in another module is most likely to be written with.
 //
 // An associated type is picked up by the same spelling (`type Item = …` inside an `impl`),
@@ -677,7 +701,7 @@ fn scan_derived_text_holders() -> BTreeSet<(String, String)> {
 //
 // Text again, and for the same reason as [`impl_debug_target`]: most of these sites are
 // in backends this target does not compile. The call must start the line for the same
-// reason too — otherwise prose, and this file's own tests, match themselves.
+// reason too: otherwise prose, and this file's own tests, match themselves.
 fn keeps_a_rejected_token(line: &str) -> bool {
     let line = line.trim_start();
     let line = line.strip_prefix("self.").unwrap_or(line);
@@ -737,11 +761,12 @@ fn cases() -> Vec<Case> {
             ty: "ProxyAuth",
             // `%3A` is *data*, so this parses to the single user name `alice:{SECRET}` with
             // no password at all (see `endpoint::parse_userinfo`). Nothing downstream can
-            // tell that colon from a credential delimiter, so the `Debug` masks past it —
+            // tell that colon from a credential delimiter, so the `Debug` masks past it:
             // that masking, not the split, is what keeps the tail out of a snapshot. The
-            // second `%3A` is what makes the mask start at the *first* colon rather than the
-            // last: read from the end, everything up to the final delimiter is printed as a
-            // user name, and a password holding a colon of its own is the ordinary case.
+            // second `%3A` is what makes the mask start at the *first* colon rather than
+            // the last: read from the end, everything up to the final delimiter is printed
+            // as a user name, and a password holding a colon of its own is the ordinary
+            // case.
             rendered: {
                 let endpoint = crate::endpoint::ProxyEndpoint::parse(
                     &format!("http://alice%3A{SECRET}%3Atail@proxy.corp:8080"),
@@ -807,7 +832,7 @@ fn cases() -> Vec<Case> {
         // The other half of `ProxyMode`: `Manual` keeps what failed to parse, so its
         // `Debug` prints attacker- (or administrator-) supplied text that never reached
         // a URL type. Built from the real parsers rather than a literal, because the
-        // masking that has to hold is the one on the path a snapshot actually takes.
+        // masking that has to hold is the one on the path a snapshot takes.
         let env = crate::env::ProxyEnv::from_vars([
             (
                 "http_proxy",
@@ -842,7 +867,7 @@ fn cases() -> Vec<Case> {
         // holds whatever an administrator wrote, and `httpProxy=http://user:pw@host` is
         // ordinary KDE configuration. Rendered through `KioslavercSettings`, whose derive
         // delegates to the registered `KconfigEntry`, because that is the shape a caller
-        // would actually print.
+        // would print.
         let mut settings = crate::sys::linux::kioslaverc::KioslavercSettings::new();
         settings.insert("httpProxy", secret_url().to_string());
         cases.push(Case {
@@ -910,9 +935,9 @@ fn cases() -> Vec<Case> {
         // The same key holding a password with a space in it. Nothing upstream rejects one:
         // the value is whatever `SCDynamicStore` hands back for
         // `ProxyAutoConfigURLString`, read as raw text long before anything asks it to
-        // parse as a URL. `redact_userinfo` alone cannot mask this — its scan restarts past
+        // parse as a URL. `redact_userinfo` alone cannot mask this: its scan restarts past
         // whitespace, so the `user:` half and the `@` end up on opposite sides of the
-        // restart — which is why this key goes through `redact_offending_token`.
+        // restart, which is why this key goes through `redact_offending_token`.
         let mut dict = crate::sys::proxy_dict::ProxyDict::new();
         dict.insert(
             "ProxyAutoConfigURLString",
@@ -933,9 +958,9 @@ fn cases() -> Vec<Case> {
         // these reach the fallthrough arm unless the mask names them: `is_known_key` guards
         // the three "key not read" arms, so being *known* is what would take a value past
         // every mask and into `DictValue`'s derive. `HTTPProxy` holding a bare
-        // `user:pass@host` is
-        // documented input (`ProxyEndpoint::parse`), and `ExceptionsList` is where a
-        // stranded credential fragment turns up — the same shape `no_proxy` produces.
+        // `user:pass@host` is documented input (`ProxyEndpoint::parse`), and
+        // `ExceptionsList` is where a stranded credential fragment turns up: the same shape
+        // `no_proxy` produces.
         let mut dict = crate::sys::proxy_dict::ProxyDict::new();
         dict.insert(
             "HTTPProxy",
@@ -1042,8 +1067,8 @@ fn derived_cases() -> Vec<Case> {
 
     {
         // A pasted proxy URL and an ordinary suffix, through the same entry point. The
-        // refusal has to be the thing that hides the password — `HostPattern` itself never
-        // sees it — so both halves are rendered together.
+        // refusal has to be the thing that hides the password: `HostPattern` itself never
+        // sees it, so both halves are rendered together.
         let refused = crate::bypass::HostPattern::parse(&format!("alice:{SECRET}@proxy.corp"));
         let kept = crate::bypass::HostPattern::parse(".example.com");
         cases.push(Case {
@@ -1055,10 +1080,10 @@ fn derived_cases() -> Vec<Case> {
     }
 
     {
-        // The whole endpoint, not just its `auth`: the point of the row is that the split
-        // happens at `parse`, so the password is in the `auth` half being masked and the
-        // `host` half is left with an address. Printing only the credential would test
-        // `ProxyAuth` over again and say nothing about where the text went.
+        // The whole endpoint, not just its `auth`: the split happens at `parse`, so the
+        // password is in the `auth` half being masked and the `host` half is left with an
+        // address. Printing only the credential would test `ProxyAuth` over again and say
+        // nothing about where the text went.
         let endpoint = crate::endpoint::ProxyEndpoint::parse(
             &format!("http://alice:{SECRET}@proxy.corp:8080"),
             80,
@@ -1085,6 +1110,22 @@ fn derived_cases() -> Vec<Case> {
             ty: "RejectedValue",
             rendered: format!("{rejected:?}"),
             must_contain: &["wpad.corp", "***", "BypassList"],
+        });
+    }
+
+    #[cfg(feature = "pac-subprocess")]
+    {
+        // The worker path prints: it is what a reader of the dump needs to tell which binary
+        // ran.
+        let evaluator = crate::pac::SubprocessEvaluator::new(
+            "bin/proxy-watch-pac-worker",
+            crate::pac::PacPolicy::new(),
+        );
+        cases.push(Case {
+            file: "pac/subprocess.rs",
+            ty: "SubprocessEvaluator",
+            rendered: format!("{evaluator:?}"),
+            must_contain: &["proxy-watch-pac-worker", "PacPolicy"],
         });
     }
 
@@ -1117,11 +1158,10 @@ mod tests {
         }
     }
 
-    // The half that makes the other half impossible to forget: what is in the tree and
-    // what is in [`REGISTRY`] have to be the same set, both ways round. A new
-    // hand-written `Debug` fails this; so does a registry row for an impl that was
-    // deleted or renamed, which is what keeps the table from rotting into a list of
-    // types that no longer exist.
+    // The half that makes the other half impossible to forget: what is in the tree and what
+    // is in [`REGISTRY`] have to be the same set, both ways round. A new hand-written
+    // `Debug` fails this; so does a registry row for an impl that was deleted or renamed,
+    // so the table cannot become a list of types that no longer exist.
     #[test]
     fn every_hand_written_debug_is_registered() {
         let found: BTreeSet<(String, String)> = scan_src();
@@ -1180,7 +1220,7 @@ mod tests {
 
     // The value-level half, plus the check that it covers every [`Exposure::Secret`]
     // entry this target can build. The coverage assertion is the reason a leak cannot be
-    // hidden by simply not writing a case.
+    // hidden by not writing a case.
     #[test]
     fn every_secret_bearing_debug_hides_it() {
         let cases = cases();
@@ -1204,8 +1244,8 @@ mod tests {
 
     // The same both-ways check as [`every_hand_written_debug_is_registered`], for the half
     // of the tree that gate cannot see. A new derived item holding text fails this; so does
-    // a row for one that lost its text field or its derive, which is what stops the table
-    // from silently outliving its reasons.
+    // a row for one that lost its text field or its derive, so the table cannot silently
+    // outlive its reasons.
     #[test]
     fn every_derived_debug_that_can_hold_text_is_declared() {
         let found: BTreeSet<(String, String)> = scan_derived_text_holders();
@@ -1234,8 +1274,8 @@ mod tests {
     // Two of the three verdicts excuse a derive from rendering a case, so neither is
     // allowed to be a bare assertion: `ViaRegistered` has to name an impl that *is*
     // checked, and `CrateText` has to say where the strings come from. The second is the
-    // weaker of the two on purpose — nothing can mechanically prove a `String` never
-    // touched the environment — which is why it has to be argued in the row rather than
+    // weaker of the two on purpose: nothing can mechanically prove a `String` never
+    // touched the environment, which is why it has to be argued in the row rather than
     // chosen by default.
     #[test]
     fn every_reason_a_derive_is_safe_says_what_it_rests_on() {
@@ -1265,8 +1305,8 @@ mod tests {
     }
 
     // The value-level half of the derive gate. `ClosedAtFill` is the one verdict that names
-    // a code path rather than a shape, so it is the one that can quietly stop being true —
-    // these render the path itself, not the type.
+    // a code path rather than a shape, so it is the only one that can become false without
+    // a change to the type. These render the path itself, not the type.
     #[test]
     fn every_value_closed_at_fill_is_shown_to_be() {
         let cases = derived_cases();
@@ -1335,10 +1375,10 @@ mod tests {
     }
 
     // The gate above finds its sites by the spelling of the list being appended to, which
-    // is a guess — and a guess is the one thing a gate must not rest on quietly. A
-    // caller-visible list declared as `refused` or `dropped` would be appended to by lines
-    // the scan never looks at, and the append would go unmasked with every test in this
-    // file still green. So hold the guess to the declarations it is guessing at.
+    // is a guess, and a gate must not rest on an unchecked guess. A caller-visible list
+    // declared as `refused` or `dropped` would be appended to by lines the scan never looks
+    // at, and the append would go unmasked with every test in this file still green. So
+    // hold the guess to the declarations it is guessing at.
     //
     // A local with an inferred type is not reached here, and does not need to be: it can
     // only become visible to a caller by being moved into one of these lists, and that move
@@ -1364,7 +1404,7 @@ mod tests {
         );
     }
 
-    // The scan is the load-bearing half, so its parser gets its own test rather than
+    // The scan is the half the gate depends on, so its parser gets its own test rather than
     // being trusted because the tree happens to pass today.
     #[test]
     fn the_scanner_reads_the_shapes_this_tree_uses() {
@@ -1389,7 +1429,7 @@ mod tests {
             Some("Indented")
         );
         // No space before the brace. rustfmt would not write this and so the tree cannot
-        // contain it, but this parser is textual precisely so that it sees headers the
+        // contain it, but this parser is textual so that it sees headers the
         // formatter and the compiler between them do not. Nothing but this line holds the
         // `{` terminator.
         assert_eq!(
@@ -1418,13 +1458,13 @@ mod tests {
         let after = "impl fmt::Debug for";
         assert_eq!(impl_debug_target(after), None);
         assert!(hides_a_debug_impl_header(after));
-        // Refused whatever the trait is, deliberately: this line and `after` are
+        // Refused whatever the trait is: this line and `after` are
         // indistinguishable without reading the next one.
         assert!(hides_a_debug_impl_header("impl<T: fmt::Debug> Show for"));
 
         // The third shape, and the one that is a whole valid header rather than half of
         // one: a block comment leaves nothing here to notice. Written through `comment`
-        // for the reason given at `rejected_list_binding`'s samples — spelled out, these
+        // for the reason given at `rejected_list_binding`'s samples: spelled out, these
         // lines would be the very declarations the scan refuses when it reads this file.
         let comment = "/* audited later */";
         for hidden in [
@@ -1434,14 +1474,14 @@ mod tests {
             assert_ne!(impl_debug_target(&hidden), Some("NewType"), "{hidden}");
             assert!(hides_a_debug_impl_header(&hidden), "{hidden}");
         }
-        // The delimiter alone is not the shape — `src/` has one in a glob pattern.
+        // The delimiter alone is not the shape: `src/` has one in a glob pattern.
         assert!(!hides_a_debug_impl_header("            \"*/people/*\""));
-        // The closing half beside the trait's name is the shape, and this line is the only
-        // thing holding it: both samples above carry an opener too, so the pair's closing
-        // spelling answers to nothing else. This is the one that arrives without its
-        // opener — a comment begun further up and ended just before a live header, which is
-        // then a line that no longer begins with `impl` and so reaches neither the parser
-        // above nor REGISTRY. Assembled from a binding for the same reason those are.
+        // The closing half beside the trait's name is the shape, and no other assertion
+        // checks it: both samples above carry an opener too, so the pair's closing spelling
+        // answers to nothing else. This is the one that arrives without its opener: a
+        // comment begun further up and ended just before a live header, which is then a
+        // line that no longer begins with `impl` and so reaches neither the parser above
+        // nor REGISTRY. Assembled from a binding for the same reason those are.
         let closer = "*/";
         assert!(hides_a_debug_impl_header(&format!(
             "{closer} impl fmt::Debug for NewType {{"
@@ -1459,7 +1499,7 @@ mod tests {
         // The fourth shape, which is not a header at all: rename the trait at the import
         // and every impl of it names something the parser has never heard of. Assembled
         // from a variable rather than written out, for the reason the block comments above
-        // are — this file is one of the ones the rule reads.
+        // are: this file is one of the ones the rule reads.
         let renamed = format!("use std::fmt::Debug {} Shown;", "as");
         assert!(hides_a_debug_impl_header(&renamed));
         assert_eq!(impl_debug_target("impl Shown for ProxyAuth {"), None);
@@ -1492,13 +1532,13 @@ mod tests {
             rejected_list_binding(&format!("    rejected{borrowed}")),
             Some("rejected")
         );
-        // The whole point: a list under another name is still found, and so still has to
-        // be a name `keeps_a_rejected_token` looks for.
+        // A list under another name is still found, and so still has to be a name
+        // `keeps_a_rejected_token` looks for.
         assert_eq!(
             rejected_list_binding(&format!("    pub refused{owned}")),
             Some("refused")
         );
-        // And that the pairing has teeth: `refused` is exactly a name the masking scan
+        // And that the pairing has teeth: `refused` is a name the masking scan
         // does not look for, so declaring one is what the gate above would refuse.
         assert!(!keeps_a_rejected_token("refused.push(value);"));
         // A return type binds nothing to append to, and prose is not a declaration.
@@ -1552,9 +1592,9 @@ mod tests {
         assert_eq!(derived_item_name("impl Debug for Thing {"), None);
         // A keyword with nothing nameable after it. No compiling file holds this line, so
         // this assertion is the only thing keeping the guard. `None` is what the caller's
-        // panic is written for; an empty name — `Some(&name[..0])` — would instead be carried
-        // into the comparison against DERIVED, where it reads as a declared item gone missing
-        // rather than as a line the scan cannot parse.
+        // panic is written for; an empty name (`Some(&name[..0])`) would instead be carried
+        // into the comparison against DERIVED, where it reads as a declared item gone
+        // missing rather than as a line the scan cannot parse.
         assert_eq!(derived_item_name("enum {"), None);
 
         let none = BTreeSet::new();
@@ -1571,9 +1611,9 @@ mod tests {
         assert!(names_a_text_type("    url: Url,", &none));
         assert!(names_a_text_type("    host: Host,", &none));
         // The rest of the same list. Nothing in `src/` holds one of these under a derive
-        // today, so these five lines are the only thing holding them. They are defensive in
-        // exactly the way `Url` above is, and a defensive entry nothing checks is the one a
-        // tidy-up deletes.
+        // today, so only these five lines check them. They are defensive in the same way
+        // `Url` above is, and a defensive entry nothing checks is the one a tidy-up
+        // deletes.
         assert!(names_a_text_type("    a: OsString,", &none));
         assert!(names_a_text_type("    b: &OsStr,", &none));
         assert!(names_a_text_type("    c: PathBuf,", &none));
@@ -1584,13 +1624,13 @@ mod tests {
         // entry itself is what does the work.
         assert!(names_a_text_type("    e: Cow<'a, T>,", &none));
         assert!(!names_a_text_type("    port: Option<u16>,", &none));
-        // Prose naming a text type is not a field holding one — the field scan reads whole
+        // Prose naming a text type is not a field holding one: the field scan reads whole
         // item bodies, doc comments included.
         assert!(!names_a_text_type("    /// The host as a String.", &none));
 
         // The carrier this crate could name itself. The field is the same line in both
         // rows and is text in exactly one of them, which is the whole difference an alias
-        // makes to a scan that reads names — and it is `text_carrier_aliases`, not the
+        // makes to a scan that reads names, and it is `text_carrier_aliases`, not the
         // field, that has to supply it.
         let field = "    credential: CredentialText,";
         assert!(!names_a_text_type(field, &none));

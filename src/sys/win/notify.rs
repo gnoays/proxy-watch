@@ -1,24 +1,24 @@
 //! `RegNotifyChangeKeyValue` watcher thread.
 //!
-//! One notification per registration — re-arm after *that* key's wake, never before.
+//! One notification per registration: re-arm after *that* key's wake, never before.
 //! Filter/subtree fixed per registration; changing either needs the handle reopened.
 //! Persistent thread + `REG_NOTIFY_THREAD_AGNOSTIC`.
 //! Debounce + equality skip coalesce storms. Stop via manual-reset event in the wait.
 //!
 //! [`WatchOptions::poll_interval`] → outer [`WaitForMultipleObjects`] timeout;
-//! [`Watch::poll_now`] → auto-reset event — same debounce path.
+//! [`Watch::poll_now`] → auto-reset event: same debounce path.
 //!
-//! HKCU (leading): `watch_fail_soft` — poll set → degrade; unset → fatal. A key *missing at
+//! HKCU (leading): `watch_fail_soft` (poll set → degrade; unset → fatal). A key *missing at
 //! construction* degrades either way; only opening or arming an existing one can be fatal.
-//! After construction only [`WatchedKey::arm`] runs, and it has no missing-key arm, so a key
-//! deleted under an open handle fails the re-arm and the table decides. A rearm failure the table softens goes to
-//! [`Shared::degrade`] / [`Shared::mark_no_live_notifications`]; one it calls fatal skips
-//! them and ends the thread through [`Shared::fail`] instead, which leaves
-//! `has_live_notifications` as construction left it — after one last read, since the
-//! notification that failed to re-arm had already announced a change.
+//! After construction only [`WatchedKey::arm`] runs, and it has no missing-key arm, so a
+//! key deleted under an open handle fails the re-arm and the table decides. A rearm failure
+//! the table softens goes to [`Shared::degrade`] / [`Shared::mark_no_live_notifications`];
+//! one it calls fatal skips them and ends the thread through [`Shared::fail`] instead,
+//! which leaves `has_live_notifications` as construction left it; after one last read,
+//! since the notification that failed to re-arm had already announced a change.
 //!
 //! Group policy + non-policy HKLM: fail-soft. [`arm_group_policy_key`] watches an ancestor
-//! with `bWatchSubtree` (not the leaf — [`group_policy_ancestors`]); `Software` noise OK.
+//! with `bWatchSubtree` (not the leaf: [`group_policy_ancestors`]); `Software` noise OK.
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -42,7 +42,7 @@ use super::ffi::{Event, RegKey, SendPtr, hresult_error, win32_error};
 use super::{INTERNET_SETTINGS, POLICY_INTERNET_SETTINGS, read_config};
 
 // `LAST_SET` is the value side, and covers adding or deleting a value as well as
-// changing one. `NAME` is the *subkey* side — a subkey appearing or disappearing —
+// changing one. `NAME` is the *subkey* side, a subkey appearing or disappearing,
 // which is worth having because every registration below passes `bWatchSubtree`: a
 // settings key created after the watch was armed is still a change to re-read on.
 // `REG_NOTIFY_THREAD_AGNOSTIC` (Windows 8+) unties the registration from the thread
@@ -63,7 +63,7 @@ pub(crate) struct Watch {
     shutdown: Event,
     // Signalled by [`Watch::poll_now`] to wake the thread out of
     // [`WaitForMultipleObjects`] and open a debounce window immediately. Auto-reset,
-    // like the registry notification events: the wait consuming the signal is exactly
+    // like the registry notification events: the wait consuming the signal is
     // the desired behaviour.
     poll_now: Event,
     // Armed keys, until [`Watch::spawn`] hands them to the thread.
@@ -72,8 +72,8 @@ pub(crate) struct Watch {
     // captured once at construction time and fed into [`Watch::health`]. A later,
     // *runtime* degrade (a [`rearm`] failure after construction already succeeded) is
     // reported through `crate::watch::Shared::degrade` instead. Not because this `Vec`
-    // has gone anywhere — unlike `watched` below, [`Watch::spawn`] leaves it on `self`
-    // for [`Watch::health`] to read afterwards — but because [`Watch::armed`] is the only
+    // has gone anywhere (unlike `watched` below, [`Watch::spawn`] leaves it on `self`
+    // for [`Watch::health`] to read afterwards) but because [`Watch::armed`] is the only
     // writer, and the thread that would learn of a runtime degrade cannot reach `self`.
     construction_degraded: Vec<ProxyConfigSource>,
     // How many native notification routes were live once construction finished.
@@ -95,8 +95,8 @@ impl Watch {
 
         // `leading` is what makes a failure here fatal without a poll interval, and a key
         // that does not exist is not that failure. [`super::read_user_mode`] answers
-        // `Direct` for exactly that machine, so refusing to construct would deny a
-        // configuration this crate can still read — and no `poll_interval` could have armed
+        // `Direct` for that machine, so refusing to construct would deny a
+        // configuration this crate can still read, and no `poll_interval` could have armed
         // a key that is not there, so naming it as the fix would be wrong too. An open or
         // arm *failure* keeps the leading classification.
         //
@@ -104,28 +104,27 @@ impl Watch {
         // ancestor is `Software\Microsoft\Windows\CurrentVersion`, which Explorer writes to
         // constantly, so a subtree registration there would wake this thread on traffic
         // that has nothing to do with proxies. What that costs is a key created *later*:
-        // nothing arms it, so only a `poll_interval` timer or [`Watch::poll_now`] would ever
-        // see it. `health()`
-        // reports `Registry` degraded meanwhile, but not frozen — the HKLM keys below do
-        // arm — so a caller that wants to catch this reads `is_fully_live`, not
-        // `is_frozen`.
+        // nothing arms it, so only a `poll_interval` timer or [`Watch::poll_now`] would
+        // ever see it. `health()` reports `Registry` degraded meanwhile, but not frozen
+        // (the HKLM keys below do arm), so a caller that wants to catch this reads
+        // `is_fully_live`, not `is_frozen`.
         //
-        // The quiet version of that registration is refused separately, because the
-        // paragraph above prices only the subtree. Watching `CurrentVersion` with
+        // Registration without subtree notifications is refused separately, because the
+        // overhead above concerns only the subtree. Watching `CurrentVersion` with
         // `bWatchSubtree` false and `REG_NOTIFY_CHANGE_NAME` alone would not see the
-        // Explorer traffic at all — "if the parameter is FALSE, the function reports
+        // Explorer traffic at all ("if the parameter is FALSE, the function reports
         // changes only in the specified key", and that filter fires "if a subkey is added
-        // or deleted" (`RegNotifyChangeKeyValue`, *Parameters*) — so the cost named above
+        // or deleted" (`RegNotifyChangeKeyValue`, *Parameters*)), so the cost named above
         // is not what settles it. Two other things do. [`WatchedKey::arm`] passes
         // `bWatchSubtree` for every key it registers, and neither it nor the filter can be
         // changed on an open handle without closing and reopening it, so this asks for a
-        // per-key registration shape and another permanently armed handle on every
-        // machine. And it asks for them against a key Windows itself creates: on a
-        // Windows 11 machine every hive that could be read already carried it — `.DEFAULT`
-        // and the three service accounts included, which is the case
-        // [`super::read_user_mode`]'s own missing-key arm is written for. That is the
-        // reason [`arm_machine_default_key`] needs no ancestor-walk either, and it applies
-        // on this side of the registry too.
+        // per-key registration shape and another permanently armed handle on every machine.
+        // And it asks for them against a key Windows itself creates: on a Windows 11
+        // machine every hive that could be read already carried it: `.DEFAULT` and the
+        // three service accounts included, which is the case [`super::read_user_mode`]'s
+        // own missing-key arm is written for. That is the reason
+        // [`arm_machine_default_key`] needs no ancestor-walk either, and it applies on this
+        // side of the registry too.
         let (user_key, leading) = match WatchedKey::open(
             HKEY_CURRENT_USER,
             INTERNET_SETTINGS,
@@ -166,7 +165,7 @@ impl Watch {
             }
         }
 
-        // Secondary, always fail-soft — see the module docs. Not requesting group policy
+        // Secondary, always fail-soft; see the module docs. Not requesting group policy
         // watching at all is opting out, not degradation, so nothing is recorded then.
         if options.watch_group_policy && !arm_group_policy_key(&mut watched) {
             push_degraded(&mut construction_degraded, ProxyConfigSource::GroupPolicy);
@@ -235,7 +234,7 @@ impl Watch {
                 if let Err(error) = run(shutdown, poll_now, watched, &options, &shared) {
                     // The loop only returns an error when it can no longer wait or
                     // re-arm, i.e. when watching cannot continue at all (`ERROR` is
-                    // reserved for exactly that).
+                    // reserved for that).
                     crate::trace::error!(
                         error = %crate::trace::SafeError(&error),
                         "the registry watcher thread cannot continue"
@@ -255,7 +254,7 @@ impl Watch {
     pub(crate) fn poll_now(&self) {
         // SAFETY: `self.poll_now` is a live event handle owned by `self` for as long as
         // this `Watch` exists; the thread only ever waits on it, so signalling it here
-        // is race free — the same reasoning `Drop`'s `SetEvent` on `shutdown` relies on.
+        // is race free: the same reasoning `Drop`'s `SetEvent` on `shutdown` relies on.
         unsafe {
             let _ = SetEvent(self.poll_now.raw());
         }
@@ -297,7 +296,7 @@ struct WatchedKey {
     // [`WatchOptions::poll_interval`] is set, through
     // [`crate::watch::watch_fail_soft`]'s `leading` parameter.
     //
-    // `true` only for HKCU, Windows' one mandatory source — it has no fallback route
+    // `true` only for HKCU, Windows' one mandatory source: it has no fallback route
     // this backend could use instead. `false` for the HKLM keys, whose failures degrade
     // unconditionally: neither was ever the only way to notice a change.
     critical: bool,
@@ -305,7 +304,7 @@ struct WatchedKey {
     // [`BackendHealth::degraded`] / [`crate::watch::WatchHealth::degraded`], whose doc
     // says which source a dead route names: [`ProxyConfigSource::Registry`] for HKCU,
     // [`ProxyConfigSource::GroupPolicy`] for the group policy ancestor, and
-    // [`ProxyConfigSource::WinHttpDefault`] for the non-policy HKLM key — nothing opens
+    // [`ProxyConfigSource::WinHttpDefault`] for the non-policy HKLM key: nothing opens
     // that key, and [`arm_machine_default_key`] says what it does deliver.
     source: ProxyConfigSource,
     // Only used to say *which* key woke the thread, so it has no reader in a build
@@ -338,7 +337,7 @@ impl WatchedKey {
     // (Re-)register for the next notification.
     fn arm(&self) -> Result<(), Error> {
         // SAFETY: the key handle and the event handle are both owned by `self` and
-        // still open. `fAsynchronous = true` requires a valid event, which is exactly
+        // still open. `fAsynchronous = true` requires a valid event, which is
         // what is passed, and the call is only ever made when no registration for this
         // key is outstanding (see the module docs).
         let status = unsafe {
@@ -362,7 +361,7 @@ impl WatchedKey {
 }
 
 // Strict ancestors of [`POLICY_INTERNET_SETTINGS`] to try watching, most specific first.
-// The leaf is deliberately not among them, which is the whole reason this walk exists: a
+// The leaf is not among them, which is the whole reason this walk exists: a
 // `gpupdate` that lifts a policy deletes the leaf out from under the handle, the re-arm
 // fails, [`Shared::degrade`] retires [`ProxyConfigSource::GroupPolicy`] for the life of
 // the process, and a policy re-applied later is never seen again. An ancestor outlives
@@ -378,7 +377,7 @@ fn group_policy_ancestors() -> Vec<&'static str> {
 }
 
 // Try candidates under `root`; push first success. Failures WARN rather than
-// failing the caller — both call sites ([`arm_group_policy_key`],
+// failing the caller: both call sites ([`arm_group_policy_key`],
 // [`arm_machine_default_key`]) watch a secondary, unconditionally fail-soft source (see
 // the module docs). Returns `false` if none armed.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
@@ -427,10 +426,10 @@ fn arm_first_available(
     false
 }
 
-// Try to open and arm the closest *ancestor* of the group policy key that exists — see
+// Try to open and arm the closest *ancestor* of the group policy key that exists: see
 // [`group_policy_ancestors`] for why the leaf key itself is not among the candidates.
 // Returns `false` only if even `Software` could not be opened or armed, which in
-// practice does not happen — `Software` always exists under `HKEY_LOCAL_MACHINE`.
+// practice does not happen: `Software` always exists under `HKEY_LOCAL_MACHINE`.
 fn arm_group_policy_key(watched: &mut Vec<WatchedKey>) -> bool {
     arm_first_available(
         watched,
@@ -441,19 +440,18 @@ fn arm_group_policy_key(watched: &mut Vec<WatchedKey>) -> bool {
     )
 }
 
-// Watch `HKLM\...\Internet Settings` — the non-policy, machine-wide counterpart of the
-// per-user key this backend already watches. No reader ever opens this key, but the
-// WinHTTP machine default lives *under* it: `netsh winhttp set proxy` writes
-// `...\Internet Settings\Connections\WinHttpSettings`, which [`read_config`] reads back
-// through `WinHttpGetDefaultProxyConfiguration`. The subtree registration is the only
-// *notification* route by which such a change reaches a subscriber — a `poll_interval`
-// timer and `poll_now` both re-read it — so a
-// failure here degrades [`ProxyConfigSource::WinHttpDefault`] and not the HKCU key's
+// Watch `HKLM\...\Internet Settings`: the non-policy, machine-wide counterpart of the
+// per-user key this backend already watches. No reader ever opens this key, but the WinHTTP
+// machine default lives *under* it: `netsh winhttp set proxy` writes `...\Internet
+// Settings\Connections\WinHttpSettings`, which [`read_config`] reads back through
+// `WinHttpGetDefaultProxyConfiguration`. The subtree registration is the only
+// *notification* route by which such a change reaches a subscriber (a `poll_interval` timer
+// and `poll_now` both re-read it), so a failure here degrades
+// [`ProxyConfigSource::WinHttpDefault`] and not the HKCU key's
 // [`ProxyConfigSource::Registry`], which is still delivering the per-user store this
-// backend reads on an ordinary machine. Unlike
-// [`arm_group_policy_key`] there is only one candidate: this key is a pre-existing part
-// of Windows itself, not something created or deleted on demand, so no ancestor-walk
-// fallback is needed.
+// backend reads on an ordinary machine. Unlike [`arm_group_policy_key`] there is only one
+// candidate: this key is a pre-existing part of Windows itself, not something created or
+// deleted on demand, so no ancestor-walk fallback is needed.
 fn arm_machine_default_key(watched: &mut Vec<WatchedKey>) -> bool {
     arm_first_available(
         watched,
@@ -516,8 +514,8 @@ fn run(
 
     let poll_millis = poll_wait_millis(options.poll_interval);
 
-    // Every entry starts alive — `watched` only contains keys `Watch::armed` actually
-    // established — and `rearm` flips one to `false` the first time it degrades, so
+    // Every entry starts alive, `watched` only contains keys `Watch::armed`
+    // established, and `rearm` flips one to `false` the first time it degrades, so
     // `mark_degraded_and_check_all_dead` can tell "just this key died" from "the last
     // live route just died".
     let mut alive = vec![true; watched.len()];
@@ -525,7 +523,7 @@ fn run(
     loop {
         // A re-arm that cannot continue ends the loop, but only after the read below. The
         // notification that woke us announced a change; returning here would drop it and
-        // leave `current()` describing the configuration from before it — answering with
+        // leave `current()` describing the configuration from before it: answering with
         // nothing while holding the information. Fail-soft covers what could not be read,
         // not what was read and then dropped.
         let mut fatal = None;
@@ -562,7 +560,7 @@ fn run(
             match wait(&handles, debounce_wait_millis(remaining))? {
                 Wake::Shutdown => return Ok(()),
                 // Coalesced into the window already open, same as another registry
-                // notification arriving inside it — nothing more to do.
+                // notification arriving inside it: nothing more to do.
                 Wake::PollNow => {}
                 Wake::Key(index) => {
                     if let Err(error) =
@@ -577,7 +575,7 @@ fn run(
 
         crate::trace::debug!("the debounce window closed; re-reading the registry");
         match read_config(options) {
-            // Emit only when the snapshot actually differs from the previous one.
+            // Emit only when the snapshot differs from the previous one.
             Ok(config) => {
                 shared.emit(config);
             }
@@ -603,7 +601,7 @@ fn mark_degraded_and_check_all_dead(alive: &mut [bool], index: usize) -> bool {
 
 // Re-arm `watched[index]` after it woke, honouring [`WatchedKey`]'s `critical` flag and
 // [`WatchOptions::poll_interval`] through the shared judgement table
-// [`crate::watch::watch_fail_soft`] — the same table [`Watch::armed`] runs HKCU through
+// [`crate::watch::watch_fail_soft`]: the same table [`Watch::armed`] runs HKCU through
 // at construction time.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 fn rearm(
@@ -730,8 +728,8 @@ mod tests {
         }
     }
 
-    // The ordinary case is a plain conversion — the clamp must not disturb the windows
-    // anyone actually configures, including the default.
+    // The ordinary case is a plain conversion: the clamp must not disturb the windows
+    // anyone configures, including the default.
     #[test]
     fn an_ordinary_debounce_window_converts_to_milliseconds() {
         assert_eq!(debounce_wait_millis(Duration::from_millis(250)), 250);
@@ -744,7 +742,7 @@ mod tests {
     }
 
     // Watching the leaf directly would let a policy's *deletion* permanently degrade
-    // the group policy route — see [`group_policy_ancestors`].
+    // the group policy route: see [`group_policy_ancestors`].
     #[test]
     fn the_leaf_key_itself_is_never_a_candidate() {
         assert!(
@@ -804,8 +802,9 @@ mod tests {
         );
     }
 
-    // [`rearm`] must call `shared.mark_no_live_notifications` exactly once — the
-    // first time the *last* live route degrades, not on every degrade after that.
+    // `mark_degraded_and_check_all_dead` answers `true` on the call that degrades the
+    // *last* live route and on no other, which is what lets [`rearm`] report total loss
+    // once rather than on every degrade after it.
     #[test]
     fn only_the_last_alive_key_dying_reports_total_loss() {
         let mut alive = vec![true, true, true];
@@ -835,15 +834,15 @@ mod tests {
     }
 
     // [`run`] lays `handles` out as `[shutdown, poll_now, ...watched]`, and undoing that
-    // offset is all [`wait`] does with an index, and this test is the only thing holding it
-    // in a default `cargo test`. `i - 1` in place of `i - 2` still opens a debounce window,
-    // and the re-read closing it still sees the change. What it loses is the *re-arm* — one
-    // notification per registration, so
-    // the key that actually signalled goes quiet after its first wake, and the change
-    // after that is announced by nothing. `tests/windows_watch.rs`'s
-    // `a_registry_change_is_emitted_exactly_once` is what catches that, and it rewrites the
-    // real registry, so it runs only under `--include-ignored`. The last watched key is worse
-    // still: `watched[handles.len() - 2]` is one past the end, and the thread panics.
+    // offset is all [`wait`] does with an index, and only this test checks it in a default
+    // `cargo test`. `i - 1` in place of `i - 2` still opens a debounce window, and the
+    // re-read closing it still sees the change. What it loses is the *re-arm*: one
+    // notification per registration, so the key that signalled stops reporting
+    // notifications after its first wake, and the change after that is announced by
+    // nothing. `tests/windows_watch.rs`'s `a_registry_change_is_emitted_exactly_once` is
+    // what catches that, and it rewrites the real registry, so it runs only under
+    // `--include-ignored`. The last watched key is worse still:
+    // `watched[handles.len() - 2]` is one past the end, and the thread panics.
     //
     // Real events rather than a hand-supplied index: the offset only means anything
     // against `WaitForMultipleObjects`' own "lowest signalled handle" answer, so a test
@@ -885,18 +884,17 @@ mod tests {
         }
     }
 
-    // Opening and arming is read-only registry I/O — no value is written, so unlike
+    // Opening and arming is read-only registry I/O: no value is written, so unlike
     // `tests/windows_watch.rs` this needs no guard and no `#[ignore]`.
     //
-    // What it holds is the short-circuit in [`Watch::armed`]: with group policy
-    // watching off, [`arm_group_policy_key`] is not called, so it cannot fail, so the
-    // "opting out is not degradation" comment beside it describes something unreachable
-    // rather than something merely avoided. Dropping the
-    // `options.watch_group_policy &&` guard leaves every test in
-    // `tests/windows_watch.rs` green, including
-    // `group_policy_watching_can_be_disabled` — which asks the *reader* whether it
+    // What it holds is the short-circuit in [`Watch::armed`]: with group policy watching
+    // off, [`arm_group_policy_key`] is not called, so it cannot fail, so the "opting out is
+    // not degradation" comment beside it describes something unreachable rather than
+    // something merely avoided. Dropping the `options.watch_group_policy &&` guard leaves
+    // every test in `tests/windows_watch.rs` green, including
+    // `group_policy_watching_can_be_disabled`, which asks the *reader* whether it
     // consulted group policy, and the reader never does. Arming is a different question,
-    // and this is the one place it is asked.
+    // and only this test checks it.
     #[test]
     fn turning_group_policy_off_arms_one_fewer_key() {
         let watched_with = Watch::armed(&WatchOptions::new()).expect("arming with group policy");

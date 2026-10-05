@@ -3,7 +3,7 @@
 //! but **never read** by default ([`super::gnome::READ_AUTHENTICATION_PASSWORD`] = false).
 
 // Compiled on every target under `cfg(test)` so that the table driven tests below run in
-// CI on Windows and macOS as well — and on Linux with `linux-gnome` off, where the tests
+// CI on Windows and macOS as well, and on Linux with `linux-gnome` off, where the tests
 // are equally worth running. In both cases the module has no caller.
 #![cfg_attr(
     not(all(target_os = "linux", feature = "linux-gnome")),
@@ -16,7 +16,7 @@ use std::fmt;
 use url::Url;
 
 use crate::auth::ProxyAuth;
-use crate::bypass::{BypassDialect, BypassRules};
+use crate::bypass::{BypassDialect, BypassRules, ImplicitBypass};
 use crate::diagnostic::{RejectedValue, RejectionKind, RejectionSource};
 use crate::endpoint::{ProxyEndpoint, ProxyEntry, ProxyScheme, Scheme};
 use crate::error::Error;
@@ -43,7 +43,7 @@ pub(crate) const KEY_PORT: &str = "port";
 pub(crate) const KEY_USE_AUTHENTICATION: &str = "use-authentication";
 // `http.authentication-user` (the `http` child only).
 pub(crate) const KEY_AUTHENTICATION_USER: &str = "authentication-user";
-// `http.authentication-password` — see the module documentation above.
+// `http.authentication-password`; see the module documentation above.
 pub(crate) const KEY_AUTHENTICATION_PASSWORD: &str = "authentication-password";
 
 // The `mode` value that means "no proxy".
@@ -59,23 +59,24 @@ pub(crate) struct ChildKeys {
     pub(crate) scheme: Scheme,
     // The child name, i.e. the `http` in `org.gnome.system.proxy.http`.
     pub(crate) child: &'static str,
-    // The port assumed when the child's `port` key is `0`.
+    // The port assumed when the child's `port` key is `0` and its host names no
+    // `scheme://`; a host that does takes that scheme's port first.
     //
     // GNOME stores `0` for "never filled in" and the schema's own default for
     // `http.port` is `8080`, so that is the default assumed for the three HTTP-family
-    // children when this source names no port of its own — a source-specific default,
+    // children when this source names no port of its own: a source-specific default,
     // not a single crate-wide one. SOCKS gets the usual 1080.
     //
-    // Nobody agrees here, so a default has to be picked rather than copied. The schema
-    // says a `0` port means the child is not in use at all ("HTTP proxying is enabled
-    // when the host key is non-empty and the port is non-0", in the description of the
-    // `enabled` key it also marks "Unused; ignore"), yet neither reader does that:
-    // glib-networking formats the port straight into the URI and gets `http://host:0`,
-    // and Chromium omits it and lands on the *scheme's* default, 80 for the HTTP family.
-    // A named host that reaches nothing is the outcome to avoid, and 8080 is the port the
-    // schema itself expects an HTTP proxy to be on. `https`/`ftp`/`socks` are the children
-    // whose schema default is `0`, so they are the ones that reach this by simply going
-    // unfilled; `http` starts at 8080 and only lands here if someone stored `0` over it.
+    // The schema and readers disagree here, so a default has to be selected. The schema
+    // says a `0` port means the child is not in use at all ("HTTP proxying is enabled when
+    // the host key is non-empty and the port is non-0", in the description of the `enabled`
+    // key it also marks "Unused; ignore"), yet neither reader does that: glib-networking
+    // formats the port straight into the URI and gets `http://host:0`, and Chromium omits
+    // it and lands on the *scheme's* default, 80 for the HTTP family. A named host that
+    // reaches nothing is the outcome to avoid, and 8080 is the port the schema itself
+    // expects an HTTP proxy to be on. `https`/`ftp`/`socks` are the children whose schema
+    // default is `0`, so they are the ones that reach this by going unfilled; `http` starts
+    // at 8080 and only lands here if someone stored `0` over it.
     default_port: u16,
     // The wire protocol hint, set only where the schema implies one.
     hint: Option<ProxyScheme>,
@@ -101,21 +102,20 @@ pub(crate) const CHILDREN: [ChildKeys; 4] = [
         scheme: Scheme::Ftp,
         child: "ftp",
         default_port: 8080,
-        // `None` is read as HTTP by `ProxyStep::from_endpoint`, and for this child that is a
-        // decision rather than an omission: the key names the proxy *for* FTP destinations,
-        // not a proxy spoken to in FTP. glib-networking does hand out `ftp://host:port` built
-        // from these two keys (`gproxyresolvergnome.c:334`, against `http://` for the `https`
-        // child at `:294`), but nothing implements that protocol — GIO's
-        // `G_PROXY_EXTENSION_POINT_NAME` has `http`, `https`, `socks4`, `socks4a` and
-        // `socks5` and no other, and glib-networking registers none — so a client that took
+        // `None` is read as HTTP by `ProxyStep::from_endpoint`, and for this child that is
+        // a decision rather than an omission: the key names the proxy *for* FTP
+        // destinations, not a proxy spoken to in FTP. glib-networking does hand out
+        // `ftp://host:port` built from these two keys (`gproxyresolvergnome.c:334`, against
+        // `http://` for the `https` child at `:294`), but nothing implements that protocol;
+        // GIO's `G_PROXY_EXTENSION_POINT_NAME` has `http`, `https`, `socks4`, `socks4a` and
+        // `socks5` and no other, and glib-networking registers none, so a client that took
         // the URI at its word would get `Proxy protocol "ftp" is not supported.`
         // (`gsocketclient.c:1265`) and reach nothing. Chromium reads the same keys and pins
         // `SCHEME_HTTP` for all of them but SOCKS (`proxy_config_service_linux.cc:1065`).
         //
-        // Recording the child as unsupported instead was the other candidate, and it is the
-        // worse one: the drop lands in `rejected` and an FTP destination answers Direct, so a
-        // machine with a configured proxy sends that traffic past it. Reporting a transport
-        // the administrator did configure beats reporting none.
+        // Do not record this child as unsupported; the drop lands in `rejected` and an FTP
+        // destination answers Direct, sending traffic past the configured proxy. Preserve
+        // the configured transport.
         hint: None,
     },
     ChildKeys {
@@ -123,7 +123,7 @@ pub(crate) const CHILDREN: [ChildKeys; 4] = [
         child: "socks",
         default_port: 1080,
         // Not something the schema says: the `socks` child has a `host` and a `port` and no
-        // version anywhere. It is the URI glib builds from them — `socks://host:port` — and
+        // version anywhere. It is the URI glib builds from them, `socks://host:port`, and
         // `socks://` is SOCKS5 by the reading this crate takes. GIO widens that URI again
         // (`g_simple_proxy_resolver_set_default_proxy` documents the bare form as covering
         // socks5, socks4a and socks4 alike), which is a set `ProxyScheme` has no spelling
@@ -146,13 +146,9 @@ pub(crate) enum GValue {
     List(Vec<String>),
 }
 
-// Hand-written for the `Text` arm, which is the only one a secret can reach.
-// `autoconfig-url` is a `s` key and a PAC URL may carry userinfo, so the risk does not
-// depend on [`super::gnome::READ_AUTHENTICATION_PASSWORD`] — but that constant is a
-// `false` someone could flip, and `authentication-password` is already mapped
-// ([`KEY_AUTHENTICATION_PASSWORD`]), so flipping it would otherwise have turned this
-// derive into a plaintext-password path silently. `Int`, `Flag` and `List` are printed
-// as they were: a port, a boolean, and `ignore-hosts`, which holds host patterns.
+// Hand-written to redact `Text`, which can hold an `autoconfig-url` with userinfo. The
+// redaction does not depend on [`super::gnome::READ_AUTHENTICATION_PASSWORD`]: that is a
+// `false` someone could flip, and `authentication-password` is already mapped.
 impl fmt::Debug for GValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -169,19 +165,15 @@ impl fmt::Debug for GValue {
 
 // The whole schema flattened into one map.
 //
-// Child keys are stored dotted: `http.host`, `socks.port`, … The flattening is what
-// makes the type constructible from a test literal without GLib.
+// Child keys are stored dotted: `http.host`, `socks.port`, … Flattened, the type can be
+// built from a test literal without GLib.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GnomeSettings {
-    // Ordered rather than hashed only so that the derived `Debug` prints the same text
-    // twice for the same schema; a `HashMap` seeds its iteration order per instance. The
-    // KDE twin buys that with a hand-written `Debug` (`kioslaverc.rs`), which it needed
-    // anyway for masking. Nothing here needs masking, so the container is the cheaper
-    // half of the same decision. Both maps are schema-sized.
+    // Ordered entries make derived `Debug` deterministic across instances.
     entries: BTreeMap<String, GValue>,
-    // The subset of `entries` somebody set — see [`GnomeSettings::mark_written`] and
-    // [`configured_mode`]. "Somebody" is wider than "the user": an administrator's dconf
-    // profile counts too, which is why this is not called `user_values`.
+    // The subset of explicitly set `entries`: see [`GnomeSettings::mark_written`] and
+    // [`configured_mode`]. An administrator's dconf profile counts as well as the user's
+    // settings, which is why this is not called `user_values`.
     written_values: BTreeSet<String>,
 }
 
@@ -196,9 +188,9 @@ impl GnomeSettings {
         self.entries.insert(key.into(), value);
     }
 
-    // Note that `key` was set by somebody rather than left at the compiled schema's own
-    // default. `g_settings_get_user_value()` alone cannot answer that — it sees only the
-    // user's own layer, so a key an administrator's dconf profile set is invisible to it.
+    // Record that `key` is set rather than left at the compiled schema's own default.
+    // `g_settings_get_user_value()` alone cannot answer that; it sees only the user's own
+    // layer, so a key an administrator's dconf profile set is invisible to it.
     // `gnome::was_written` holds the whole rule and the reason for each part of it.
     pub(crate) fn mark_written(&mut self, key: impl Into<String>) {
         self.written_values.insert(key.into());
@@ -209,7 +201,7 @@ impl GnomeSettings {
         format!("{child}.{key}")
     }
 
-    // Whether *any* key this crate reads was set by somebody.
+    // Whether *any* key this crate reads is explicitly set.
     fn has_written_value(&self) -> bool {
         !self.written_values.is_empty()
     }
@@ -233,8 +225,8 @@ impl GnomeSettings {
 
     // Read a port key. `0` is GNOME's "never filled in" and is reported as absent.
     //
-    // The `try_from` cannot fold an out-of-range port into that same "absent" — the sibling
-    // `ProxyDict::port_is_unusable` exists on the macOS side precisely because there it can.
+    // The `try_from` cannot fold an out-of-range port into that same "absent": the sibling
+    // `ProxyDict::port_is_unusable` exists on the macOS side because there it can.
     // All four `port` keys declare `<range min="0" max="65535"/>`, and GSettings replaces a
     // stored value outside a key's declared range with the schema default before any reader
     // sees it, so `settings.int()` in `gnome::read_key` cannot hand this an `i32` a `u16`
@@ -270,9 +262,9 @@ impl FromIterator<(String, GValue)> for GnomeSettings {
 
 // The mode this store is *configured* with, or `None` when it was never configured.
 //
-// A `Direct` that nobody wrote is the schema speaking, not a decision: every machine with
+// An unset `Direct` is a schema default rather than an explicit choice: every machine with
 // the GNOME schemas installed answers `mode = 'none'`, including a KDE one, and reporting
-// that as a configured source would put GNOME ahead of the store the user really uses.
+// that as a configured source would put GNOME ahead of the store the user uses.
 pub(crate) fn configured_mode(settings: &GnomeSettings) -> Result<Option<ProxyMode>, Error> {
     let mode = mode_from_settings(settings)?;
     if settings.has_written_value() || !mode.is_direct() {
@@ -303,19 +295,10 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
     let mut per_scheme = HashMap::new();
     let mut rejected = Vec::new();
 
-    // The two readers of this schema disagree about `use-same-proxy`, so following either
-    // one alone would be a choice, not a rule. Chromium's `SettingGetterImplGSettings`
-    // never reads the key: its `GetBool` returns the "unavailable" `false` under the
-    // comment "it is never set to false by the proxy config utility. We ignore it", so
-    // `GetConfigFromSettings`'s `same_proxy` keeps the `false` it was initialised with and
-    // Chrome always takes the per-scheme branch below;
-    // glib-networking's `gproxyresolvergnome.c` honours it, making the HTTP child the
-    // *default* proxy while still letting a configured child win for its own scheme. The
-    // key is honoured here, glib's way: it is the one the schema actually documents
-    // ("Whether to use the HTTP proxy for all protocols"), its default is `true`, and
-    // ignoring a `true` would drop the catch-all a GNOME user asked for.
-    // Read every child once, in schema order, so that `rejected` records the same
-    // sequence whichever branch below runs.
+    // Chromium's `SettingGetterImplGSettings` ignores `use-same-proxy`, while
+    // glib-networking's `gproxyresolvergnome.c` honours it as an HTTP default that
+    // configured child proxies can override. Follow the schema's documented key here;
+    // its default is `true`. Read children in schema order so `rejected` is stable.
     let resolved: Vec<(Scheme, Option<ProxyEndpoint>)> = CHILDREN
         .iter()
         .map(|keys| (keys.scheme, endpoint_for(settings, keys, &mut rejected)))
@@ -332,7 +315,7 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
     // `Disabled` below is correct) from "a socks child was named but rejected" (its
     // catch-all was lost too, and the schemes that would have relied on it must stay out of
     // `per_scheme` so `resolve` can find the record in `rejected` instead of a `Disabled`
-    // pre-empting it). A raw `socks.host` value with no usable endpoint is exactly the
+    // pre-empting it). A raw `socks.host` value with no usable endpoint is the
     // second case.
     let socks_unusable = socks.is_none()
         && CHILDREN
@@ -349,7 +332,7 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
             per_scheme.insert(Scheme::All, ProxyEntry::Use(endpoint));
         }
         // No `Disabled` entries here: an empty child must fall through to `All`, and a
-        // `Disabled` entry is precisely what suppresses that fallback.
+        // `Disabled` entry is what suppresses that fallback.
         for (scheme, endpoint) in resolved
             .iter()
             .filter(|(scheme, _)| *scheme != Scheme::Http)
@@ -362,15 +345,15 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
         // `https` has a rule of its own, and the schema states it outside `use-same-proxy`,
         // in the `mode` key's description: "If an http proxy is configured, but an https
         // proxy is not, then the http proxy is also used for https." glib-networking does
-        // exactly that — `else if (http_proxy) set_uri_proxy (simple, "https", http_proxy)`
-        // sits outside its `use-same-proxy` block, and a per-scheme proxy beats the
+        // that: `else if (http_proxy) set_uri_proxy (simple, "https", http_proxy)` sits
+        // outside its `use-same-proxy` block, and a per-scheme proxy beats the
         // `set_default_proxy()` the SOCKS child installs. This crate follows glib here.
-        // Only an *absent* child inherits: `endpoint_for`
-        // answers `None` both for a child with no host and for one whose host would not
-        // parse, and the second is already in `rejected`, where serving the HTTP proxy in
-        // its place would send HTTPS to a proxy nobody named
-        // (`malformed_child_hosts_are_dropped_and_recorded` pins that). Neither the schema
-        // nor glib gives `ftp` this rule.
+        // Only an *absent* child inherits: `endpoint_for` answers `None` both for a child
+        // with no host and for one whose host would not parse, and the second is already in
+        // `rejected`, where serving the HTTP proxy in its place would send HTTPS to a
+        // proxy not configured for HTTPS; `malformed_child_hosts_are_dropped_and_recorded`
+        // pins that.
+        // Neither the schema nor glib gives `ftp` this rule.
         let inherited_https = match CHILDREN
             .iter()
             .find(|keys| keys.scheme == Scheme::Https)
@@ -378,13 +361,13 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
         {
             Some(_) => None,
             None => {
-                // Inheriting writes the `http` child's value into a second slot, so losing it
-                // loses two answers. `rejected` carries one record per slot lost —
+                // Inheriting writes the `http` child's value into a second slot, so losing
+                // it loses two answers. `rejected` carries one record per slot lost:
                 // `affected_scheme` holds a single `Scheme` and cannot say "both", and
-                // `Scheme::All` would over-claim `ftp`, which inherits nothing — or `resolve`
-                // would answer Direct for `https` with the record for the very proxy it was
-                // meant to use sitting right there. Only the `http` child is ever attributed
-                // `Http`, so this cannot pick up someone else's drop.
+                // `Scheme::All` would over-claim `ftp`, which inherits nothing, or
+                // `resolve` would answer Direct for `https` with the record for the very
+                // proxy it was meant to use sitting right there. Only the `http` child is
+                // ever attributed `Http`, so this cannot pick up someone else's drop.
                 let lost = rejected
                     .iter()
                     .find(|value| value.affected_scheme() == Some(Scheme::Http))
@@ -408,15 +391,15 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
                 }
                 // `Disabled` is what stops a scheme from reaching `Scheme::All`, so it
                 // may only be written where nothing is meant to catch it. With a SOCKS
-                // child configured something is, and the entry is left absent instead —
+                // child configured something is, and the entry is left absent instead:
                 // whether that something resolved (`socks: Some`) or was rejected
                 // (`socks_unusable`): either way `Disabled` would answer Direct in place
-                // of a proxy the user actually named. The child's own host is the same
+                // of a proxy the user named. The child's own host is the same
                 // rule one step nearer: `endpoint_for` answers `None` for an absent host
                 // and for an unparseable one alike, and only the first of those is
                 // configured to go direct. `ProxyMode::with_rejected` fills the slot this
-                // leaves empty with the record itself, and does not overwrite a `Disabled`
-                // — which is why the guard stays here, where the backend still knows that
+                // leaves empty with the record itself, and does not overwrite a `Disabled`,
+                // which is why the guard stays here, where the backend still knows that
                 // it is looking at the host it dropped rather than at a blank key.
                 None if socks.is_none()
                     && !socks_unusable
@@ -431,35 +414,22 @@ fn manual_mode(settings: &GnomeSettings) -> Result<ProxyMode, Error> {
         }
     }
 
-    // A configured SOCKS child catches every scheme that named no proxy of its own —
-    // the same rule as Windows' `socks=` catch-all (`parse::apply_socks_catch_all`).
-    // Both readers of this schema arrive at that rule, by different routes:
-    // glib-networking calls `g_simple_proxy_resolver_set_default_proxy()` with the SOCKS
-    // URI, and Chromium puts it in `fallback_proxies`, which `ProxyRules::Apply()`
-    // reaches for whenever the scheme's own list is empty. Chromium's
-    // `num_proxies_specified == 1` promotion is the *same* outcome expressed one layer
-    // up, not a narrower rule: a lone SOCKS child is simply the case where no scheme has
-    // anything else.
+    // A SOCKS child catches every scheme with no proxy of its own, as
+    // `parse::apply_socks_catch_all` does for Windows. glib-networking passes it to
+    // `g_simple_proxy_resolver_set_default_proxy()`; Chromium's `ProxyRules::Apply()` reads
+    // `fallback_proxies` when a scheme's own list is empty.
     //
-    // Where they stop agreeing is the overlap, and this side is the one that diverges:
-    // glib's SOCKS block runs *after* its `use-same-proxy` one and calls
-    // `set_default_proxy()` unconditionally, so there a SOCKS child overwrites the HTTP
-    // catch-all for every scheme glib did not name outright — it copies the HTTP proxy
-    // onto `https` by hand, so that one survives, but `ftp` and anything else land on
-    // SOCKS. The guard below instead leaves the `use-same-proxy` answer standing
-    // (`a_child_with_its_own_host_overrides_use_same_proxy` pins that).
-    // Chromium cannot break the tie — it never reads that key, so its `same_proxy` stays
-    // `false` and the overlap never arises there. Standing is what the key literally asks
-    // for ("use the HTTP proxy for all protocols"), and it costs nothing in the case that
-    // motivated this block: the key defaults to `true`, so a GNOME user who configures
-    // nothing but a SOCKS proxy is otherwise never covered.
+    // Where `use-same-proxy` already set a catch-all, `gproxyresolvergnome.c` lets SOCKS
+    // replace it; here the HTTP one stands
+    // (`a_child_with_its_own_host_overrides_use_same_proxy`), because the key asks for the
+    // HTTP proxy for all protocols. Chromium never reads that key.
     if let Some(endpoint) = socks
         && !per_scheme.contains_key(&Scheme::All)
     {
         per_scheme.insert(Scheme::All, ProxyEntry::Use(endpoint));
     }
 
-    // Reject-only stays `Manual` so the drops are not lost — `parse::windows_manual`'s
+    // Reject-only stays `Manual` so the drops are not lost: `parse::windows_manual`'s
     // doc is where that rule is written.
     if per_scheme.values().all(ProxyEntry::is_disabled) && rejected.is_empty() {
         return Ok(ProxyMode::Direct);
@@ -489,7 +459,7 @@ fn endpoint_for(
             );
             // The `socks` child is also `manual_mode`'s catch-all for every scheme with no
             // child of its own (see the block below this function), and under
-            // `use-same-proxy` — the schema default — so is the `http` one, which is written
+            // `use-same-proxy`, the schema default, so is the `http` one, which is written
             // to `Scheme::All` rather than to `Scheme::Http`. A malformed host in either
             // loses that fallback too, so it is attributed as widely as the fallback it
             // prevented rather than to its own scheme: `resolve` looks for a drop under the
@@ -533,47 +503,52 @@ fn endpoint_for(
             KEY_AUTHENTICATION_USER,
         ))
     {
-        endpoint = endpoint.with_auth(ProxyAuth::new(
-            user,
-            settings.text(&GnomeSettings::child_key(
-                keys.child,
-                KEY_AUTHENTICATION_PASSWORD,
-            )),
-        ));
+        let password_key = GnomeSettings::child_key(keys.child, KEY_AUTHENTICATION_PASSWORD);
+        let auth = ProxyAuth::new(user, settings.text(&password_key));
+        // A key the reader never asked for is one this crate did not read; a key it read
+        // and found empty is an unset password.
+        endpoint = endpoint.with_auth(if settings.entries.contains_key(&password_key) {
+            auth
+        } else {
+            auth.password_not_read()
+        });
     }
     Some(endpoint)
 }
 
 // Build the bypass rules from `ignore-hosts`, the way the code that resolves on GNOME
-// reads them — GLib's `GSimpleProxyResolver`, which `GProxyResolverGnome` fills from these
-// same keys. [`BypassDialect::Gnome`] carries the three differences that are pattern
-// shapes; the fourth is the port, which is not a shape and rides on the rule set.
+// reads them: GLib's `GSimpleProxyResolver`, which `GProxyResolverGnome` fills from these
+// same keys. [`BypassRules::push_gnome_entries`] sorts the entries the way GLib does and
+// refuses the ones it never matches, [`BypassDialect::Gnome`] carries the differences that
+// are pattern shapes, and the port, which is not a shape, rides on the rule set.
 //
 // Not `no_proxy(&items.join(","))`: the array is the delimiter, so rejoining and splitting
-// on `,` would read `['localhost,127.0.0.1']` as two rules the desktop does not have —
+// on `,` would read `['localhost,127.0.0.1']` as two rules the desktop does not have:
 // GLib matches that element against a host of that name and bypasses nothing, so inventing
 // the boundary sends two hosts direct that GNOME proxies.
 //
-// The WinINet tokens stay recognised: `HostPattern::parse_in` reads `<local>` and
-// `<-loopback>` before it reads the dialect, so every source that fills a list one entry
-// at a time reads the same vocabulary. GLib reads neither and matches either token against
-// a host literally so named. That divergence is left standing rather than answered here,
-// because a GNOME writer has no reason to type a WinINet token.
+// GLib has no implicit bypass and compares an address in the family it was written in, so
+// the rule set carries `ImplicitBypass::Empty` and no IPv4-mapped reduction, with or without
+// the key. Loopback is direct on a stock desktop only because the schema's default
+// `ignore-hosts` names `localhost`, `127.0.0.0/8` and `::1`.
 fn bypass_from_settings(settings: &GnomeSettings) -> Result<BypassRules, Error> {
-    match settings.list(KEY_IGNORE_HOSTS) {
+    let mut rules = match settings.list(KEY_IGNORE_HOSTS) {
         Some(items) => {
-            let mut rules =
-                parse::bypass_entries_in(items.iter().map(String::as_str), BypassDialect::Gnome);
-            rules.require_explicit_port = true;
-            Ok(rules)
+            parse::bypass_entries_in(items.iter().map(String::as_str), BypassDialect::Gnome)
         }
-        None => Ok(BypassRules::new()),
-    }
+        None => BypassRules::new(),
+    };
+    rules.implicit = ImplicitBypass::Empty;
+    rules.ipv4_mapped_as_ipv4 = false;
+    rules.strip_trailing_dot = false;
+    rules.require_explicit_port = true;
+    Ok(rules)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::PasswordState;
 
     // Build a settings map from `(key, value)` literals: `&str` becomes `Text`, an
     // integer `Int`, a `bool` `Flag` and a `&[&str]` `List`.
@@ -611,11 +586,11 @@ mod tests {
     }
 
     // This type exists to erase the GLib types, so the variant name is most of what a dump
-    // carries: `Int` says a port, `Flag` says a boolean key. This row is the only thing
-    // holding them apart, and `Flag(8080)` is not a reading anyone can act on.
-    // Only the `Text` arm masks, and `debug_masking`'s registry holds that half; this row is
-    // the other one. Rendered together and compared once, so that a failure names every arm
-    // that moved rather than stopping at the first.
+    // carries: `Int` says a port, `Flag` says a boolean key. No other test checks that
+    // distinction, and `Flag(8080)` is not a reading anyone can act on. Only the `Text` arm
+    // masks, and `debug_masking`'s registry holds that half; this row is the other one.
+    // Rendered together and compared once, so that a failure names every arm that moved
+    // rather than stopping at the first.
     #[test]
     fn every_gvalue_debug_names_the_type_it_erased() {
         let rendered: Vec<String> = [
@@ -736,9 +711,8 @@ mod tests {
         assert_eq!(socks.scheme_hint, Some(ProxyScheme::Socks5));
     }
 
-    // A malformed `<child>.host` drops only that one child
-    // and is recorded on `Manual.rejected`, instead of failing the whole schema the
-    // way `?` used to.
+    // A malformed `<child>.host` drops only that one child and is recorded on
+    // `Manual.rejected`; the rest of the schema still maps.
     #[test]
     fn malformed_child_hosts_are_dropped_and_recorded() {
         for label in ["mixed", "use_same_proxy", "lone_socks"] {
@@ -800,7 +774,7 @@ mod tests {
         }
     }
 
-    // The composed fix this round adds: a rejected `socks.host` costs `manual_mode`'s SOCKS
+    // A rejected `socks.host` costs `manual_mode`'s SOCKS
     // catch-all too, not just its own scheme, so it must be attributed to `Scheme::All`
     // (not `Scheme::Socks`) *and* must not let the `None if socks.is_none()` branch fill
     // `http` with `Disabled` before `resolve` ever consults `rejected`. Either half missing
@@ -824,9 +798,10 @@ mod tests {
     }
 
     // The same rule one child over. Under `use-same-proxy` the `http` child *is* the
-    // catch-all, so a malformed `http.host` costs every scheme that named nothing — and the
-    // URL here cannot be `http://`, because `Scheme::Http` is what the attribution used to
-    // say and `http://` would find the record either way. `https` is the one that could not.
+    // catch-all, so a malformed `http.host` leaves every scheme without an explicit proxy
+    // unusable, and the URL here cannot be `http://`, because `http://` finds a record
+    // attributed to `Scheme::Http` alone as well. `https` is the one that tells the two
+    // apart.
     #[cfg(feature = "resolve")]
     #[test]
     fn an_unusable_http_child_is_reported_for_the_schemes_use_same_proxy_gave_it() {
@@ -847,13 +822,14 @@ mod tests {
     }
 
     // A schema old enough not to declare `use-same-proxy` leaves the key out of the map
-    // altogether — `gnome::read_key` skips what `has_key` denies — and the branch that routes
-    // and the attribution inside `endpoint_for` have to read that absence the same way. They
-    // do, by both asking for `Some(true)`: with no key there is no catch-all, so the `http`
-    // child answers for `http` alone and the record for its malformed host is filed under
-    // that scheme. Read instead as the default the schema documents, the branch would take
-    // the catch-all while the attribution stayed narrow, and `https` would answer Direct with
-    // the drop that took its proxy away sitting unreachable in `rejected`.
+    // altogether (`gnome::read_key` skips what `has_key` denies), and the branch that
+    // routes and the attribution inside `endpoint_for` have to read that absence the same
+    // way. They do, by both asking for `Some(true)`: with no key there is no catch-all, so
+    // the `http` child answers for `http` alone and the record for its malformed host is
+    // filed under that scheme. Read instead as the default the schema documents, the branch
+    // would take the catch-all while the attribution stayed narrow, and `https` would
+    // answer Direct with the drop that took its proxy away sitting unreachable in
+    // `rejected`.
     #[cfg(feature = "resolve")]
     #[test]
     fn a_schema_that_never_declared_use_same_proxy_is_not_a_catch_all() {
@@ -883,7 +859,7 @@ mod tests {
 
     // The `mixed` case above carried one step further, to the half only `resolve` can show.
     // `endpoint_for` answers `None` for a child with no host and for one whose host would
-    // not parse, and only the first of those is "configured to go direct" — writing
+    // not parse, and only the first of those is "configured to go direct": writing
     // `Disabled` for the second answers Direct while `rejected` holds the record saying the
     // scheme was meant to be proxied.
     #[cfg(feature = "resolve")]
@@ -908,7 +884,7 @@ mod tests {
     // Turning `use-same-proxy` off narrows what the `http` child covers but does not empty
     // it: `https` still inherits it when that child names no host, so a malformed
     // `http.host` costs two schemes an answer and each must find its own record. `ftp` is
-    // the control — the schema gives it no such rule, so it goes Direct here, which is what
+    // the control: the schema gives it no such rule, so it goes Direct here, which is what
     // a single `Scheme::All` attribution would have got wrong in the other direction.
     #[cfg(feature = "resolve")]
     #[test]
@@ -940,12 +916,11 @@ mod tests {
     }
 
     // The `ftp` child names the proxy *for* FTP destinations, not one spoken to in FTP, so
-    // the hop is HTTP. Elsewhere only the SOCKS child's hint is read back, so this test is
-    // the only thing holding the two other readings of this child — and both fail in a
-    // direction nothing else here catches. An FTP hint has no transport behind it in the
-    // GNOME stack at all, and
-    // recording the child as unsupported instead answers Direct for a machine that has a
-    // proxy configured. The `CHILDREN` entry carries the sources.
+    // the hop is HTTP. Elsewhere only the SOCKS child's hint is read back, so only this
+    // test checks the two other readings of this child, and both fail in a direction
+    // nothing else here catches. An FTP hint has no transport behind it in the GNOME stack
+    // at all, and recording the child as unsupported instead answers Direct for a machine
+    // that has a proxy configured. The `CHILDREN` entry carries the sources.
     #[cfg(feature = "resolve")]
     #[test]
     fn the_ftp_child_is_reported_as_an_http_hop() {
@@ -986,7 +961,7 @@ mod tests {
         // `affected_scheme` says who lost a proxy; `source` says which key to go fix, and
         // it is the only half a user can act on. Nothing else on either Linux backend reads
         // it back, so without this row the `format!` that composes it can name any child or
-        // any key — `http.host` for an `ftp` drop, `ftp.port` for a host — and send the
+        // any key (`http.host` for an `ftp` drop, `ftp.port` for a host) and send the
         // reader to a setting that is not the one that failed.
         assert_eq!(
             rejected[0].source(),
@@ -996,12 +971,11 @@ mod tests {
 
     // All four children, and not only the two an obvious reading of this row would name.
     // The other two are the ones whose numbers nothing else reaches: `https` at 8080 can be
-    // set to the scheme's own 80 — exactly the value [`ChildKeys::default_port`] argues
-    // against — with nothing else on the Linux side seeing it, and `ftp` is held only in passing,
-    // by a test about malformed hosts. `https` and `ftp` are also the two that arrive here
-    // by doing nothing at all: their schema default *is* `0`, so an administrator who
-    // filled in a host and left the port alone lands on this number rather than on one
-    // they chose.
+    // set to the scheme's own 80, the value [`ChildKeys::default_port`] argues against,
+    // with nothing else on the Linux side seeing it, and `ftp` is held only in passing, by
+    // a test about malformed hosts. `https` and `ftp` are also the two that arrive here by
+    // doing nothing at all: their schema default *is* `0`, so an administrator who filled
+    // in a host and left the port alone lands on this number rather than on one they chose.
     #[test]
     fn a_zero_port_falls_back_to_the_source_default() {
         let settings = settings! {
@@ -1067,13 +1041,13 @@ mod tests {
 
     // A SOCKS child catches every scheme that named nothing of its own, whether or not
     // anything else is configured and whichever way `use-same-proxy` is set. Both
-    // readers of the schema do this — glib-networking through `set_default_proxy()`,
-    // Chromium through `fallback_proxies` — and the crate does it on Windows too.
+    // readers of the schema do this: glib-networking through `set_default_proxy()`,
+    // Chromium through `fallback_proxies`, and the crate does it on Windows too.
     #[test]
     fn a_socks_child_catches_every_scheme_that_named_nothing() {
         // `use-same-proxy` is not the switch that decides this, so both settings of it
         // are here; `true` is the one the schema defaults to, and the one a GNOME user
-        // who only ever filled in a SOCKS proxy is actually running under.
+        // who only ever filled in a SOCKS proxy is running under.
         for same_proxy in [true, false] {
             let settings = settings! {
                 "mode" => "manual",
@@ -1096,8 +1070,8 @@ mod tests {
         }
     }
 
-    // Chromium's `num_proxies_specified == 1` guard picks the *encoding* — one proxy
-    // list for everything, or per-scheme lists with SOCKS in `fallback_proxies` — not
+    // Chromium's `num_proxies_specified == 1` guard picks the *encoding* (one proxy
+    // list for everything, or per-scheme lists with SOCKS in `fallback_proxies`), not
     // the outcome. A second configured child therefore keeps its own scheme and leaves
     // the rest on SOCKS, rather than sending them Direct.
     #[test]
@@ -1135,7 +1109,7 @@ mod tests {
     }
 
     // "If an http proxy is configured, but an https proxy is not, then the http proxy is
-    // also used for https" — the `mode` key's own description, stated apart from
+    // also used for https": the `mode` key's own description, stated apart from
     // `use-same-proxy`. `ftp` is the control: the schema gives it no such rule, and a fix
     // that reached for `Scheme::All` instead would carry `ftp` along unnoticed.
     #[test]
@@ -1176,14 +1150,12 @@ mod tests {
                 "{scheme} should fall back to the shared proxy"
             );
         }
-        // "Written to `Scheme::All` rather than to `Scheme::Http`" is what `endpoint_for`'s
-        // attribution comment reasons from, and the loop above cannot see it: an `Http` entry
-        // holding the same endpoint answers identically through every scheme, so this
-        // assertion is the only thing that would see the http child written to its own key as
-        // well. `per_scheme` is a
-        // public field, so the duplicate reaches anyone who renders the configuration instead
-        // of resolving through it, and it puts the map at odds with the prose that decides
-        // where a malformed `http.host` is attributed.
+        // The shared HTTP child belongs only in `Scheme::All`, which also determines
+        // attribution for a malformed `http.host`. The resolution loop cannot detect a
+        // duplicate `Scheme::Http` entry holding the same endpoint because every scheme
+        // resolves identically. This assertion checks the keys directly: `per_scheme` is
+        // public, so configuration renderers can observe the duplicate even when resolution
+        // is unaffected.
         let ProxyMode::Manual { per_scheme, .. } = &mode else {
             panic!("{mode:?}");
         };
@@ -1250,17 +1222,15 @@ mod tests {
         };
         let mode = mode_from_settings(&settings).unwrap();
         let bypass = mode.bypass().expect("manual mode has bypass rules");
-        // A range outside the implicit set, because a range inside it holds nothing here:
-        // all of `127.0.0.0/8` is `is_loopback`, so `127.0.0.1` bypasses whether the CIDR
-        // entry parsed or not and the assertion would pass either way. `localhost` and
-        // `::1` stay in the list as the shape a real `ignore-hosts` has — what they cover
-        // is held by name in `tests/bypass.rs`, not here.
+        // `localhost` and `::1` stay in the list as the shape a real `ignore-hosts` has;
+        // GLib has no implicit set, so they are what sends loopback direct, and what they
+        // cover is held in `ignore_hosts_carries_no_implicit_bypass`.
         assert!(bypass.matches_authority("10.1.2.3"));
         assert!(!bypass.matches_authority("11.1.2.3"));
         assert!(bypass.matches_authority("api.corp.example"));
         // The domain itself, which reading `*.` as "subdomains only" denies. GLib strips it
         // and stores `corp.example` as a plain name (`gsimpleproxyresolver.c:227`), then
-        // matches it with `offset == 0` permitted (`:311`) — so on GNOME the three
+        // matches it with `offset == 0` permitted (`:311`), so on GNOME the three
         // spellings `corp.example`, `.corp.example` and `*.corp.example` are one rule
         // covering the domain and everything under it. `*.` narrowing to the subdomains is
         // the majority reading, not this one.
@@ -1276,9 +1246,9 @@ mod tests {
     /// `g_strchomp` (`:183`), the trailing end only, so a leading space stays in the name
     /// and kills the rule the same way.
     ///
-    /// This test is the only thing holding either shape. Read through the majority dialect
-    /// instead, `foo*.corp.example` bypasses `foo1.corp.example` and ` lead.example` bypasses
-    /// `lead.example` — both destinations GNOME sends to the proxy, reported as direct.
+    /// No other test checks either shape. Read through the majority dialect instead,
+    /// `foo*.corp.example` bypasses `foo1.corp.example` and ` lead.example` bypasses
+    /// `lead.example`: both destinations GNOME sends to the proxy, reported as direct.
     /// Refused rather than stored, so the entry is visible in `rejected` instead of sitting
     /// in the list looking live.
     ///
@@ -1322,7 +1292,7 @@ mod tests {
         assert!(!bypass.matches_authority("lead.example"));
 
         // What survives: the tail is chomped, and the `.` prefix is the same rule as the
-        // bare name — domain and subdomains alike.
+        // bare name: domain and subdomains alike.
         assert!(bypass.matches_authority("trail.example"));
         assert!(bypass.matches_authority("api.trail.example"));
         assert!(bypass.matches_authority("dot.example"));
@@ -1346,8 +1316,138 @@ mod tests {
         );
     }
 
+    /// Rows GLib 2.80's own `g_simple_proxy_resolver_lookup` answered, with a default proxy
+    /// and these `ignore_hosts`: every one went to the proxy there, and each is an entry
+    /// the majority reading would store as a live rule, so read that way, the crate reports
+    /// direct for traffic GNOME proxies. Each entry is refused instead, visible in
+    /// `rejected`. The empty first element is GLib's matcher stopping at a name of length
+    /// zero, which takes the live-looking `example.com` after it down too.
+    #[test]
+    #[cfg(feature = "resolve")]
+    fn ignore_hosts_entries_glib_never_matches_are_refused() {
+        let rows: &[(&[&str], &str)] = &[
+            (&["", "example.com"], "http://example.com/"),
+            (&["*.", "example.com"], "http://example.com/"),
+            (&["192.168.1.5/24"], "http://192.168.1.77/"),
+            (&["010.0.0.0/8"], "http://10.1.2.3/"),
+            (&["[2001:db8::1]"], "http://[2001:db8::1]/"),
+            (&["example.com."], "http://example.com/"),
+            (&["日本.example"], "http://日本.example/"),
+            (&["example.com\u{a0}"], "http://example.com/"),
+            (&["192.168.1"], "http://192.168.0.1/"),
+            (&["010.0.0.1"], "http://10.0.0.1/"),
+            (&["example.com\u{0b}"], "http://example.com/"),
+            (&["<local>"], "http://intranet/"),
+            (&["<-loopback>", "<LOCAL>"], "http://intranet/"),
+            // On its own, so the `<local>` beside it cannot be what fills `rejected`.
+            (&["<-LOOPBACK>"], "http://localhost/"),
+        ];
+        for (list, url) in rows {
+            let settings = settings! {
+                "mode" => "manual",
+                "http.host" => "proxy.corp",
+                "http.port" => 3128,
+                "ignore-hosts" => *list,
+            };
+            let mode = mode_from_settings(&settings).unwrap();
+            assert!(
+                !mode.bypass().unwrap().rejected.is_empty(),
+                "{list:?}: a refused entry is listed, not dropped"
+            );
+            let config = crate::ProxyConfig::new(mode.clone(), Vec::new());
+            let steps = crate::resolve(&config, &url::Url::parse(url).unwrap()).unwrap();
+            assert_ne!(steps, vec![crate::ProxyStep::Direct], "{list:?} {url}");
+        }
+        // A mapped mask is kept as GLib keeps it, an IPv6 mask, which an IPv4 destination
+        // does not meet and a mapped one does.
+        let settings = settings! {
+            "mode" => "manual",
+            "http.host" => "proxy.corp",
+            "http.port" => 3128,
+            "ignore-hosts" => &["::ffff:10.0.0.0/104"][..],
+        };
+        let config = crate::ProxyConfig::new(mode_from_settings(&settings).unwrap(), Vec::new());
+        let url = url::Url::parse("http://10.1.2.3/").unwrap();
+        assert_ne!(
+            crate::resolve(&config, &url).unwrap(),
+            vec![crate::ProxyStep::Direct]
+        );
+        let mapped = url::Url::parse("http://[::ffff:10.1.2.3]/").unwrap();
+        assert_eq!(
+            crate::resolve(&config, &mapped).unwrap(),
+            vec![crate::ProxyStep::Direct]
+        );
+
+        // And the shapes GLib does read stay live.
+        for (list, url) in [
+            (&["example.com"][..], "http://example.com/"),
+            (&["2001:db8::1"][..], "http://[2001:db8::1]/"),
+            (&["10.0.0.0/8"][..], "http://10.1.2.3/"),
+            (&["[2001:db8::1]:8080"][..], "http://[2001:db8::1]:8080/"),
+            // GLib keeps masks in a list of their own, so the name list ending does not
+            // take one down.
+            (&["", "10.0.0.0/8"][..], "http://10.1.2.3/"),
+            (&["example.com\t\r\n"][..], "http://example.com/"),
+        ] {
+            let settings = settings! {
+                "mode" => "manual",
+                "http.host" => "proxy.corp",
+                "http.port" => 3128,
+                "ignore-hosts" => list,
+            };
+            let mode = mode_from_settings(&settings).unwrap();
+            let config = crate::ProxyConfig::new(mode, Vec::new());
+            let steps = crate::resolve(&config, &url::Url::parse(url).unwrap()).unwrap();
+            assert_eq!(steps, vec![crate::ProxyStep::Direct], "{list:?} {url}");
+        }
+    }
+
+    /// GLib has no implicit bypass: `localhost` is direct on a stock desktop because the
+    /// schema's default `ignore-hosts` names it, and an empty list, or no key at all,
+    /// proxies it. An IPv4 entry does not meet an IPv4-mapped destination, because
+    /// `GInetAddressMask` compares one family only.
+    #[test]
+    fn ignore_hosts_carries_no_implicit_bypass() {
+        for list in [None, Some(&[][..]), Some(&["example.com"][..])] {
+            let mut settings = settings! {
+                "mode" => "manual",
+                "http.host" => "proxy.corp",
+                "http.port" => 3128,
+            };
+            if let Some(list) = list {
+                settings.insert(KEY_IGNORE_HOSTS, list.into_gvalue());
+            }
+            let mode = mode_from_settings(&settings).unwrap();
+            let rules = mode.bypass().unwrap();
+            assert_eq!(rules.implicit, ImplicitBypass::Empty, "{list:?}");
+            for destination in ["localhost", "127.0.0.1", "[::1]", "169.254.169.254"] {
+                assert!(
+                    !rules.matches_authority(destination),
+                    "{list:?} {destination}"
+                );
+            }
+        }
+
+        let settings = settings! {
+            "mode" => "manual",
+            "http.host" => "proxy.corp",
+            "http.port" => 3128,
+            "ignore-hosts" => &["localhost", "127.0.0.0/8", "::1"][..],
+        };
+        let mode = mode_from_settings(&settings).unwrap();
+        let rules = mode.bypass().unwrap();
+        for destination in ["localhost", "127.0.0.1", "127.0.0.2", "[::1]"] {
+            assert!(rules.matches_authority(destination), "{destination}");
+        }
+        assert!(!rules.matches_authority("[::ffff:127.0.0.1]"));
+        assert!(!rules.matches_authority("169.254.169.254"));
+        // `ignore_host` compares the name as written, so a trailing dot is another name.
+        assert!(!rules.strip_trailing_dot);
+        assert!(!rules.matches_authority("localhost."));
+    }
+
     /// GLib asks its own matcher about the port the destination wrote, and about 0 when it
-    /// wrote none — `G_URI_FLAGS_NONE` at `gsimpleproxyresolver.c:341`, with the default
+    /// wrote none: `G_URI_FLAGS_NONE` at `gsimpleproxyresolver.c:341`, with the default
     /// port filled only under `G_URI_FLAGS_SCHEME_NORMALIZE` (`guri.c:1006`). This is the
     /// reader's half of that; `resolve`'s half is
     /// `a_bypass_list_that_wants_an_explicit_port_does_not_get_a_default_one`.
@@ -1362,7 +1462,7 @@ mod tests {
         let mode = mode_from_settings(&settings).unwrap();
         assert!(mode.bypass().unwrap().require_explicit_port);
 
-        // Not a property of every rule set this crate builds — the flag names GNOME and
+        // Not a property of every rule set this crate builds: the flag names GNOME and
         // only GNOME, so a Windows list of the same shape must not carry it.
         assert!(!parse::proxy_override("intranet.corp:80").require_explicit_port);
         assert!(!parse::no_proxy("intranet.corp:80").require_explicit_port);
@@ -1446,10 +1546,45 @@ mod tests {
         let mode = mode_from_settings(&settings).unwrap();
         let auth = mode.endpoint_for(Scheme::Http).unwrap().auth.clone();
         assert_eq!(auth.as_ref().unwrap().password(), Some("hunter2"));
+        assert_eq!(
+            auth.as_ref().unwrap().password_state(),
+            PasswordState::Present
+        );
         assert!(
             !format!("{mode:?}").contains("hunter2"),
             "a password must never reach a Debug rendering"
         );
+    }
+
+    // The live reader leaves `authentication-password` out of the map, so a password the
+    // store may hold is `NotRead`; a key it did read and found empty is `Absent`.
+    #[test]
+    fn a_missing_password_says_whether_it_was_read() {
+        let state = |settings: &GnomeSettings| {
+            mode_from_settings(settings)
+                .unwrap()
+                .endpoint_for(Scheme::Http)
+                .unwrap()
+                .auth
+                .as_ref()
+                .unwrap()
+                .password_state()
+        };
+        let unread = settings! {
+            "mode" => "manual",
+            "http.host" => "proxy.corp",
+            "http.use-authentication" => true,
+            "http.authentication-user" => "alice",
+        };
+        assert_eq!(state(&unread), PasswordState::NotRead);
+        let empty = settings! {
+            "mode" => "manual",
+            "http.host" => "proxy.corp",
+            "http.use-authentication" => true,
+            "http.authentication-user" => "alice",
+            "http.authentication-password" => "",
+        };
+        assert_eq!(state(&empty), PasswordState::Absent);
     }
 
     #[test]
@@ -1463,9 +1598,9 @@ mod tests {
 
     #[test]
     fn an_explicit_mode_none_is_configured_direct() {
-        // Either spelling of "somebody wrote it" reaches here identically: the user's own
-        // dconf layer, or an administrator's profile that `gnome::read_key` detected by
-        // the key's default differing from the compiled schema's.
+        // Each way a key can be explicitly set reaches here identically: the user's own
+        // dconf layer, or an administrator's profile that `gnome::read_key` detected by the
+        // key's default differing from the compiled schema's.
         let mut settings = settings! { "mode" => "none" };
         settings.mark_written("mode");
         assert_eq!(
@@ -1487,7 +1622,7 @@ mod tests {
     #[test]
     fn a_proxy_nobody_marked_as_written_is_still_configured() {
         // The value itself carries the decision, so this holds even if `read_key` never
-        // noticed who set it — a proxy is real and must not be dropped.
+        // noticed who set it; a proxy is real and must not be dropped.
         let settings = settings! { "mode" => "manual", "http.host" => "proxy.corp" };
         let mode = configured_mode(&settings)
             .unwrap()
@@ -1513,12 +1648,12 @@ mod tests {
         assert!(mode.endpoint_for(Scheme::Https).unwrap().auth.is_none());
 
         // That row only shows an `http.` key not reaching the `https` child, which is
-        // `child_key`'s prefixing and would hold with no guard in `endpoint_for` at all. The
-        // case the name promises is the other one: the keys spelled for a child that has
-        // none. No machine produces this map — `gnome.rs` reads them off the `http` child
-        // alone, and `read_key` drops what the schema does not declare — so the guard here is
-        // what makes the mapper answer the same way read on its own terms, without standing
-        // on how its only caller happens to fill the map today.
+        // `child_key`'s prefixing and would hold with no guard in `endpoint_for` at all.
+        // The case the name promises is the other one: the keys spelled for a child that
+        // has none. No machine produces this map: `gnome.rs` reads them off the `http`
+        // child alone, and `read_key` drops what the schema does not declare, so the guard
+        // here is what makes the mapper answer the same way read on its own terms, without
+        // standing on how its only caller happens to fill the map today.
         let spelled_for_another_child = settings! {
             "mode" => "manual",
             "use-same-proxy" => false,

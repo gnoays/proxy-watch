@@ -1,0 +1,4 @@
+# `cargo xtask` splits the rendered notice on LF; a CRLF checkout of the template defeats it.
+bindings/about.hbs text eol=lf
+# Kept byte for byte as the upstream repositories hold them.
+bindings/licenses/** -text

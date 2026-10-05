@@ -1,0 +1,70 @@
+name: ios simulator
+
+# Dispatch only, one job. `CI`'s `mobile` job type-checks the iOS backend; this runs it.
+# The unit tests and `tests/ios_watch.rs` are built for `aarch64-apple-ios-sim` and run
+# inside a booted simulator with `simctl spawn`, which needs no app bundle.
+#
+# Deliberately not on `push` or `pull_request`: macOS minutes are the expensive ones,
+# and nothing here gates a merge. Do not rename this file on a branch: `workflow_dispatch`
+# resolves by path on the default branch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios-sim:
+    name: cargo test (ios simulator)
+    runs-on: macos-latest
+    # A bound on what one dispatch can bill: a cold build, a simulator boot and two test
+    # binaries fit well inside it.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build the test binaries
+        run: |
+          set -euo pipefail
+          cargo test --target aarch64-apple-ios-sim --lib --test ios_watch --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' \
+            > "$RUNNER_TEMP/binaries"
+          cat "$RUNNER_TEMP/binaries"
+          test "$(wc -l < "$RUNNER_TEMP/binaries")" -eq 2
+
+      - name: Boot a simulator
+        run: |
+          set -euo pipefail
+          udid=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices | to_entries[] | select(.key | contains("iOS")) | .value[] | select(.name | startswith("iPhone"))][0].udid')
+          test -n "$udid" && test "$udid" != null
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid"
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+
+      # The harness's own summary is the verdict rather than `simctl spawn`'s exit status:
+      # a binary killed by a signal prints none, and that is the failure a malformed block
+      # produces.
+      - name: Run the tests in the simulator
+        run: |
+          set -euo pipefail
+          while read -r bin; do
+            echo "::group::$bin"
+            xcrun simctl spawn "$UDID" "$bin" --test-threads=1 2>&1 | tee "$RUNNER_TEMP/out"
+            echo "::endgroup::"
+            grep -q '^test result: ok\.' "$RUNNER_TEMP/out"
+          done < "$RUNNER_TEMP/binaries"

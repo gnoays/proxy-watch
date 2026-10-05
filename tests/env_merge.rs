@@ -40,8 +40,8 @@ fn http_authority(mode: &ProxyMode) -> Option<String> {
 }
 
 /// Mutation: drop the "nothing was set" early return, so an unset environment is folded in
-/// anyway. It still does not reach `effective` under either rank — `is_configured` is what
-/// keeps it from winning, not this return — but `sources` grows an `Env` entry standing for
+/// anyway. It still does not reach `effective` under either rank (`is_configured` is what
+/// keeps it from winning, not this return) but `sources` grows an `Env` entry standing for
 /// nothing that was set and nothing that was dropped.
 #[test]
 fn an_unset_environment_changes_nothing() {
@@ -65,7 +65,7 @@ fn an_unset_environment_changes_nothing() {
 }
 
 /// Mutation: replace the `insert(0, ..)` that puts the winner at the front with a `push`.
-/// Swapping the two `EnvPrecedence` variants fails here too, but not only here — the
+/// Swapping the two `EnvPrecedence` variants fails here too, but not only here: the
 /// `AfterSystem` controls below catch that one as well.
 #[test]
 fn precedence_decides_which_side_answers() {
@@ -128,8 +128,8 @@ fn a_degraded_read_stays_degraded_through_the_merge() {
 /// Mutation: drop the `captured_at` correction, leaving the OS snapshot's stamp (or the
 /// merge's own `SystemTime::now()`).
 ///
-/// `assert_eq!` on two `ProxyConfig`s cannot see this — `PartialEq` skips `captured_at` by
-/// design — so this control has to read the field.
+/// `assert_eq!` on two `ProxyConfig`s cannot see this (`PartialEq` skips `captured_at` by
+/// design) so this control has to read the field.
 #[test]
 fn the_merged_snapshot_is_as_fresh_as_its_stalest_half() {
     let env = env(&[("http_proxy", "http://env.corp:3128")]);
@@ -148,7 +148,7 @@ fn the_merged_snapshot_is_as_fresh_as_its_stalest_half() {
     assert_eq!(merged.captured_at, env.captured_at());
 }
 
-/// Mutation: add the KDE special case this crate rejects — "if the OS snapshot already
+/// Mutation: add the KDE special case this crate rejects, "if the OS snapshot already
 /// speaks for the environment, leave the process variables out". A `ProxyType = 4`
 /// `kioslaverc` that resolves to `Direct` would then swallow an explicit `http_proxy`.
 ///
@@ -178,7 +178,7 @@ fn a_kde_environment_source_does_not_stand_in_for_the_process_environment() {
 
 /// Mutation: guard the merge with `ProxyEnv::is_empty` instead of
 /// `ProxyEnv::is_configured`. `no_proxy` alone leaves `per_scheme` and `rejected` empty, so
-/// `is_empty` calls it unset and the source never enters — the OS proxy keeps applying and
+/// `is_empty` calls it unset and the source never enters: the OS proxy keeps applying and
 /// the bypass the user wrote is silently gone.
 ///
 /// Chromium's `proxy_config_service_linux.cc` takes the opposite reading and says why:
@@ -209,10 +209,10 @@ fn a_no_proxy_only_environment_is_a_configuration() {
 }
 
 /// Mutation: let a malformed-only environment take the rank it asked for. `is_empty` is
-/// `false` for it — a value *was* set — so a guard written on that predicate hands it
+/// `false` for it (a value *was* set) so a guard written on that predicate hands it
 /// `effective`, where the dropped scheme sits as `ProxyEntry::Unusable` and every http
 /// request fails outright. A typo in `http_proxy` would take a working OS proxy down with
-/// it — the same consequence the test below spells out from a `Direct` starting point.
+/// it, the same consequence the test below spells out from a `Direct` starting point.
 #[test]
 fn a_malformed_only_environment_is_recorded_but_never_wins() {
     let e = env(&[("http_proxy", "not a host with spaces")]);
@@ -244,12 +244,12 @@ fn a_malformed_only_environment_is_recorded_but_never_wins() {
     );
 }
 
-/// The same environment with no OS source to lose to. Widening the winning branch to
-/// `if wins || self.effective.is_direct()` reads safe — a snapshot already answering
-/// `Direct` has nothing to lose by letting the environment through — and is not: the
-/// environment replaces `Direct` with a `Manual` whose only entry is unusable, and every
-/// http request fails where it would otherwise go direct. (Dropping the recording branch outright
-/// fails here too, but the two controls above catch that one first.)
+/// The same environment with no OS source to lose to. Widening the winning branch to `if
+/// wins || self.effective.is_direct()` reads safe (a snapshot already answering `Direct`
+/// has nothing to lose by letting the environment through) and is not: the environment
+/// replaces `Direct` with a `Manual` whose only entry is unusable, and every http request
+/// fails where it would otherwise go direct. (Dropping the recording branch outright fails
+/// here too, but the two controls above catch that one first.)
 #[test]
 fn a_malformed_only_environment_is_recorded_even_with_nothing_to_lose_to() {
     let merged = ProxyConfig::direct().with_env(
@@ -262,7 +262,7 @@ fn a_malformed_only_environment_is_recorded_even_with_nothing_to_lose_to() {
 
 /// A `no_proxy` whose every entry was dropped configures nothing and rejects something, so
 /// it takes the recording branch too. Mutation: write the skip condition on
-/// `ProxyEnv::rejected` alone — the scheme-variable list — and this environment vanishes,
+/// `ProxyEnv::rejected` alone (the scheme-variable list) and this environment vanishes,
 /// `no_proxy` drops included.
 #[test]
 fn a_no_proxy_whose_entries_were_all_dropped_is_still_recorded() {
@@ -284,7 +284,7 @@ fn a_no_proxy_whose_entries_were_all_dropped_is_still_recorded() {
     let recorded = merged.source(ProxyConfigSource::Env).expect("env source");
     // And what it records is the *label*, not the drop. `to_mode` answers `Direct` for a
     // snapshot holding nothing but a `no_proxy`, and `Direct` has nowhere to keep an
-    // exclusion list — so unlike the malformed-scheme half of this shape, the text of the
+    // exclusion list, so unlike the malformed-scheme half of this shape, the text of the
     // drop does not survive the merge. Mutation: send this env down `to_mode`'s `Manual`
     // branch (`if self.is_empty() && self.bypass.rejected.is_empty()`) so the bypass list
     // rides along; the `with_env` doc claims exactly one of these two halves is readable
@@ -301,11 +301,12 @@ fn a_no_proxy_whose_entries_were_all_dropped_is_still_recorded() {
 
 /// Mutation: write `AfterSystem`'s test as `self.sources.is_empty()` alone. Every snapshot
 /// this crate builds has `Direct` as its `effective` when `sources` is empty, so the whole
-/// rest of the file agrees with the narrower predicate — including
+/// rest of the file agrees with the narrower predicate, including
 /// `after_system_still_answers_when_no_os_source_exists`, whose `ProxyConfig::direct()` is
 /// `Direct` too. What the narrower predicate loses is the caller who resolved their own
 /// configuration and handed it over with no provenance behind it: they asked for the OS to
-/// outrank the environment, and the only OS value they had is the one that gets overwritten.
+/// outrank the environment, and the only OS value they had is the one that gets
+/// overwritten.
 #[test]
 fn after_system_does_not_overwrite_a_resolved_mode_with_no_source_behind_it() {
     let chosen = ProxyConfig::new(manual("chosen.corp:9090"), Vec::new());
@@ -318,16 +319,16 @@ fn after_system_does_not_overwrite_a_resolved_mode_with_no_source_behind_it() {
         http_authority(&merged.effective).as_deref(),
         Some("chosen.corp:9090")
     );
-    // Ranked below, not dropped — the same treatment every other losing source gets.
+    // Ranked below, not dropped, the same treatment every other losing source gets.
     assert!(merged.source(ProxyConfigSource::Env).is_some());
 }
 
 /// The other half of the same predicate. Mutation: keep only `self.effective.is_direct()`
 /// and drop the `self.sources.iter().all(..)` conjunct beside it. Nothing else in the tree
 /// sees it: every control with an OS source gives that source a proxy, so none of them ever
-/// holds a snapshot that is sourced *and* `Direct` — which is exactly what Windows reports
-/// for `ProxyEnable = 0`. Under the mutation an explicit "proxy off" would lose to
-/// `http_proxy` at the rank that asked to come second, which is the promise
+/// holds a snapshot that is sourced *and* `Direct`, which is what Windows reports for
+/// `ProxyEnable = 0`. Under the mutation an explicit "proxy off" would lose to `http_proxy`
+/// at the rank that asked to come second, which is the promise
 /// [`EnvPrecedence::AfterSystem`] makes about Windows in so many words.
 ///
 /// That promise is about the rank and not about the call: the environment still lands in
@@ -347,8 +348,9 @@ fn an_os_source_that_answered_direct_still_outranks_the_environment() {
     assert_eq!(merged.sources[0].0, ProxyConfigSource::Registry);
     assert!(merged.source(ProxyConfigSource::Env).is_some());
 
-    // And from the other side, so that `BeforeSystem` cannot quietly become conditional on
-    // there being an OS source to outrank. Mutation: `BeforeSystem => !self.sources.is_empty()`.
+    // And from the other side, so that `BeforeSystem` cannot become conditional on there
+    // being an OS source to outrank without failing this test. Mutation:
+    // `BeforeSystem => !self.sources.is_empty()`.
     let merged = ProxyConfig::direct().with_env(
         &env(&[("http_proxy", "http://env.corp:3128")]),
         EnvPrecedence::BeforeSystem,
@@ -359,16 +361,16 @@ fn an_os_source_that_answered_direct_still_outranks_the_environment() {
     );
 }
 
-/// The last piece of the same predicate, and the one that was wrong. Mutation: write the
-/// first conjunct as `self.sources.is_empty()`, the shape it had until this control.
+/// The last piece of the same predicate. Mutation: write the first conjunct as
+/// `self.sources.is_empty()`.
 ///
 /// `sources` is not "the OS settings". The second shape in [`ProxyConfig::with_env`]'s docs
-/// puts an `Env` entry there for an environment that specified nothing — a record, kept so a
-/// drop is not silent, and documented as unable to reach `effective` so that a typo cannot
-/// mask the OS. Under the narrower predicate it masked something else: the next fold, which
-/// found a non-empty `sources` and lost to the merge's own bookkeeping. Testing the label
-/// instead is safe because no OS reader ever writes `Env` — KDE's `ProxyType = 4` is
-/// [`ProxyConfigSource::KioslavercEnv`], split off for exactly this reason.
+/// puts an `Env` entry there for an environment that specified nothing (a record, kept so
+/// a drop is not silent, and documented as unable to reach `effective` so that a typo
+/// cannot mask the OS). Under the narrower predicate it masked something else: the next
+/// fold, which found a non-empty `sources` and lost to the merge's own bookkeeping. Testing
+/// the label instead is safe because no OS reader ever writes `Env`; KDE's `ProxyType = 4`
+/// is [`ProxyConfigSource::KioslavercEnv`], split off for this reason.
 #[test]
 fn a_recorded_env_that_specified_nothing_does_not_stand_in_for_an_os_source() {
     let malformed = env(&[("http_proxy", "not a host with spaces")]);
@@ -389,7 +391,7 @@ fn a_recorded_env_that_specified_nothing_does_not_stand_in_for_an_os_source() {
         "the OS said nothing, and the only entry in `sources` was this merge's own record: {:?}",
         merged.sources
     );
-    // Both folds are kept, and the winner is at the front — the record is ranked below it,
+    // Both folds are kept, and the winner is at the front; the record is ranked below it,
     // the same treatment every other losing source gets.
     assert_eq!(merged.sources.len(), 2);
     assert_eq!(merged.sources[0].0, ProxyConfigSource::Env);
@@ -427,13 +429,13 @@ fn the_winning_source_answers_for_every_scheme() {
 }
 
 /// Configured *and* dropping something, which the two predicates read in opposite directions:
-/// `is_configured` says a malformed value reads as unset, while `to_mode` mirrors a drop that
-/// names a scheme into the entry map as `Unusable`. The bypass list decides — it is a
-/// configuration — so this environment wins and the drop reaches `effective`, where http hard
-/// errors rather than falling through to the OS proxy or to direct. Mutation: give `wins` an
-/// `&& env.rejected().is_empty()`, on the reading that an environment holding a drop should
-/// never outrank a working OS proxy. It would silently proxy every `.corp.example` host the
-/// operator excluded.
+/// `is_configured` says a malformed value reads as unset, while `to_mode` mirrors a drop
+/// that names a scheme into the entry map as `Unusable`. The bypass list decides (it is a
+/// configuration) so this environment wins and the drop reaches `effective`, where http
+/// hard errors rather than falling through to the OS proxy or to direct. Mutation: give
+/// `wins` an `&& env.rejected().is_empty()`, on the reading that an environment holding a
+/// drop should never outrank a working OS proxy. It would silently proxy every
+/// `.corp.example` host the operator excluded.
 #[test]
 fn a_bypass_list_beside_a_broken_scheme_value_takes_the_rank_and_carries_the_drop() {
     let e = env(&[
@@ -472,11 +474,11 @@ fn a_bypass_list_beside_a_broken_scheme_value_takes_the_rank_and_carries_the_dro
     );
 }
 
-/// `http_proxy=` is a configuration: the variable was set, and what it says is "no proxy for
-/// http". Mutation: write `is_configured` on the entries that carry an endpoint —
-/// `per_scheme.values().any(|e| e.endpoint().is_some()) || !self.bypass.is_empty()` — and an
-/// explicitly disabled scheme stops outranking the OS, so the proxy the operator turned off
-/// answers anyway.
+/// `http_proxy=` is a configuration: the variable was set, and what it says is "no proxy
+/// for http". Mutation: write `is_configured` on the entries that carry an endpoint
+/// (`per_scheme.values().any(|e| e.endpoint().is_some()) || !self.bypass.is_empty()`), and
+/// an explicitly disabled scheme stops outranking the OS, so the proxy the operator turned
+/// off answers anyway.
 #[test]
 fn an_explicitly_disabled_scheme_is_a_configuration() {
     let e = env(&[("http_proxy", "")]);
@@ -490,7 +492,7 @@ fn an_explicitly_disabled_scheme_is_a_configuration() {
         "the disabled scheme must answer, not the OS proxy: {:?}",
         merged.effective
     );
-    // Outranked, not erased — the same guarantee the `no_proxy` case above checks.
+    // Outranked, not erased, the same guarantee the `no_proxy` case above checks.
     assert_eq!(
         http_authority(
             merged
@@ -502,14 +504,14 @@ fn an_explicitly_disabled_scheme_is_a_configuration() {
     );
 }
 
-/// And so is a scheme other than `http`. Mutation: narrow `is_configured`'s first half to the
-/// slot that happens to be set in every other control here —
-/// `per_scheme.contains_key(&Scheme::Http) || !self.bypass.is_empty()`.
+/// And so is a scheme other than `http`. Mutation: narrow `is_configured`'s first half to
+/// the slot that happens to be set in every other control here
+/// (`per_scheme.contains_key(&Scheme::Http) || !self.bypass.is_empty()`).
 ///
-/// The whole tree agreed with that narrowing: every environment folded anywhere else names
-/// `http_proxy`, so an `https_proxy` or `all_proxy` on its own — the shape
+/// Every environment folded anywhere else names `http_proxy`, so only this test sees that
+/// narrowing: under it an `https_proxy` or `all_proxy` on its own (the shape
 /// [`ProxyConfig::with_env`]'s docs give `all_proxy` a job in, covering the schemes the
-/// environment did not name — read as unset and lost the rank it asked for.
+/// environment did not name) reads as unset and loses the rank it asked for.
 #[test]
 fn a_scheme_other_than_http_is_a_configuration_too() {
     let e = env(&[("https_proxy", "http://env.corp:3128")]);
@@ -530,11 +532,11 @@ fn a_scheme_other_than_http_is_a_configuration_too() {
 }
 
 /// Two folds are two entries under one label, and `source` promises the first.
-/// `a_recorded_env_that_specified_nothing_does_not_stand_in_for_an_os_source` builds the same
-/// two-entry snapshot but reads `sources[0]` directly; reading one back through `source` is this
-/// test's part. Mutation: `source` searching `.iter().rev()`, which answers with the older
-/// environment — the one that lost the front — for every caller reading a double-folded
-/// snapshot back.
+/// `a_recorded_env_that_specified_nothing_does_not_stand_in_for_an_os_source` builds the
+/// same two-entry snapshot but reads `sources[0]` directly; reading one back through
+/// `source` is this test's part. Mutation: `source` searching `.iter().rev()`, which
+/// answers with the older environment (the one that lost the front) for every caller
+/// reading a double-folded snapshot back.
 #[test]
 fn a_second_configured_fold_takes_the_front_from_the_first() {
     let merged = os("os.corp:8080")

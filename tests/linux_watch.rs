@@ -1,21 +1,21 @@
 //! Linux watch backend integration tests for the KDE (`kioslaverc`) backend.
 //!
-//! These drive the **real** backend — a real inotify watch, a real GLib main loop when
-//! the `linux-gnome` feature is on — but never the real user's configuration: the whole
+//! These drive the **real** backend (a real inotify watch, a real GLib main loop when
+//! the `linux-gnome` feature is on), but never the real user's configuration: the whole
 //! fixture lives under a private `XDG_CONFIG_HOME` in the temporary directory.
 //!
 //! ```text
 //! cargo test -- --test-threads=1
 //! ```
 //!
-//! That flag is worth passing — a watcher is a set of threads whose timing assertions
-//! read better when nothing else is running — but it is not what keeps these tests
+//! That flag is worth passing (a watcher is a set of threads whose timing assertions
+//! read better when nothing else is running), but it is not what keeps these tests
 //! correct. [`ENV_LOCK`] is: the process environment is global, and so is the one
 //! `kioslaverc` every test rewrites.
 //!
-//! The KDE half needs no desktop environment at all — it is a file and a file watch —
-//! which is exactly why it is the part that can be tested in CI. The GNOME half needs a
-//! session bus, so it is exercised separately in `gsettings_watch.rs`.
+//! The KDE half needs no desktop environment at all (it is a file and a file watch), which
+//! is why it is the part that can be tested in CI. The GNOME half needs a session bus, so
+//! it is exercised separately in `gsettings_watch.rs`.
 #![cfg(all(target_os = "linux", feature = "linux-kde"))]
 
 mod support;
@@ -34,9 +34,9 @@ use support::{Next, expect_config, next, nothing_within};
 /// A proxy address no real machine uses.
 const TEST_PROXY: &str = "http://127.0.0.1:18080";
 
-/// The variable the `ProxyType = 4` test indirects through. Deliberately *not* one of
-/// the conventional names: KDE stores the variable's name, and picking an unusual one is
-/// what proves the indirection is real.
+/// The variable the `ProxyType = 4` test indirects through. *Not* one of the conventional
+/// names: KDE stores the variable's name, and picking an unusual one is what proves the
+/// indirection is real.
 const INDIRECT_VAR: &str = "PROXY_WATCH_TEST_PROXY";
 
 /// The value that variable holds.
@@ -64,8 +64,8 @@ fn subscription_emits_the_current_configuration() {
     );
 }
 
-/// Rewriting `kioslaverc` reaches the stream — with no desktop environment
-/// running — exactly once, and inside the crate's 1 second detection-latency SLO.
+/// Rewriting `kioslaverc` reaches the stream (with no desktop environment
+/// running) exactly once, and inside the crate's 1 second detection-latency SLO.
 #[test]
 fn a_kioslaverc_change_is_emitted_exactly_once() {
     let (config_file, _lock) = fixture();
@@ -119,18 +119,18 @@ fn a_kioslaverc_change_is_emitted_exactly_once() {
 /// The same SLO under the condition [`WatchOptions::debounce`]'s own documentation makes
 /// the promise for: a storm of changes that outlasts the window.
 ///
-/// That documentation says the window is fixed — it "opens on the first change, and further
+/// That documentation says the window is fixed: it "opens on the first change, and further
 /// changes inside it are folded into the same emission rather than pushing it back. The
 /// wait after a change is therefore bounded by this value however long the storm of changes
-/// behind it lasts." This test is the only thing holding that. Reopening the deadline on
-/// every wake — the sliding window that sentence exists to deny — leaves the test above
-/// green as well, because a single change never reopens anything. What it costs is a
-/// machine whose settings are being rewritten in a loop: the watcher reports nothing at all
-/// until the rewriting stops.
+/// behind it lasts." No other test checks that bound. Reopening the deadline on every wake,
+/// the sliding window that sentence exists to deny, leaves the test above green as well,
+/// because a single change never reopens anything. What it costs is a machine whose
+/// settings are being rewritten in a loop: the watcher reports nothing at all until the
+/// rewriting stops.
 ///
 /// That loop is the ordinary case rather than an exotic one. A KDE session writing several
 /// proxy keys renames `kioslaverc` into place once per key, and the GNOME side is worse
-/// still — every key of `org.gnome.system.proxy` fires its own `changed`, which is the
+/// still: every key of `org.gnome.system.proxy` fires its own `changed`, which is the
 /// reason the coordinator debounces at all.
 #[test]
 fn a_storm_that_outlasts_the_window_is_still_reported_inside_it() {
@@ -196,7 +196,7 @@ fn rewriting_an_identical_file_does_not_emit() {
             .is_direct()
     );
 
-    // A real write — inotify does fire — that leaves the meaning byte for byte identical.
+    // A real write (inotify does fire) that leaves the meaning byte for byte identical.
     write_kioslaverc(&config_file, &manual);
     assert!(
         nothing_within(&mut watcher, Duration::from_millis(700)),
@@ -217,17 +217,17 @@ fn rewriting_an_identical_file_does_not_emit() {
 /// `notify` 8.2.0 turns the `DELETE_SELF` into an `EventKind::Remove` carrying the
 /// directory's own path and then drops the watch without re-arming. Nothing will ever
 /// arrive again, so a `health()` that still answered `has_live_notifications = true` would
-/// be exactly the "watching and not watching" lie this crate must never tell.
+/// be the "watching and not watching" lie this crate must never tell.
 ///
 /// This is the one assertion in the suite that could not have been made against
 /// `sys::linux::watcher::Watch::health` alone: `ProxyWatcher::health` folds a **frozen**
 /// construction-time snapshot with `Shared`'s runtime half, and only the latter is re-read.
 /// A flag consulted only by the backend's own `health()` would therefore be invisible to
-/// the public API — hence the coordinator carrying the loss into `Shared::degrade`, and
+/// the public API, hence the coordinator carrying the loss into `Shared::degrade`, and
 /// hence this test going through `ProxyWatcher` rather than any internal type.
 ///
 /// The fixture directory is process-wide (see [`fixture`]), so it is put back before this
-/// returns — including on the failure paths, which is what the guard is for.
+/// returns, including on the failure paths, which is what the guard is for.
 #[test]
 fn losing_the_watched_directory_is_reported_rather_than_hidden() {
     let (config_file, _lock) = fixture();
@@ -268,13 +268,12 @@ fn losing_the_watched_directory_is_reported_rather_than_hidden() {
 
     // Whether `has_live_notifications` also drops depends on whether a *second* native
     // route survives, so this half is not asserted blind. With `linux-gnome` compiled in
-    // and `gsettings-desktop-schemas` installed — the case on the machine this was
-    // written on — the GSettings subscription is genuinely still live, and reporting
-    // `true` is right rather than a leftover lie. Asserting `false` unconditionally fails
-    // on exactly that machine, which is what the `cfg` below is for.
+    // and `gsettings-desktop-schemas` installed, the GSettings subscription is still live,
+    // and reporting `true` is right rather than a leftover lie. Asserting `false`
+    // unconditionally fails on that machine, which is what the `cfg` below is for.
     //
     // Without it, the two halves of the loss report are made by one coordinator pass but
-    // in order — `Shared::degrade` first, `mark_no_live_notifications` second — so the
+    // in order (`Shared::degrade` first, `mark_no_live_notifications` second), so the
     // loop above can return in the moment between them. Wait for the second half rather
     // than reading it once.
     #[cfg(not(feature = "linux-gnome"))]
@@ -309,7 +308,7 @@ impl Drop for RestoreFixture {
     }
 }
 
-/// A rename-over-the-target save — how KDE's `KConfig` actually writes — is noticed.
+/// A rename-over-the-target save (how KDE's `KConfig` writes) is noticed.
 ///
 /// This is the case a naive file (rather than directory) watch would miss: the rename
 /// replaces the inode the watch was attached to.
@@ -388,7 +387,7 @@ fn a_config_script_is_reported_as_pac() {
 }
 
 /// Polling is additive. It must not turn an unchanged configuration into a stream of
-/// duplicate snapshots — the equality skip still applies to a polled read.
+/// duplicate snapshots; the equality skip still applies to a polled read.
 #[test]
 fn polling_does_not_emit_duplicates() {
     let (config_file, _lock) = fixture();
@@ -409,7 +408,8 @@ fn polling_does_not_emit_duplicates() {
         "polling an unchanged configuration must not emit"
     );
 
-    // The polling thread is nevertheless alive and still feeding the coordinator.
+    // A change still arrives. inotify carries this one; that the timer itself delivers is
+    // `the_poll_timer_delivers_a_change_no_watch_can_see`.
     write_kioslaverc(
         &config_file,
         &format!("ProxyType=1\nhttpProxy={TEST_PROXY}\n"),
@@ -426,7 +426,7 @@ fn polling_does_not_emit_duplicates() {
 /// Every other test here rewrites `kioslaverc` inside the watched directory, so inotify
 /// carries the change and a `poll_now` that did nothing whatsoever would still look like
 /// it had worked. This one puts the file out of the watch's reach: `kioslaverc` is a
-/// symlink into a sibling directory — how a dotfile manager usually arranges it — and the
+/// symlink into a sibling directory (how a dotfile manager usually arranges it) and the
 /// write lands on the link's target. [`kde::read_store`](../src/sys/linux/kde.rs) follows
 /// the link, because `std::fs::read_to_string` does, while `kde::watch` watches the
 /// *directory*; nothing inside it changed, so there is no event to deliver. The second
@@ -435,7 +435,7 @@ fn polling_does_not_emit_duplicates() {
 ///
 /// The symlink is removed on the way out rather than by a guard: every test here writes
 /// its own `kioslaverc` through [`write_kioslaverc`] before asserting anything, and that
-/// renames over whatever is at the path, symlink included — so a panic that skips the
+/// renames over whatever is at the path, symlink included, so a panic that skips the
 /// cleanup cannot reach another test.
 #[test]
 fn poll_now_re_reads_a_change_no_watch_can_see() {
@@ -457,7 +457,7 @@ fn poll_now_re_reads_a_change_no_watch_can_see() {
         "the link is followed on read, so the first snapshot is the target's"
     );
 
-    // The constructor can queue one re-read of its own — the GSettings subscription goes
+    // The constructor can queue one re-read of its own: the GSettings subscription goes
     // live after the initial read, and `Watch::spawn` asks for a re-read to cover that
     // window. It has to be spent *before* the write, or it would read the new content and
     // the emission below would be its work rather than `poll_now`'s.
@@ -489,12 +489,52 @@ fn poll_now_re_reads_a_change_no_watch_can_see() {
     let _ = std::fs::remove_dir_all(&out_of_tree);
 }
 
+/// The poll timer re-reads on its own. The change lands out of the watch's reach, as in
+/// [`poll_now_re_reads_a_change_no_watch_can_see`], and nothing calls `poll_now`, so only
+/// the timer can deliver it: a timer that never started or never wakes the coordinator
+/// fails here, where every in-tree write would pass through inotify regardless.
+#[test]
+fn the_poll_timer_delivers_a_change_no_watch_can_see() {
+    let (config_file, _lock) = fixture();
+
+    let out_of_tree = config_file.with_file_name("out-of-the-watch-polled");
+    std::fs::create_dir_all(&out_of_tree).expect("creating the out-of-tree directory");
+    let target = out_of_tree.join("kioslaverc");
+    write_kioslaverc(&target, "ProxyType=0\n");
+    let _ = std::fs::remove_file(&config_file);
+    std::os::unix::fs::symlink(&target, &config_file).expect("linking kioslaverc out of tree");
+
+    let options = WatchOptions::new().with_poll_interval(Some(Duration::from_millis(200)));
+    let mut watcher = ProxyWatcher::with_options(options).expect("watcher");
+    assert_eq!(
+        expect_config(&mut watcher, Duration::from_secs(1)).effective,
+        ProxyMode::Direct
+    );
+    // Spend the constructor's own re-read and a few polls of the unchanged file.
+    assert!(nothing_within(&mut watcher, Duration::from_millis(600)));
+
+    write_kioslaverc(&target, &format!("ProxyType=1\nhttpProxy={TEST_PROXY}\n"));
+    let changed = expect_config(&mut watcher, Duration::from_secs(2));
+    assert_eq!(
+        changed
+            .effective
+            .endpoint_for(Scheme::Http)
+            .expect("endpoint")
+            .authority(),
+        "127.0.0.1:18080"
+    );
+
+    drop(watcher);
+    let _ = std::fs::remove_file(&config_file);
+    let _ = std::fs::remove_dir_all(&out_of_tree);
+}
+
 /// Inside a Flatpak that cannot reach dconf, the backend must
 /// **never** answer `Direct`.
 ///
-/// The test only runs when `/.flatpak-info` actually exists, because that is the only
-/// thing the detection looks at. To exercise it deliberately — the file has to be at the
-/// filesystem root, so this needs privileges:
+/// The test only runs when `/.flatpak-info` exists, because that is the only thing the
+/// detection looks at. To make it run, the file has to be at the filesystem root, so this
+/// needs privileges:
 ///
 /// ```text
 /// sudo tee /.flatpak-info >/dev/null <<'EOF'
@@ -513,37 +553,36 @@ fn poll_now_re_reads_a_change_no_watch_can_see() {
 ///
 /// ## This is an allow-listed skip, permanently
 ///
-/// `support::skip_or_fail` exists precisely to stop a self-skip from going unnoticed in
-/// CI, but that function is deliberately **not** used here. `/.flatpak-info` living at
-/// the filesystem root is not something a process can arrange for itself — it requires
-/// either running inside a real Flatpak sandbox (`bwrap`/`flatpak run` writes it as part
-/// of setting the sandbox up) or root privileges to plant a fake one, and no job in this
-/// repository's CI does either: the Linux CI containers are plain, unsandboxed
-/// containers. Routing this test's skip through `skip_or_fail` would therefore make
-/// every Linux CI run fail on a precondition CI has no way to satisfy — the opposite of
-/// that function's purpose, which is to surface preconditions CI *should* be able to
-/// meet but currently doesn't.
+/// `support::skip_or_fail` exists to stop a self-skip from going unnoticed in CI, but that
+/// function is **not** used here. `/.flatpak-info` living at the filesystem root is not
+/// something a process can arrange for itself: it requires either running inside a real
+/// Flatpak sandbox (`bwrap`/`flatpak run` writes it as part of setting the sandbox up) or
+/// root privileges to plant a fake one, and no job in this repository's CI does either: the
+/// Linux CI containers are plain, unsandboxed containers. Routing this test's skip through
+/// `skip_or_fail` would therefore make every Linux CI run fail on a precondition CI has no
+/// way to satisfy, the opposite of that function's purpose, which is to surface
+/// preconditions CI *should* be able to meet but currently doesn't.
 ///
 /// This comment is that skip's allow-list entry (see `skip_or_fail`'s doc in
 /// `tests/support/mod.rs` for the two-bucket policy it is part of): the gap is
 /// permanent by construction, not an oversight, and this paragraph is where that claim
 /// can be checked and, if it ever stops being true, updated.
 ///
-/// To actually run this test in CI it would need a job that builds a container image
-/// with a real (or convincingly faked) Flatpak sandbox — e.g. one that installs
-/// `flatpak`/`bubblewrap` and invokes the test binary via `flatpak run` (or
-/// `bwrap --ro-bind / / --bind <fake-info> /.flatpak-info ...`) so that `/.flatpak-info`
-/// is genuinely present at container root before `cargo test` starts, with and without
-/// `ca.desrt.dconf=talk` in its `[Session Bus Policy]` section to exercise both branches
-/// below. No such job exists today; the manual recipe above is the only way to exercise
-/// this test, on a Linux machine where the tester can `sudo`.
+/// To run this test in CI it would need a job that builds a container image with a real (or
+/// convincingly faked) Flatpak sandbox: e.g. one that installs `flatpak`/`bubblewrap` and
+/// invokes the test binary via `flatpak run` (or `bwrap --ro-bind / / --bind <fake-info>
+/// /.flatpak-info ...`) so that `/.flatpak-info` is present at container root before `cargo
+/// test` starts, with and without `ca.desrt.dconf=talk` in its `[Session Bus Policy]`
+/// section to exercise both branches below. No such job exists today; the manual recipe
+/// above is the only way to exercise this test, on a Linux machine where the tester can
+/// `sudo`.
 #[test]
 fn a_flatpak_without_dconf_access_never_reports_direct() {
     let (config_file, _lock) = fixture();
     write_kioslaverc(&config_file, "ProxyType=0\n");
 
     let Ok(info) = std::fs::read_to_string("/.flatpak-info") else {
-        // Allow-listed, not `skip_or_fail`-gated — see the doc above.
+        // Allow-listed, not `skip_or_fail`-gated; see the doc above.
         eprintln!("SKIPPED: not running inside a Flatpak (no /.flatpak-info)");
         return;
     };
@@ -583,22 +622,22 @@ fn a_flatpak_without_dconf_access_never_reports_direct() {
     }
 }
 
-/// Whether `/.flatpak-info` grants dconf the way GLib does — exact `talk` under
+/// Whether `/.flatpak-info` grants dconf the way GLib does: exact `talk` under
 /// `[Session Bus Policy]`.
 ///
-/// A deliberate re-implementation of the crate-private
-/// `sys::linux::sandbox::has_dconf_access`, which is what makes it an oracle rather than a
-/// restatement of the answer under test. Every rule below is one that function attributes
-/// to GKeyFile in its own comments, so a divergence here is a bug in *this* file: the test
-/// above picks which assertion to make from this answer, and an oracle that is more
-/// forgiving than the crate accuses correct code of being wrong.
+/// A re-implementation of the crate-private `sys::linux::sandbox::has_dconf_access`, which
+/// is what makes it an oracle rather than a restatement of the answer under test. Every
+/// rule below is one that function attributes to GKeyFile in its own comments, so a
+/// divergence here is a bug in *this* file: the test above picks which assertion to make
+/// from this answer, and an oracle that is more forgiving than the crate accuses correct
+/// code of being wrong.
 ///
 /// Do not widen it to "any `ca.desrt.dconf` line", do not treat `;` as a comment (it opens
 /// a key), do not trim a group name, do not accept a key name carrying a bracket, do not
 /// return early on the first match (GKeyFile is last-wins for a duplicate key), and do not
 /// soften the `return false`s into `continue`: a file GKeyFile refuses to load is a file
 /// that denies access. The trimming is ASCII-only throughout, because `g_ascii_isspace` is
-/// what GKeyFile asks — trimming a non-breaking space would accept a key GLib does not.
+/// what GKeyFile asks; trimming a non-breaking space would accept a key GLib does not.
 fn flatpak_grants_dconf_talk(flatpak_info: &str) -> bool {
     let mut in_section = false;
     let mut in_group = false;
@@ -665,10 +704,10 @@ fn dropping_watchers_does_not_leak_threads() {
     }
     let elapsed = started.elapsed();
 
-    // `Watch::drop` joins every thread, so one that refused to stop would hang here
-    // rather than accumulate. The 30 second polling interval is the point: a polling
-    // thread that waited out its interval instead of noticing the closed channel would
-    // blow this budget on the very first iteration.
+    // `Watch::drop` joins every thread, so one that refused to stop would hang here rather
+    // than accumulate. The polling interval is 30 seconds, so a polling thread that waited
+    // out its interval instead of noticing the closed channel would blow this budget on the
+    // very first iteration.
     assert!(
         elapsed < Duration::from_secs(10),
         "30 create/drop cycles took {elapsed:?}; a watcher thread is not stopping promptly"
@@ -676,34 +715,30 @@ fn dropping_watchers_does_not_leak_threads() {
 }
 
 // --------------------------------------------------------------------------------
-// `Watch::health` must be able to tell "no `kioslaverc` directory
-// exists at all" apart from "a `kioslaverc` watch was attempted and genuinely failed" —
-// see `KdeWatch`'s doc comment in `src/sys/linux/watcher.rs` for the type that now keeps
-// them apart. These two tests exercise both halves end to end, through the real
-// `ProxyWatcher::health()` public API rather than `KdeWatch` directly, since `KdeWatch`
-// itself is a private implementation detail deliberately kept out of the public
-// `WatchHealth` type.
+// `Watch::health` must be able to tell "no `kioslaverc` directory exists at all" apart from
+// "a `kioslaverc` watch was attempted and failed"; see `KdeWatch`'s doc comment in
+// `src/sys/linux/watcher.rs` for the type that now keeps them apart. These two tests
+// exercise both halves end to end, through the real `ProxyWatcher::health()` public API
+// rather than `KdeWatch` directly, since `KdeWatch` itself is a private implementation
+// detail kept out of the public `WatchHealth` type.
 // --------------------------------------------------------------------------------
 
-/// A daemon started with `HOME` unset and no `/etc/xdg` entry — i.e. no candidate
-/// `kioslaverc` directory exists anywhere `kde::config_search_dirs` looks — must not be
+/// A daemon started with `HOME` unset and no `/etc/xdg` entry (i.e. no candidate
+/// `kioslaverc` directory exists anywhere `kde::config_search_dirs` looks) must not be
 /// reported as degraded. [`proxy_watch::WatchHealth::degraded`]'s own doc is explicit that
 /// "degraded" means a route that *should* exist could not be established, which excludes
-/// "the source was never configured" — the same principle that keeps an absent GNOME proxy
-/// schema out of `degraded` as `GnomeWatch::NoSchema` (which is the *same* fix, applied to
-/// the GNOME side once it turned out that side had the identical bug: see
-/// `tests/gnome_schema_absent.rs`). Before
-/// this fix, `Watch::health` folded both of `kde::watch`'s `Ok(None)` outcomes — "no
-/// directory at all" and "tried and failed" (fail-softened by `kde_watch_fail_soft`) —
-/// into the same `self.kde.is_none()` check, so this exact scenario wrongly showed up as
-/// degraded.
+/// "the source was never configured", the same principle that keeps an absent GNOME proxy
+/// schema out of `degraded` as `GnomeWatch::NoSchema` (see `tests/gnome_schema_absent.rs`).
+/// `Watch::health` must keep `kde::watch`'s two `Ok(None)` outcomes, "no directory at
+/// all" and "tried and failed" (fail-softened by `kde_watch_fail_soft`), apart: folded
+/// into one `self.kde.is_none()` check, this exact scenario shows up as degraded.
 #[test]
 fn a_missing_configuration_directory_is_not_reported_as_degraded() {
     let base = std::env::temp_dir().join(format!(
         "proxy-watch-tests-{}-no-config-dir",
         std::process::id()
     ));
-    // Deliberately never created on disk: that absence is the whole point of the test.
+    // Never created on disk: the test checks that absence.
     let missing_config_home = base.join("xdg-config-home");
     let missing_config_dirs_entry = base.join("xdg-config-dirs-entry");
 
@@ -723,12 +758,12 @@ fn a_missing_configuration_directory_is_not_reported_as_degraded() {
         ),
         // Realistic worst case: this is the platform's leading store, so if the fix ever
         // regressed and this were reported degraded, the leading-store safety valve would
-        // have every reason to also fail construction outright — it does not, because
+        // have every reason to also fail construction outright; it does not, because
         // there is nothing here that ever counted as a failed *attempt*.
         ("XDG_CURRENT_DESKTOP", "KDE"),
     ]);
 
-    // Allow-listed plain skip, not `skip_or_fail` — see that function's "CI-side skipping
+    // Allow-listed plain skip, not `skip_or_fail`; see that function's "CI-side skipping
     // is allow-list only" policy. `KdeWatch::NoDirectory` needs *no* candidate directory
     // to exist, and in a build without `linux-gnome` that leaves `desktop_config` with no
     // store at all, which is `Error::Unsupported` by design. The premise is therefore
@@ -736,16 +771,22 @@ fn a_missing_configuration_directory_is_not_reported_as_degraded() {
     // anything CI could install; seeding a `kioslaverc` the way `gnome_schema_absent.rs`
     // does would destroy the very "no candidate directory" condition under test. CI runs
     // this suite with `--all-features`, where the case is exercised for real.
-    //
-    // This was found by running the suite in the GLib-free configuration the README
-    // describes (`default-features = false` plus `linux-kde`), where both this test and
-    // `a_genuine_inotify_failure_is_reported_as_degraded` had been failing — a pre-existing
-    // gap, unrelated to whatever change is under test today.
     #[cfg(not(feature = "linux-gnome"))]
     if matches!(ProxyWatcher::new(), Err(proxy_watch::Error::Unsupported)) {
         eprintln!(
             "SKIPPED: with no candidate directory and no `linux-gnome`, there is no store \
              at all and construction is `Unsupported` by design"
+        );
+        return;
+    }
+    // With `linux-gnome` the store left is GSettings, which exists only where the
+    // `org.gnome.system.proxy` schema is installed. CI installs it, so its absence is a
+    // `skip_or_fail` precondition rather than an allow-listed skip.
+    #[cfg(feature = "linux-gnome")]
+    if matches!(ProxyWatcher::new(), Err(proxy_watch::Error::Unsupported)) {
+        support::skip_or_fail(
+            "with no candidate directory, the only store left is GSettings, and the \
+             org.gnome.system.proxy schema is not installed (gsettings-desktop-schemas)",
         );
         return;
     }
@@ -764,30 +805,30 @@ fn a_missing_configuration_directory_is_not_reported_as_degraded() {
 }
 
 /// The other half: a **genuine** inotify establishment failure must still be reported as
-/// degraded, proving the fix above narrows what counts as degraded rather than quietly
-/// swallowing this case too — which would reintroduce exactly the silent degradation
+/// degraded: the test above narrows what counts as degraded, and must not do it by omitting
+/// the degraded report for this case too, which would reintroduce the silent degradation
 /// this crate's fail-soft read policy exists to rule out.
 ///
 /// A directory with execute-but-not-read permission forces a real `Err` out of
 /// `notify::Watcher::watch` deterministically, rather than exhausting the systemwide
-/// `fs.inotify.max_user_watches` limit — and does so *without* also breaking the ordinary
-/// config read, which needs to keep succeeding (as "no `kioslaverc` here", `Reading::Absent`)
-/// for this to isolate the inotify failure alone:
+/// `fs.inotify.max_user_watches` limit, and does so *without* also breaking the ordinary
+/// config read, which needs to keep succeeding (as "no `kioslaverc` here",
+/// `Reading::Absent`) for this to isolate the inotify failure alone:
 ///
 /// * `kde::read_kioslaverc`'s `read_to_string(dir.join("kioslaverc"))` only needs execute
-///   (search) permission on `dir` to look up that one named entry — since it does not
+///   (search) permission on `dir` to look up that one named entry; since it does not
 ///   exist, this resolves to a plain `NotFound`, not `PermissionDenied`, and is treated as
 ///   "no store here" rather than propagated as an `Error::Io` (a real but *unrelated* gap
 ///   this test must route around, not the one it exists to exercise).
 /// * `kde::watch_targets`'s `Path::is_dir()` only needs execute permission on the *parent*
 ///   directory to stat `dir` itself, so it still picks `dir` as a watch target.
 /// * `inotify_add_watch` (`notify`'s `watch()`), per its own man page, needs *read*
-///   access to the target — which `0o100` (execute only) deliberately withholds — and is
+///   access to the target, which `0o100` (execute only) withholds, and is
 ///   refused.
 ///
 /// `poll_interval` is set so [`Watch::armed`](../src/sys/linux/watcher.rs)'s leading-store
 /// safety valve does not turn this failure into a hard construction
-/// error instead — that path is real and intentional, just not what this test is about;
+/// error instead. That path is real and intentional, just not what this test is about;
 /// see `kde_watch_fail_soft`'s doc for the distinction.
 #[test]
 fn a_genuine_inotify_failure_is_reported_as_degraded() {
@@ -800,11 +841,11 @@ fn a_genuine_inotify_failure_is_reported_as_degraded() {
         .expect("denying read access to the fixture directory");
 
     if std::fs::read_dir(&config_home).is_ok() {
-        // Allow-listed, not `skip_or_fail`-gated — same policy as
+        // Allow-listed, not `skip_or_fail`-gated, same policy as
         // `a_flatpak_without_dconf_access_never_reports_direct` above: running with
         // enough privilege to ignore `0o100`'s missing read bit (root, some CI
-        // containers) bypasses the very permission check this test relies on — the same
-        // one `inotify_add_watch` itself is expected to enforce below — and there is
+        // containers) bypasses the very permission check this test relies on (the same
+        // one `inotify_add_watch` itself is expected to enforce below) and there is
         // nothing this process can do about its own privilege level.
         eprintln!("SKIPPED: running with enough privilege to ignore 0o100 (root?)");
         let _ = std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o700));
@@ -818,7 +859,7 @@ fn a_genuine_inotify_failure_is_reported_as_degraded() {
     // reasoning that a working fallback candidate might mask the failure on the denied
     // directory. It does not, and it cannot: `watch_targets` returns the holder *and every
     // existing directory ahead of it*, the denied directory is ahead of this one, and
-    // `kde::watch` registers them in order and fails on the first — so the `EACCES` this
+    // `kde::watch` registers them in order and fails on the first, so the `EACCES` this
     // test is about is still what comes back.
     //
     // What a nonexistent path does cost is the KDE-only build, which is then left with no
@@ -872,8 +913,8 @@ fn a_genuine_inotify_failure_is_reported_as_degraded() {
 /// The third case, between the two above: the *leading* candidate directory does not exist
 /// but a lower one does, so a watch is established and yet the layer that would win the
 /// cascade cannot be watched. `kde::watch` seeds [`LossFlags::lost`] from `watch_targets`'
-/// second return for exactly this, and this test is the only thing holding the seed —
-/// replacing it with a plain `false` leaves every other test in the Linux tree green.
+/// second return for this, and no other test checks the seed: replacing it with a plain
+/// `false` leaves every other test in the Linux tree green.
 ///
 /// The two tests above cannot reach it and are not near-misses for it.
 /// `a_missing_configuration_directory_is_not_reported_as_degraded` deletes *every*
@@ -884,10 +925,10 @@ fn a_genuine_inotify_failure_is_reported_as_degraded() {
 /// lower one distinguishes the seed from `false`.
 ///
 /// That machine is ordinary rather than contrived: a user who has never opened a KDE
-/// settings dialog has no `~/.config` entry for it, and `/etc/xdg/kioslaverc` — shipped and
-/// site-editable — is the layer their proxy comes from. Under the mutation `health()` calls
+/// settings dialog has no `~/.config` entry for it, and `/etc/xdg/kioslaverc`, shipped and
+/// site-editable, is the layer their proxy comes from. Under the mutation `health()` calls
 /// that route healthy, so a caller who trusts it skips
-/// [`WatchOptions::poll_interval`](proxy_watch::WatchOptions::poll_interval) — and the
+/// [`WatchOptions::poll_interval`](proxy_watch::WatchOptions::poll_interval), and the
 /// `~/.config/kioslaverc` KDE writes the first time the user changes anything wins the
 /// cascade, is read on the next re-read, and no event ever asks for one.
 #[test]
@@ -899,7 +940,7 @@ fn a_missing_leading_directory_is_reported_as_degraded() {
     // Never created: this is the leading candidate, and its absence is the test.
     let missing_config_home = base.join("xdg-config-home");
     // The surviving lower layer, seeded so that the KDE-only build has a store to read and
-    // so that the directory is watchable — `kept` must not be empty or `watch_targets`
+    // so that the directory is watchable: `kept` must not be empty or `watch_targets`
     // withdraws the report by its own `!kept.is_empty()` clause.
     let system = base.join("xdg-config-dirs-entry");
     std::fs::create_dir_all(&system).expect("creating the system layer");
@@ -921,7 +962,7 @@ fn a_missing_leading_directory_is_reported_as_degraded() {
         ("XDG_CURRENT_DESKTOP", "KDE"),
     ]);
 
-    let watcher = ProxyWatcher::new().expect("a watchable lower layer exists");
+    let mut watcher = ProxyWatcher::new().expect("a watchable lower layer exists");
     let health = watcher.health();
     assert!(
         health.degraded.contains(&ProxyConfigSource::Kioslaverc),
@@ -929,11 +970,20 @@ fn a_missing_leading_directory_is_reported_as_degraded() {
         health.degraded
     );
     // Still live: the lower layer can deliver, so this is a degraded route rather than a
-    // dark one — the distinction the seed rides on, and the reason it is not simply
+    // dark one, the distinction the seed rides on, and the reason it is not simply
     // `mark_no_live_notifications`.
     assert!(
         health.has_live_notifications,
         "the surviving layer still delivers"
+    );
+    // The degradation was reported at construction, so a re-read that finds nothing new
+    // publishes nothing: neither the configuration nor the routes' liveness moved.
+    let _ = expect_config(&mut watcher, Duration::from_secs(1));
+    assert!(nothing_within(&mut watcher, Duration::from_millis(600)));
+    watcher.poll_now();
+    assert!(
+        nothing_within(&mut watcher, Duration::from_millis(600)),
+        "a re-read that changes nothing must not republish the degradation"
     );
     drop(watcher);
 
@@ -945,9 +995,9 @@ fn a_missing_leading_directory_is_reported_as_degraded() {
 /// `Shared::fail`'s own unit test proves the stream side turns an error into an event.
 /// What it cannot prove is that anything ever hands it one: `watcher::publish` is the only
 /// caller, and only when `read_config` fails on a watcher that is already running. So the
-/// failure here is a real one — a directory where `kioslaverc` should be, which
+/// failure here is a real one: a directory where `kioslaverc` should be, which
 /// `kde::read_kioslaverc` reads with `read_to_string` and cannot forgive the way it
-/// forgives `NotFound` — arriving through the same inotify watch every other test uses.
+/// forgives `NotFound`, arriving through the same inotify watch every other test uses.
 ///
 /// It brings its own `XDG_CONFIG_HOME` rather than taking the shared [`fixture`] one,
 /// because what it puts at that path is a directory, and every fixture test seeds the same
@@ -1033,29 +1083,29 @@ fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 /// Temporarily overrides one or more environment variables for the duration of a single
-/// serialized test, restoring each to its prior value — present or absent — on drop.
+/// serialized test, restoring each to its prior value, present or absent, on drop.
 ///
 /// # Safety invariant this relies on
 ///
 /// Like [`fixture`]'s own `set_var` calls, mutating the process environment is only sound
 /// while no other thread can be reading it concurrently. [`ENV_LOCK`], held for this
-/// guard's whole lifetime, is what establishes that, and not `--test-threads=1`: a flag
-/// nobody has to pass is not an invariant. Every caller sets its overrides before
-/// constructing the [`ProxyWatcher`] under test — i.e. before any backend thread that
-/// reads these variables exists — and drops that watcher (and therefore every thread it
-/// owns) before this guard itself is dropped and restores them, by declaring the guard
-/// first: Rust drops local variables in the reverse of declaration order, so the watcher
-/// (declared after) is always gone before the environment is put back.
+/// guard's whole lifetime, is what establishes that, and not `--test-threads=1`: an
+/// optional flag is not an invariant. Every caller sets its overrides before constructing
+/// the [`ProxyWatcher`] under test (i.e. before any backend thread that reads these
+/// variables exists) and drops that watcher (and therefore every thread it owns) before
+/// this guard itself is dropped and restores them, by declaring the guard first: Rust drops
+/// local variables in the reverse of declaration order, so the watcher (declared after) is
+/// always gone before the environment is put back.
 struct EnvVarGuard {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    /// Declared last so `Drop for EnvVarGuard` — which runs before any field is dropped —
+    /// Declared last so `Drop for EnvVarGuard`, which runs before any field is dropped,
     /// completes the restore while the lock is still held.
     _lock: MutexGuard<'static, ()>,
 }
 
 impl EnvVarGuard {
     /// Set each `(name, value)` pair, remembering what was there before so [`Drop`] can
-    /// restore it exactly — including "was absent" (`XDG_CONFIG_DIRS`, most likely, on an
+    /// restore it exactly, including "was absent" (`XDG_CONFIG_DIRS`, most likely, on an
     /// ordinary developer machine).
     fn set(vars: &[(&'static str, &str)]) -> Self {
         let _lock = env_lock();
@@ -1091,8 +1141,8 @@ impl Drop for EnvVarGuard {
 /// `kioslaverc` inside it, together with the [`ENV_LOCK`] guard the caller must hold for
 /// the rest of the test.
 ///
-/// The environment is process global, so the `set_var` half happens exactly once — before
-/// any watcher exists and therefore before any other thread can be reading it — and every
+/// The environment is process global, so the `set_var` half happens exactly once (before
+/// any watcher exists and therefore before any other thread can be reading it) and every
 /// later call only returns the path. The `kioslaverc` under that path is not once-only,
 /// though: every test rewrites it, which is what the returned guard is for.
 fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
@@ -1105,7 +1155,7 @@ fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
         // SAFETY: `set_var` is unsound only when another thread is concurrently touching
         // the environment. This runs inside `Once::call_once` at the start of the first
         // test, with `ENV_LOCK` held so no other test is running at all, and before any
-        // `ProxyWatcher` — and hence any backend thread that reads `XDG_CONFIG_HOME` —
+        // `ProxyWatcher`, and hence any backend thread that reads `XDG_CONFIG_HOME`,
         // has been created.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &directory);
@@ -1114,7 +1164,7 @@ fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
             // registers. Left unset, the platform default `/etc/xdg` supplies a second
             // one on most real Linux systems (it does under WSL Ubuntu), which both lets
             // a host `/etc/xdg/kioslaverc` contribute to every reading here and keeps
-            // `LossFlags::is_live` true after this fixture's directory is removed — see
+            // `LossFlags::is_live` true after this fixture's directory is removed; see
             // `losing_the_watched_directory_is_reported_rather_than_hidden`.
             std::env::set_var("XDG_CONFIG_DIRS", directory.join("absent"));
             std::env::set_var(INDIRECT_VAR, INDIRECT_VALUE);
@@ -1136,48 +1186,47 @@ fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
 /// the file exists, matches the directory watch's filter, and has no `[Proxy Settings]`
 /// section at all.
 ///
-/// `a_kioslaverc_change_is_emitted_exactly_once` lands in exactly that window under CI load:
-/// the coordinator in [`watcher::coordinate`](../src/sys/linux/watcher.rs) opens a *fixed*
-/// 200 ms debounce window on the first inotify event and reads whatever is on disk when
-/// that window closes, not when the writer is done.
-/// [`kde::watch`](../src/sys/linux/kde.rs) has no debounce of its own — it sends `()` on
-/// the shared trigger for every relevant event, and that one coordinator debounces all
-/// four sources (GSettings, this inotify watch, the poll timer, `poll_now`) together. A reader unlucky enough to land between the
-/// truncate and the write sees an empty `[Proxy Settings]` section, which
+/// `a_kioslaverc_change_is_emitted_exactly_once` lands in that window under CI load: the
+/// coordinator in [`watcher::coordinate`](../src/sys/linux/watcher.rs) opens a *fixed* 200
+/// ms debounce window on the first inotify event and reads whatever is on disk when that
+/// window closes, not when the writer is done. [`kde::watch`](../src/sys/linux/kde.rs) has
+/// no debounce of its own; it sends `()` on the shared trigger for every relevant event,
+/// and that one coordinator debounces all four sources (GSettings, this inotify watch, the
+/// poll timer, `poll_now`) together. A reader unlucky enough to land between the truncate
+/// and the write sees an empty `[Proxy Settings]` section, which
 /// [`kde::read_store`](../src/sys/linux/kde.rs) short-circuits to
 /// [`Reading::Unset`](../src/sys/linux/desktop.rs) before `configured_from_kioslaverc` is
-/// reached at all, rather than `Configured(Direct)` — a real difference in
-/// `ProxyConfig::sources`, even
-/// though both eventually resolve to the same effective mode. That difference is enough to
-/// slip past the equality skip and be emitted as a spurious intermediate snapshot: one
-/// with no manual proxy endpoint, which is exactly the panic this test reports. A CI runner
-/// under enough scheduling pressure to stall a test thread between two syscalls for
-/// upwards of 200 ms is unusual but, empirically, not impossible.
+/// reached at all, rather than `Configured(Direct)`, a real difference in
+/// `ProxyConfig::sources`, even though both eventually resolve to the same effective mode.
+/// That difference is enough to slip past the equality skip and be emitted as a spurious
+/// intermediate snapshot: one with no manual proxy endpoint, which is the panic this test
+/// reports. A CI runner under enough scheduling pressure to stall a test thread between two
+/// syscalls for upwards of 200 ms is unusual but, empirically, not impossible.
 ///
 /// Writing to a same-directory temporary file and renaming it over `path` closes that
-/// window: `rename(2)` within one filesystem is atomic, so any reader — the debounced
-/// coordinator included — sees either the old, complete `kioslaverc` or the new, complete
+/// window: `rename(2)` within one filesystem is atomic, so any reader, the debounced
+/// coordinator included, sees either the old, complete `kioslaverc` or the new, complete
 /// one, never a half-written one. This mirrors what real `KConfig` does (see
 /// `src/sys/linux/kde.rs`'s module doc), so it is not merely a workaround for the test.
 ///
-/// The alternative — leaving the write unatomic and having the test loop past snapshots
-/// that do not look like the expected one — is not open here: this test's whole
-/// point is to prove a *single* logical change produces exactly one emission, and a loop
-/// that swallows "doesn't match yet" snapshots would quietly swallow a real double-emission
-/// bug the same way, defeating the assertion it exists to make.
+/// The alternative (leaving the write unatomic and having the test loop past snapshots
+/// that do not look like the expected one) is not open here: this test's whole point is to
+/// prove a *single* logical change produces exactly one emission, and a loop that swallows
+/// "doesn't match yet" snapshots would also leave a real double-emission bug undetected,
+/// defeating the assertion it exists to make.
 ///
 /// ## What this narrows
 ///
-/// Every test in this file writes `kioslaverc` through this function, and — with
-/// `a_rename_over_the_file_is_noticed` already dedicated to the rename path — no test in
+/// Every test in this file writes `kioslaverc` through this function, and, with
+/// `a_rename_over_the_file_is_noticed` already dedicated to the rename path, no test in
 /// this suite rewrites `kioslaverc` in place (same inode, plain truncate-then-write) while
 /// a watcher is live. That is judged acceptable rather than overlooked: `kde::watch`
-/// watches the *directory* and matches
-/// purely on file name (see `is_interesting` in `src/sys/linux/kde.rs`), so it does not
-/// distinguish an in-place `Modify` from a `Remove`+`Create` pair produced by a rename —
-/// there is no separate code path this loss leaves unexercised. What genuinely goes
-/// unexercised is a *KDE-external* writer that truncates `kioslaverc` in place instead of
-/// renaming over it; this crate has no such writer of its own to test.
+/// watches the *directory* and matches purely on file name (see `is_interesting` in
+/// `src/sys/linux/kde.rs`), so it does not distinguish an in-place `Modify` from a
+/// `Remove`+`Create` pair produced by a rename; there is no separate code path this loss
+/// leaves unexercised. What goes unexercised is a *KDE-external* writer that truncates
+/// `kioslaverc` in place instead of renaming over it; this crate has no such writer of its
+/// own to test.
 fn write_kioslaverc(path: &PathBuf, body: &str) {
     let contents =
         format!("[$Version]\nupdate_info=kioslave.upd:kioslave\n\n[Proxy Settings][$i]\n{body}");

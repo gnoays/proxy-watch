@@ -5,71 +5,78 @@
 //!
 //! Target: Firefox/Chrome. A divergence may stand only if listed below with category:
 //! **(a)** safety · **(b)** spec fidelity · **(c)** real-world comparison rule ·
-//! **(d)** input robustness. Unlisted = bug — except for what this crate refuses to reach
-//! for at all, which is [`PacPolicy`]'s contract and documented there: the network, and the
-//! host's time zone, which is why the date/time functions answer in GMT by default where
-//! the ref reads the host's.
+//! **(d)** input robustness. Unlisted = bug, except for what this crate refuses to reach
+//! for at all, which is [`PacPolicy`]'s contract and documented there: the network, the
+//! addresses [`dns_resolve`] filters out as internal, and the host's time zone, which is why
+//! the date/time functions answer in GMT by default where the ref reads the host's. The
+//! IPv6 `*Ex` functions (`dnsResolveEx`, `isInNetEx`, `myIpAddressEx`, `sortIpAddressList`,
+//! `getClientVersion`, `isResolvableEx`) are not provided: a script that calls one throws,
+//! and the evaluation fails rather than routing.
 //! Ref: Mozilla `ascii_pac_utils.js`.
 //! (`timeRange` 2-arg does not wrap midnight here *or* in the ref; `dateRange` 2-value
 //! does wrap in both.)
 //!
-//! * **[`sh_exp_match`]** — **(a)**. No regex; only `*`/`?`, so no pattern here can cost the
+//! * **[`sh_exp_match`]**: **(a)**. No regex; only `*`/`?`, so no pattern here can cost the
 //!   exponential time a compiled one can. Quadratic time one still can, in the ref as much
 //!   as here, so the `?` route gives up and answers `false` once it has gone round
-//!   [`MAX_MATCH_STEPS`] times — a bound no call on a real URL and a real pattern comes
+//!   [`MAX_MATCH_STEPS`] times, a bound no call on a real URL and a real pattern comes
 //!   near, and the ref has none. The ref builds a `RegExp` but escapes `.` first, so `.` is
-//!   literal on both sides; it is the *other*
-//!   metacharacters (`+`, `[`, `(`, `^`, `$`, `|`) that keep regex meaning there and are
-//!   literal here. **(d)**: `*`/`?` match a line terminator too, where the ref's `.*`/`.`
-//!   stop at one (no `s` flag, so `.` excludes `\n`, `\r`, `\u{2028}`, `\u{2029}`).
-//! * **[`local_host_or_domain_is`]** — **(b)**. Requires `!host.contains('.')` before
+//!   literal on both sides; it is every *other* metacharacter (`+ ( ) [ ] { } ^ $ | \`)
+//!   that keeps regex meaning there and is literal here. **(d)**: `*`/`?` match a line
+//!   terminator too, where the ref's `.*`/`.` stop at one (no `s` flag, so `.` excludes
+//!   `\n`, `\r`, `\u{2028}`, `\u{2029}`), and `?` is one `char` here where the ref's `.` is
+//!   one UTF-16 unit, so a character outside the BMP is one `?` here and two there.
+//! * **[`local_host_or_domain_is`]**: **(b)**. Requires `!host.contains('.')` before
 //!   prefix match; ref is bare `startsWith(host + ".")`. **(c)**: case-insensitive on both
 //!   sides, like [`dns_domain_is`]; the ref compares bytes.
-//! * **[`dns_domain_is`]** — **(c)**. Case-insensitive; ref `endsWith` is case-sensitive.
+//! * **[`dns_domain_is`]**: **(c)**. Case-insensitive; ref `endsWith` is case-sensitive.
 //!   Both lack label-boundary checks (spec bug, reproduced).
-//! * **`"GMT"` / weekday/month names** — **(d)**. Trim + case-insensitive here; ref is
+//! * **`"GMT"` / weekday/month names**: **(d)**. Trim + case-insensitive here; ref is
 //!   exact. Excess args after GMT peel → `false` here; ref often ignores them.
-//! * **[`convert_addr`]** — **(b)**. Strict dotted quads; ref JS `&` coercion accepts
+//! * **[`convert_addr`]**: **(b)**. Strict dotted quads; ref JS `&` coercion accepts
 //!   `0x7f`/`1e2`/`-1`. See that fn's doc for the full list. [`is_in_net`] does *not*
 //!   inherit this: its address arguments follow the ref's own `isValidIpAddress`
 //!   grammar, zero padding and anchoring included.
-//! * **[`is_resolvable`]** — **(d)**. An address literal answers `true` without a lookup,
+//! * **[`is_resolvable`]**: **(d)**. An address literal answers `true` without a lookup,
 //!   including the IPv6 spellings [`dns_resolve`] answers `None` for. The ref is bare
 //!   `dnsResolve(host) != null`, so `[::1]` is unresolvable there. What counts as a
 //!   literal is [`dns_resolve`]'s question, not [`is_in_net`]'s: see [`literal_ipv4`].
 //!   The brackets are the only thing either binding rewrites, and only around an IPv6
-//!   address — see [`unbracket_ipv6`] for why that one is owed and nothing else is.
-//! * **Whitespace and numeric spelling** — **(d)**. The host handed to
+//!   address, see [`unbracket_ipv6`] for why that one is owed and nothing else is.
+//! * **Whitespace and numeric spelling**: **(d)**. The host handed to
 //!   [`dns_resolve`]/[`is_resolvable`] and the numbers handed to
-//!   [`date_range`]/[`time_range`] are trimmed, and a number is read as a Rust float
-//!   where the ref uses `parseInt`: `"1e2"` is 100 here and 1 there, `"15abc"` is not a
-//!   number here and is 15 there.
-//! * **Arguments the script leaves out** — **(d)**. The `pac-boa` binding reads a missing
-//!   argument as `""` (`arg_string`), so a short call is answered rather than refused. JS
-//!   never puts `""` there — an omitted parameter is `undefined` — so whatever a reference
-//!   makes of one, it is not this. [`is_plain_host_name`] is then handed a name
-//!   carrying no dot and [`dns_domain_is`] a suffix every host ends with, so `isPlainHostName()`
-//!   and `dnsDomainIs(host)` answer `true`; the rest answer `false`, `null` or `0`. A script
-//!   that omits an argument is broken either way, and what this buys it is a rule matching
-//!   every destination rather than a diagnosis. The WinHTTP engine is the OS's and answers
-//!   for itself.
-//! * **[`date_range`]/[`time_range`]** — **(d)**. Arguments are read by kind
+//!   [`date_range`]/[`time_range`] are trimmed, and a number is read as a Rust float. The
+//!   ref reads `dateRange`'s with `parseInt` (`"1e2"` is 1 there and 100 here, `"15abc"`
+//!   is 15 there and not a number here) and compares `timeRange`'s with JS number
+//!   coercion, which takes `"0x0d"` as 13 where this refuses it.
+//! * **Arguments the script leaves out**: **(d)**. The `pac-quickjs` binding reads a
+//!   missing argument as `""` (`arg_string`), so a short call is answered rather than
+//!   refused. JS never puts `""` there (an omitted parameter is `undefined`), so whatever a
+//!   reference makes of one, it is not this. [`is_plain_host_name`] is then handed a name
+//!   carrying no dot and [`dns_domain_is`] a suffix every host ends with, so
+//!   `isPlainHostName()` and `dnsDomainIs(host)` answer `true`, as do
+//!   `localHostOrDomainIs()` and `shExpMatch()` with no argument at all, which compare `""`
+//!   with `""`; the rest answer `false`, `null` or `0`. A script that omits an argument is
+//!   broken either way, and the result is a rule matching every destination rather than a
+//!   diagnosis. The WinHTTP engine is the OS's and answers for itself.
+//! * **[`date_range`]/[`time_range`]**: **(d)**. Arguments are read by kind
 //!   (day/month/year, h/m/s); the ref splits the list in half by position, so shapes it
 //!   still gives a meaning (`dateRange(1, 2, 3)`, `dateRange("JAN", 15)`) are `false` here,
 //!   as are 3 or 5 arguments to `timeRange`, where the ref throws. **(b)**: the ref builds
 //!   the upper bound by `setMonth` on 31 December, so a shorter end month overflows into
-//!   the next one — `dateRange("JAN", "FEB")` runs to 2/3 March there, and ends with
+//!   the next one; `dateRange("JAN", "FEB")` runs to 2/3 March there, and ends with
 //!   February here. **(b)**: a numeric argument between 32 and 999 is refused rather than
 //!   read as a year. The ref's rule is `parseInt(arg) < 32` for a day and *everything else*
 //!   a year, with no lower bound, where [`classify_date_part`] wants 1000 before it will
-//!   call a number a year. Only a range can tell the two readings apart — a lone `99` asks
-//!   whether the current year is 99, which is `false` either way — but a range whose low end
-//!   falls in 32..=999 starts at that year there, so `dateRange(99, 2100)` covers the present
-//!   and matches nothing here. The stricter reading is deliberate: the set writes `year` as
-//!   "the ordered full year integer number. For example, 2016 (**not** 16)" and `day` as
-//!   1..=31, so 32..=999 is neither, and the ref's `< 32` is a day/year disambiguator rather
-//!   than a claim that 99 is a year. Reading it as one buys a script no year it meant — the
-//!   ref answers about the year 99 CE, not 1999 — only a range that happens to say "always".
+//!   call a number a year. Only a range can tell the two readings apart (a lone `99` asks
+//!   whether the current year is 99, which is `false` either way), but a range whose low
+//!   end falls in 32..=999 starts at that year there, so `dateRange(99, 2100)` covers the
+//!   present and matches nothing here. The stricter reading is deliberate: the set writes
+//!   `year` as "the ordered full year integer number. For example, 2016 (**not** 16)" and
+//!   `day` as 1..=31, so 32..=999 is neither, and the ref's `< 32` is a day/year
+//!   disambiguator rather than a claim that 99 is a year. Reading it as one does not select
+//!   the intended year (the ref answers about the year 99 CE, not 1999) and only produces
+//!   a range that happens to say "always".
 //!
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Proxy_servers_and_tunneling/Proxy_Auto-Configuration_PAC_file
 
@@ -79,10 +86,10 @@ use super::policy::PacPolicy;
 use super::time::{self, Civil};
 use crate::util::strip_brackets;
 
-// `isPlainHostName(host)` — true when the name carries no domain part.
+// `isPlainHostName(host)`: true when the name carries no domain part.
 //
 // A colon disqualifies as well: an IPv6 literal carries no dot but is not a name. Both
-// references say so — Firefox searches `(\.)|:`, and Chromium adds an `AssignFromIPLiteral`
+// references say so: Firefox searches `(\.)|:`, and Chromium adds an `AssignFromIPLiteral`
 // check under the comment "IPv6 literals might not contain any periods, however are not
 // considered plain host names". Without it the common `if (isPlainHostName(host)) return
 // "DIRECT";` opening sends every IPv6 destination direct.
@@ -90,13 +97,13 @@ pub(crate) fn is_plain_host_name(host: &str) -> bool {
     !host.contains('.') && !host.contains(':')
 }
 
-// `dnsDomainIs(host, domain)` — true when `host` ends with `domain`.
+// `dnsDomainIs(host, domain)`: true when `host` ends with `domain`.
 pub(crate) fn dns_domain_is(host: &str, domain: &str) -> bool {
     host.to_ascii_lowercase()
         .ends_with(&domain.to_ascii_lowercase())
 }
 
-// `localHostOrDomainIs(host, hostdom)` — an exact match, or an unqualified host name
+// `localHostOrDomainIs(host, hostdom)`: an exact match, or an unqualified host name
 // that is the first label of `hostdom`.
 pub(crate) fn local_host_or_domain_is(host: &str, hostdom: &str) -> bool {
     let host = host.to_ascii_lowercase();
@@ -104,12 +111,12 @@ pub(crate) fn local_host_or_domain_is(host: &str, hostdom: &str) -> bool {
     host == hostdom || (!host.contains('.') && hostdom.starts_with(&format!("{host}.")))
 }
 
-// `dnsDomainLevels(host)` — the number of dots in the name.
+// `dnsDomainLevels(host)`: the number of dots in the name.
 pub(crate) fn dns_domain_levels(host: &str) -> usize {
     host.matches('.').count()
 }
 
-// `shExpMatch(str, shexp)` — shell-style glob with `*` and `?`.
+// `shExpMatch(str, shexp)`: shell-style glob with `*` and `?`.
 //
 // The `*`-only case is delegated to the crate's existing `ProxyOverride` matcher so
 // that a bypass pattern and a PAC pattern cannot drift apart.
@@ -117,71 +124,60 @@ pub(crate) fn sh_exp_match(text: &str, pattern: &str) -> bool {
     if !pattern.contains('?') {
         return crate::util::glob_match(pattern, text);
     }
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    wildcard_match(&pattern, &text)
+    wildcard_match(pattern, text)
 }
 
-// How many times the loop below may go round before the answer is `false` whatever the
-// rest of the subject holds. Only a subject and a pattern whose lengths multiply past this
-// reach it: the loop is O(subject × pattern) in the worst case — 16,000 characters of `a`
-// against `"*" + "a" * 8_000 + "?b"` took 1.58 s unoptimized, quadrupling on every doubling
-// from 6.6 ms at 1,000 — and a script picks both arguments, so a megabyte of each is a few
-// statements. Nothing upstream bounds that: the wall clock stops the *caller* waiting,
-// never the thread, and one host call is one iteration to
-// [`PacPolicy::max_loop_iterations`](super::policy::PacPolicy::with_max_loop_iterations),
-// so the cap that ends a `while (true) {}` counts nothing here. The `?`-free route needs no
-// such budget — [`crate::util::glob_match`] searches each literal run in the remainder of
-// the subject and never revisits what it passed.
-//
-// Chosen an order of magnitude above what a real call can spend: an 8 KB subject against a
-// 200-character pattern is 1.6 million.
+// Bound the `?` route's worst-case O(subject × pattern) work: a PAC script controls both
+// lengths, and the caller's wall clock cannot interrupt a host function. The `?`-free
+// [`crate::util::glob_match`] route needs no budget. Set an order of magnitude above what a
+// real call spends: an 8 KB subject against a 200-character pattern is 1.6 million.
 const MAX_MATCH_STEPS: usize = 1 << 24;
 
-// Backtracking `*` / `?` matcher. Iterative, so it cannot blow the stack, and bounded by
-// [`MAX_MATCH_STEPS`], so one call cannot hold the thread it runs on for hours either.
+// Backtracking `*` / `?` matcher, iterative and bounded by [`MAX_MATCH_STEPS`].
 //
-// The `*` arm has to be tried before the literal one. A `*` in the *subject* is legal in
-// a URL, and it compares equal to a `*` in the pattern, so a literal arm placed ahead of
-// this one eats the star as an ordinary character and records no backtrack point:
-// `shExpMatch("*ab", "*?")` answered `false` that way while the `?`-free route through
-// [`crate::util::glob_match`] answered `true` for the same star. The reference has no
-// such split — it escapes everything that is not `*` or `?` and lets `RegExp` decide.
-fn wildcard_match(pattern: &[char], text: &[char]) -> bool {
+// The `*` arm is tried before the literal one: a subject may hold a `*`, which compares
+// equal to the pattern's, and a literal match there records no backtrack point, so
+// `shExpMatch("*ab", "*?")` would answer `false` where [`crate::util::glob_match`] answers
+// `true`. Walks byte offsets because a `Vec<char>` costs four bytes per character outside
+// the interpreter's memory limit.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let mut star: Option<usize> = None;
     let mut resume = 0usize;
     let mut budget = MAX_MATCH_STEPS;
-    while t < text.len() {
+    while let Some(tc) = text[t..].chars().next() {
         match budget.checked_sub(1) {
             Some(left) => budget = left,
             None => return false,
         }
-        if p < pattern.len() && pattern[p] == '*' {
+        let pc = pattern[p..].chars().next();
+        if pc == Some('*') {
             star = Some(p);
             resume = t;
             p += 1;
-        } else if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
+        } else if let Some(pc) = pc.filter(|&pc| pc == '?' || pc == tc) {
+            p += pc.len_utf8();
+            t += tc.len_utf8();
         } else if let Some(star) = star {
             p = star + 1;
-            resume += 1;
+            resume += text[resume..].chars().next().map_or(1, char::len_utf8);
             t = resume;
         } else {
             return false;
         }
     }
-    pattern[p..].iter().all(|c| *c == '*')
+    pattern[p..].chars().all(|c| c == '*')
 }
 
-// `convert_addr(ipaddr)` — a dotted quad as a **signed** 32-bit integer.
+// `convert_addr(ipaddr)`: a dotted quad as a **signed** 32-bit integer.
 //
 // The full list the module doc promises. The ref is `bytes[i] & 0xff` over `split('.')`,
 // so JS `ToInt32` coercion reads spellings that `parse::<u32>` refuses and this turns
-// into `0`: `0x7f` (hex), `1e2` (exponent), `-1` (negative — the ref's `& 0xff` makes it
-// `255`). Everything else agrees: a decimal in range, one out of range (`300 & 0xff` is
-// `44` on both sides), surrounding whitespace, and a missing component (`undefined &
+// into `0`: `0x7f` (hex), `0b11` and `0o7` (binary and octal), `1e2` (exponent), `-1`
+// (negative, the ref's `& 0xff` makes it `255`), and a component of 2^32 or more
+// (`4294967297 & 0xff` is `1`). Everything else
+// agrees: a decimal in range, one out of range below 2^32 (`300 & 0xff` is `44` on both
+// sides), surrounding whitespace, and a missing component (`undefined &
 // 0xff` is `0`, which is also what `unwrap_or(0)` gives).
 pub(crate) fn convert_addr(addr: &str) -> i32 {
     let mut out = 0u32;
@@ -189,12 +185,12 @@ pub(crate) fn convert_addr(addr: &str) -> i32 {
         let octet = part.trim().parse::<u32>().unwrap_or(0) & 0xff;
         out |= octet << (24 - 8 * index);
     }
-    // The reference's `|` chain yields an int32; reinterpreting the assembled bits is
-    // exactly that, and cannot overflow or panic.
+    // The reference's `|` chain yields an int32; reinterpreting the assembled bits yields
+    // the same result and cannot overflow or panic.
     out as i32
 }
 
-// `alert(message)` — forwarded to the `tracing` feature's `debug` level, and dropped
+// `alert(message)`: forwarded to the `tracing` feature's `debug` level, and dropped
 // entirely without it.
 pub(crate) fn alert(message: &str) {
     crate::trace::pac_alert(message);
@@ -202,7 +198,7 @@ pub(crate) fn alert(message: &str) {
 
 // The network-touching functions. Everything below consults `PacPolicy`.
 
-// `myIpAddress()` — the address the policy was told to report, else `127.0.0.1`.
+// `myIpAddress()`: the address the policy was told to report, else `127.0.0.1`.
 //
 // The crate never enumerates the machine's interfaces: doing so would leak the host's
 // position on the network to a script it does not trust.
@@ -210,7 +206,7 @@ pub(crate) fn my_ip_address(policy: &PacPolicy) -> IpAddr {
     policy.my_ip_address()
 }
 
-// The address a name already is, read the way a resolver reads one — which is neither
+// The address a name already is, read the way a resolver reads one, which is neither
 // `Ipv4Addr::from_str` nor the [`reference_ipv4`] grammar below.
 //
 // The split is deliberate in the reference, not an inconsistency: the PAC library reads
@@ -220,7 +216,7 @@ pub(crate) fn my_ip_address(policy: &PacPolicy) -> IpAddr {
 //
 // `Ipv4Addr::from_str` is neither: it refuses the padded, hex and short spellings both
 // grammars accept, leaving them to fall through to [`resolve_ipv4`] and become a *name*
-// lookup of a string that is an address — answered by whether the platform's `getaddrinfo`
+// lookup of a string that is an address, answered by whether the platform's `getaddrinfo`
 // applies `inet_aton` rules, so one script gets two answers on two operating systems.
 // `url::Host::parse` is the grammar this crate already reads destinations with.
 fn literal_ipv4(host: &str) -> Option<Ipv4Addr> {
@@ -234,7 +230,7 @@ fn literal_ipv4(host: &str) -> Option<Ipv4Addr> {
 //
 // Unwrapping at all is this crate paying for its own choice of `host` argument: [`evaluate`]
 // hands the script Gecko's bracketed spelling, so `dnsResolve(host)` arrives here as `[::1]`
-// and has to be understood. Neither reference unwraps anything — Gecko gives the string to
+// and has to be understood. Neither reference unwraps anything; Gecko gives the string to
 // its DNS service exactly as the script wrote it (`ProxyAutoConfig.cpp`, `PACResolve`), and
 // Chromium's `GetHostnameArgument` does IDN-to-punycode and no bracket handling at all
 // (`services/proxy_resolver/proxy_resolver_v8.cc`), having passed `GURL::HostNoBrackets()` in
@@ -256,7 +252,7 @@ fn unbracket_ipv6(host: &str) -> &str {
     }
 }
 
-// `dnsResolve(host)` — the first IPv4 address of `host`, or `None` for JavaScript
+// `dnsResolve(host)`: the first IPv4 address of `host`, or `None` for JavaScript
 // `null`.
 pub(crate) fn dns_resolve(host: &str, policy: &PacPolicy) -> Option<Ipv4Addr> {
     let host = unbracket_ipv6(host.trim());
@@ -270,7 +266,7 @@ pub(crate) fn dns_resolve(host: &str, policy: &PacPolicy) -> Option<Ipv4Addr> {
     resolve_ipv4(host, policy)
 }
 
-// `isResolvable(host)` — whether `dnsResolve` would answer, with one deliberate
+// `isResolvable(host)`: whether `dnsResolve` would answer, with one deliberate
 // exception.
 pub(crate) fn is_resolvable(host: &str, policy: &PacPolicy) -> bool {
     let host = unbracket_ipv6(host.trim());
@@ -281,7 +277,7 @@ pub(crate) fn is_resolvable(host: &str, policy: &PacPolicy) -> bool {
     resolve_ipv4(host, policy).is_some()
 }
 
-// `isInNet(host, pattern, mask)` — IPv4 network membership.
+// `isInNet(host, pattern, mask)`: IPv4 network membership.
 //
 // The order is the reference's: an unusable `pattern` or `mask` answers `false` before
 // `host` is looked at, so a rule that can never match cannot spend a DNS query either.
@@ -306,7 +302,7 @@ pub(crate) fn is_in_net(host: &str, pattern: &str, mask: &str, policy: &PacPolic
 // `isValidIpAddress` is `/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/` plus a `> 255`
 // check per group, and `convert_addr` then reads the groups as decimal. That accepts the
 // zero padding in `isInNet(host, "192.168.001.000", "255.255.255.000")`, which
-// `Ipv4Addr::from_str` rejects — read that way, the whole rule answers `false` for every
+// `Ipv4Addr::from_str` rejects, read that way, the whole rule answers `false` for every
 // host. The regex is anchored, so it also rejects surrounding whitespace that a `trim`
 // would let through.
 fn reference_ipv4(text: &str) -> Option<Ipv4Addr> {
@@ -325,8 +321,13 @@ fn reference_ipv4(text: &str) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(octets))
 }
 
-// Ask the system resolver, then apply the internal-address filter.
-fn resolve_ipv4(host: &str, policy: &PacPolicy) -> Option<Ipv4Addr> {
+// Ask the system resolver, then apply the internal-address filter. Inside a
+// `pac-subprocess` worker the parent answers instead, under its own policy.
+pub(super) fn resolve_ipv4(host: &str, policy: &PacPolicy) -> Option<Ipv4Addr> {
+    #[cfg(all(feature = "pac-subprocess", pac_quickjs))]
+    if let Some(answer) = super::subprocess::ask_parent(host) {
+        return answer;
+    }
     if !policy.resolve_dns() || host.is_empty() {
         return None;
     }
@@ -360,17 +361,17 @@ pub(crate) fn is_internal(address: IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_multicast()
                 // "This network", 0.0.0.0/8. RFC 1122 §3.2.1.3 reads `{0, host}` as a host
-                // on *this* network — the same claim 169.254.0.0/16 makes, and internal for
+                // on *this* network, the same claim 169.254.0.0/16 makes, and internal for
                 // the same reason. `Ipv4Addr::is_unspecified` is the `{0,0}` corner of this
                 // and would be a rule no input could tell from it.
                 || octets[0] == 0
                 // Carrier-grade NAT, 100.64.0.0/10.
                 || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-                // IETF protocol assignments, 192.0.0.0/24. Two addresses in it — the PCP
-                // and TURN anycasts — are globally reachable, and the whole block is
+                // IETF protocol assignments, 192.0.0.0/24. Two addresses in it (the PCP
+                // and TURN anycasts) are globally reachable, and the whole block is
                 // filtered anyway: over-refusing a PAC script costs it two addresses no
-                // script resolves a name to, and splitting them out costs every later
-                // reader the question of why.
+                // script resolves a name to, and handling them separately requires an
+                // explanation for later readers.
                 || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
                 // Documentation: TEST-NET-1 192.0.2.0/24, TEST-NET-2 198.51.100.0/24,
                 // TEST-NET-3 203.0.113.0/24.
@@ -540,7 +541,7 @@ pub(crate) fn time_range(args: &[String], policy: &PacPolicy) -> bool {
 
 // `hour * 3600 + minute * 60 + second` with overflow reported as `None` instead of
 // panicking (debug) or wrapping (release). `timeRange`'s arguments arrive as unbounded
-// `i64`s straight out of [`time::number`] — a PAC script can hand it a value large enough
+// `i64`s straight out of [`time::number`]; a PAC script can hand it a value large enough
 // to overflow this multiplication. `classify_date_part` bounds `DatePart::Day` and
 // `DatePart::Month` but leaves `DatePart::Year` open at the top for the same reason, which
 // is why [`checked_my`] and [`checked_ymd`] guard the same way rather than relying on
@@ -557,7 +558,7 @@ mod tests {
 
     use super::*;
 
-    // 2024-02-29T13:45:07Z — a Thursday, on a leap day.
+    // 2024-02-29T13:45:07Z: a Thursday, on a leap day.
     fn pinned() -> PacPolicy {
         PacPolicy::new().with_now(UNIX_EPOCH + Duration::from_secs(1_709_214_307))
     }
@@ -579,15 +580,15 @@ mod tests {
         assert!(!dns_domain_is("www.other.example", ".corp.example"));
         // The module doc's "spec bug, reproduced". `dnsDomainIs` is a bare `endsWith` in
         // Mozilla's `ascii_pac_utils.js` and in Chromium alike, so a domain written
-        // without a leading dot matches across the label boundary. Pinned deliberately:
+        // without a leading dot matches across the label boundary. Pinned:
         // adding the boundary check would be a silent divergence from both references
         // rather than a fix, and every assert above still passes with it added.
         assert!(dns_domain_is("evilcorp.example", "corp.example"));
         assert!(dns_domain_is("corp.example", "corp.example"));
         // The bug reproduced above is the *boundary*, not the anchor: `endsWith` still has
-        // to end the name. Read as containment, a host somebody else named would answer to
-        // the corporate domain — and the usual `if (dnsDomainIs(host, ".corp.example"))
-        // return "DIRECT";` then sends that traffic straight out.
+        // to end the name. Read as containment, a host outside the corporate domain would
+        // answer to the corporate domain, and the usual `if (dnsDomainIs(host,
+        // ".corp.example")) return "DIRECT";` then sends that traffic straight out.
         assert!(!dns_domain_is(
             "www.corp.example.attacker.test",
             ".corp.example"
@@ -603,7 +604,7 @@ mod tests {
             "www.corp.example"
         ));
         assert!(!local_host_or_domain_is("ww", "www.corp.example"));
-        // Case folds on both sides — the module doc's **(c)**. Mozilla's
+        // Case folds on both sides, the module doc's **(c)**. Mozilla's
         // `ascii_pac_utils.js` compares bytes
         // (`host == hostdom || hostdom.lastIndexOf(host + ".", 0) == 0`), so these
         // two are `false` in Firefox and Chrome alike.
@@ -639,22 +640,27 @@ mod tests {
         assert!(sh_exp_match("", "*"));
         assert!(!sh_exp_match("", "?"));
         assert!(sh_exp_match("a.b.c", "a.*.?"));
-        // Both wildcards cross a line terminator — the module doc's **(d)**. The ref's
+        // Both wildcards cross a line terminator, the module doc's **(d)**. The ref's
         // `new RegExp("^" + pattern + "$")` carries no `s` flag, so its `.*`/`.` stop at
         // one and both of these are `false` there.
         assert!(sh_exp_match("a\nb", "a*b"));
         assert!(sh_exp_match("a\nb", "a?b"));
         // A `*` left over after the subject runs out still matches, because it stands for
         // nothing as readily as for something. The loop only advances while the subject
-        // does, so what is left of the pattern is judged after it — asking whether the
+        // does, so what is left of the pattern is judged after it, asking whether the
         // pattern was consumed instead would refuse every trailing star.
         assert!(sh_exp_match("ab", "a?*"));
         assert!(sh_exp_match("ab", "a?**"));
         assert!(!sh_exp_match("ab", "a?*c"));
+        // `?` is one character, not one byte, and a `*` that backtracks steps over whole
+        // characters: the matcher walks byte offsets, so a step of one byte lands inside `é`.
+        assert!(sh_exp_match("é", "?"));
+        assert!(!sh_exp_match("é", "??"));
+        assert!(sh_exp_match("aébéc", "*é?"));
     }
 
     // A `*` in the URL being matched is an ordinary character to the reference, which
-    // escapes it into the `RegExp` — only the *pattern* carries wildcards. Comparing the
+    // escapes it into the `RegExp`; only the *pattern* carries wildcards. Comparing the
     // star in the subject against the star in the pattern, before the pattern's star is
     // read as one, consumes it and leaves nothing to backtrack to.
     #[test]
@@ -669,21 +675,9 @@ mod tests {
         assert!(!sh_exp_match("*", "*??"));
     }
 
-    // The script picks both arguments, and the `?` route is O(subject × pattern): without
-    // `MAX_MATCH_STEPS` bounding the loop, 16,000 characters against an 8,000-character
-    // pattern takes 1.58 s unoptimized and grows fourfold on every doubling. Unbounded, the
-    // pair below is still inside the call **ten minutes** later, so what this asserts is not
-    // a speed-up but the difference between an answer and none. Nothing upstream shortens it
-    // — the wall clock releases the caller and leaves the thread running, and this whole call
-    // is one iteration to the loop cap.
-    // `false` is the honest answer here as well as the budgeted one: the pattern ends in a `b`
-    // the subject never holds.
-    //
-    // The call always spends the whole of `MAX_MATCH_STEPS`, so the budget below bounds
-    // contention rather than the matcher: unoptimized, that is 1.1 s here, while a bound
-    // raised to `1 << 30` takes 56.7 s and a bound removed never returns at all. 20 s — what
-    // the other stall tests in this crate use — sits under the first regression and well over
-    // a loaded machine. At 5 s a run costs 5.4 s while merely sharing 4 cores with a build.
+    // Without `MAX_MATCH_STEPS` this pair does not return in any time a test can wait. The
+    // call spends the whole budget, so the 20 s bound covers sharing the cores with a
+    // build, not the matcher. `false` is also the right answer: the subject holds no `b`.
     #[test]
     fn a_pathological_pattern_does_not_stall_the_matcher() {
         let text = "a".repeat(200_000);
@@ -697,22 +691,9 @@ mod tests {
         );
     }
 
-    // The other side of that budget, and the side with no upper bound on how wrong it can
-    // be: the guard answers `false`, which is also what "does not match" looks like, so a
-    // cap set too low turns an ordinary `shExpMatch` into a silent no. A script asking
-    // `shExpMatch(host, "*.corp.example.com")` and being told no sends internal traffic down
-    // whichever branch it wrote for the outside world.
-    //
-    // Held here is the floor rather than the constant: a call must be able to walk a subject
-    // of the size the constant's own note names. The pair below spends about the subject's
-    // length, because the star resumes one character at a time and the tail then matches —
-    // the 1.6 million that note quotes is the worst case for these sizes, not this shape's
-    // cost, and no shape that *matches* reaches it. So what a cap below roughly 8 400 breaks
-    // is this; the headroom above that is still held by nothing, and measuring it would need
-    // a step count the matcher does not hand back.
-    //
-    // The `?` is not decoration. Without one, `sh_exp_match` hands the whole thing to
-    // `glob_match`, which has no budget to be cut short by, and the row would hold nothing.
+    // A low step budget silently turns a matching `shExpMatch` call into `false` and can
+    // misroute internal traffic. This ordinary 8 KB subject must finish the `?` route;
+    // without `?`, `sh_exp_match` delegates to unbudgeted `glob_match`.
     #[test]
     fn an_ordinary_pattern_is_not_cut_short_by_the_step_budget() {
         let subject = format!("{}.corp.example.com", "a".repeat(8 * 1024));
@@ -737,15 +718,15 @@ mod tests {
         // answer in a release one.
         assert_eq!(convert_addr("1.2.3.4.5"), 0x0102_0304);
         // Whitespace around a component is trimmed, which this function's doc lists among
-        // the spellings that agree with the reference — JS `ToNumber` trims before `&`.
-        // This line is the only thing holding it: without the trim a spaced component reads
-        // as the `0` that junk gets, so the address quietly loses an octet instead of being
-        // refused.
+        // the spellings that agree with the reference: JS `ToNumber` trims before `&`. No
+        // other assertion checks the trim: without the trim a spaced component reads as the
+        // `0` that junk gets, so the address loses an octet without being refused.
         assert_eq!(convert_addr("127.0.0. 1"), 0x7f00_0001);
     }
 
     // The `|` chain in Mozilla's `ascii_pac_utils.js` evaluates to a *signed* int32, so every
-    // address with the high bit set comes back negative — `255.255.255.255` is `-1` in Firefox.
+    // address with the high bit set comes back negative: `255.255.255.255` is `-1` in
+    // Firefox.
     #[test]
     fn the_high_bit_makes_the_result_negative_as_in_the_reference() {
         assert_eq!(convert_addr("255.255.255.255"), -1);
@@ -776,7 +757,7 @@ mod tests {
         assert!(is_resolvable("10.1.2.3", &policy));
         // The module doc's **(d)**: the host is trimmed before anything reads it, and the
         // bracket strip runs on the trimmed text. Without that order a padded literal is no
-        // literal, so it falls through to a name lookup — of a string with spaces in it,
+        // literal, so it falls through to a name lookup, of a string with spaces in it,
         // which under a policy that does resolve costs a query and answers nothing.
         assert!(is_resolvable(" ::1 ", &policy));
         assert!(is_resolvable(" [::1] ", &policy));
@@ -786,7 +767,7 @@ mod tests {
     }
 
     // Which spellings count as a literal is the resolver's question for `dnsResolve` and
-    // the PAC library's for `isInNet`, so the same string means different things to them —
+    // the PAC library's for `isInNet`, so the same string means different things to them,
     // in the reference as well, where `isInNet` gates on `isValidIpAddress` and
     // `dnsResolve` is a host binding. `Ipv4Addr::from_str` answers neither question: read
     // through it, a padded, hex or short spelling becomes a *name* lookup of a string that
@@ -828,11 +809,11 @@ mod tests {
         assert_eq!(dns_resolve("256.0.0.1", &policy), None);
     }
 
-    // `isValidIpAddress` is `\d{1,3}` per group plus a `> 255` check, so the zero padding
-    // an administrator writes into a PAC file is a valid address in both references — and
-    // the anchored regex means surrounding whitespace is not. `Ipv4Addr::from_str` had it
-    // exactly the other way round, so a rule spelled `192.168.001.000` matched no host at
-    // all and one spelled ` 10.0.0.0` matched where the browsers match nothing.
+    // `isValidIpAddress` uses `\d{1,3}` per group and a `> 255` check, so both references
+    // accept zero padding in PAC addresses and their anchored regex rejects surrounding
+    // whitespace. Parsing trimmed input with `Ipv4Addr::from_str` reverses those results:
+    // `192.168.001.000` matches no host, while ` 10.0.0.0` matches where the browsers match
+    // nothing.
     #[test]
     fn is_in_net_reads_addresses_with_the_reference_grammar() {
         let policy = PacPolicy::new();
@@ -862,12 +843,11 @@ mod tests {
         // ...and no group longer than the `\d{1,3}` the regex allows.
         assert!(!is_in_net("10.1.2.3", "0010.0.0.0", "255.0.0.0", &policy));
         // ...and nothing after the fourth group, which is the other half of the `$` and the
-        // half these two lines alone hold. It is not a spelling nobody writes — a fifth
-        // group is what a typo in a hand-maintained PAC file looks like, and reading
-        // `10.0.0.0.9` as `10.0.0.0` would silently turn a rule the browsers ignore into one
-        // that matches a sixteenth of the address space. `1.2.3.4.5` is already refused on
-        // the `dnsResolve` side, by the other grammar; this is the same claim about the one
-        // `isInNet` reads.
+        // half these two lines alone hold. A fifth group can result from a typo in a
+        // hand-maintained PAC file, and reading `10.0.0.0.9` as `10.0.0.0` would silently
+        // turn a rule the browsers ignore into one that matches a sixteenth of the address
+        // space. `1.2.3.4.5` is already refused on the `dnsResolve` side, by the other
+        // grammar; this is the same claim about the one `isInNet` reads.
         assert!(!is_in_net("10.1.2.3", "10.0.0.0.9", "255.0.0.0", &policy));
         assert!(!is_in_net("10.1.2.3", "10.0.0.0", "255.0.0.0.9", &policy));
         // A group over 255 is still not an address, padded or not.
@@ -890,10 +870,10 @@ mod tests {
     /// `GetHostnameArgument` does IDN-to-punycode only, over a host it already stripped
     /// with `GURL::HostNoBrackets()`.
     ///
-    /// The general strip answered these: `dnsResolve("[10.1.2.3]")` was 10.1.2.3 and
-    /// `isResolvable("[example.com]")` asked the resolver about `example.com`, so a script
-    /// branching on either got an answer for a host it had not named. Now the bracketed
-    /// text goes to the resolver as written, which under a policy that does not resolve is
+    /// General bracket stripping made `dnsResolve("[10.1.2.3]")` return 10.1.2.3 and
+    /// `isResolvable("[example.com]")` ask the resolver about `example.com`, so a script
+    /// branching on either got an answer for a host it had not named. The bracketed text
+    /// goes to the resolver as written, which under a policy that does not resolve is
     /// `null`/`false` and under one that does is a lookup that fails.
     #[test]
     fn only_an_ipv6_literal_loses_its_brackets() {
@@ -911,12 +891,12 @@ mod tests {
         assert!(!is_resolvable("::1]", &policy));
     }
 
-    // One row per arm of the filter, because a row is the only thing that holds an arm —
+    // One row per arm of the filter, because a row is the only thing that holds an arm,
     // the broadcast, multicast, protocol-assignment, unspecified-IPv6 and IPv6-multicast
-    // arms answer to nothing else in the tree. What that costs is not
-    // hypothetical — this is the filter that decides which addresses `dnsResolve` may hand
-    // back to an untrusted script, so an arm that quietly stops firing turns a range the
-    // script must not be able to probe into one it can.
+    // arms answer to nothing else in the tree. What that costs is not hypothetical, this
+    // is the filter that decides which addresses `dnsResolve` may hand back to an untrusted
+    // script, so an arm that stops firing without a test failure turns a range the script
+    // must not be able to probe into one it can.
     #[test]
     fn internal_ranges_are_recognised() {
         for internal in [
@@ -957,6 +937,8 @@ mod tests {
             "ff02::1",
             "fe80::1",
             "fd00::1",
+            // The other half of fc00::/7.
+            "fc00::1",
             "::ffff:10.0.0.1",
         ] {
             assert!(is_internal(internal.parse().unwrap()), "{internal}");
@@ -978,13 +960,15 @@ mod tests {
             "198.20.0.1",
             "1.0.0.1",
             "2606:2800:220:1::1",
+            // Just past fc00::/7 and just short of fe80::/10.
+            "fe00::1",
         ] {
             assert!(!is_internal(external.parse().unwrap()), "{external}");
         }
     }
 
     // Which addresses `with_internal_addresses` governs is a question the flag has to
-    // answer itself, because its own doc names ULA — a range only IPv6 can be in.
+    // answer itself, because its own doc names ULA, a range only IPv6 can be in.
     #[test]
     fn allowing_internal_addresses_admits_the_mapped_spelling_and_not_the_native_one() {
         let allowed = PacPolicy::new()
@@ -1023,9 +1007,9 @@ mod tests {
         assert!(!weekday_range(&strings(&["NOPE"]), &policy));
         assert!(!weekday_range(&[], &policy));
         // "Excess args after GMT peel → `false` here; ref often ignores them" is a claim
-        // the module doc makes and this row alone holds. Ignoring the tail — the ref's reading —
-        // leaves Monday-to-Friday, which covers the pinned Thursday, so the row that
-        // separates the two answers has to be one whose prefix matches.
+        // the module doc makes and this row alone holds. Ignoring the tail (the ref's
+        // reading) leaves Monday-to-Friday, which covers the pinned Thursday, so the row
+        // that separates the two answers has to be one whose prefix matches.
         assert!(!weekday_range(&strings(&["MON", "FRI", "THU"]), &policy));
     }
 
@@ -1041,8 +1025,8 @@ mod tests {
         assert!(date_range(&strings(&["2020", "2030"]), &policy));
         // The wrapping half of the two-value form, which the module doc contrasts with
         // `timeRange`'s two-argument form: a range whose end precedes its start runs
-        // through the turn of the year rather than matching nothing. Only the ordered
-        // direction was pinned, so the branch the doc singles out went unexercised.
+        // through the turn of the year rather than matching nothing. Ordered ranges alone
+        // do not exercise this wrapping branch.
         assert!(date_range(&strings(&["NOV", "FEB"]), &policy));
         assert!(!date_range(&strings(&["NOV", "JAN"]), &policy));
         assert!(date_range(&strings(&["25", "5"]), &policy));
@@ -1061,17 +1045,35 @@ mod tests {
             &strings(&["1", "JAN", "2025", "31", "DEC", "2025"]),
             &policy
         ));
+        // Ranges across a year end. The year is what keeps the later one from matching: read
+        // without it, November to March wraps and covers February.
+        assert!(date_range(
+            &strings(&["NOV", "2023", "MAR", "2024"]),
+            &policy
+        ));
+        assert!(!date_range(
+            &strings(&["NOV", "2024", "MAR", "2025"]),
+            &policy
+        ));
+        assert!(date_range(
+            &strings(&["1", "NOV", "2023", "1", "MAR", "2024"]),
+            &policy
+        ));
+        assert!(!date_range(
+            &strings(&["1", "NOV", "2024", "1", "MAR", "2025"]),
+            &policy
+        ));
         assert!(!date_range(&strings(&["bogus"]), &policy));
         assert!(!date_range(&strings(&["1", "2", "3"]), &policy));
-        // The day/year boundary, which this row alone holds: reading a number from 32 upwards
-        // as a year — the ref's rule, and the divergence the module doc lists — turns this
-        // into a range spanning 2024 and matching. Refused here, because the range has no
-        // year in it that anyone meant.
+        // The day/year boundary, which this row alone holds: reading a number from 32
+        // upwards as a year (the ref's rule, and the divergence the module doc lists) turns
+        // this into a range spanning 2024 and matching. Refused here, because the range has
+        // no year in it that anyone meant.
         assert!(!date_range(&strings(&["99", "2024"]), &policy));
-        // The far end of that refused span. The module doc names it as 32..=999, and the row
-        // above only holds where it starts — nothing there separates a threshold of 100 from
-        // one of 32. 999 is the last number the doc says is neither a day nor a year,
-        // and it is what makes the threshold read 1000 — four digits, the shape of the
+        // The far end of that refused span. The module doc names it as 32..=999, and the
+        // row above only holds where it starts; nothing there separates a threshold of 100
+        // from one of 32. 999 is the last number the doc says is neither a day nor a year,
+        // and it is what makes the threshold read 1000: four digits, the shape of the
         // "2016 (not 16)" the argument set asks for.
         assert!(!date_range(&strings(&["999", "2024"]), &policy));
     }
@@ -1080,7 +1082,7 @@ mod tests {
     // December, and JavaScript normalises the overflow: `setMonth(1)` on 31 December is
     // 31 February, i.e. 2 or 3 March. `dateRange("JAN", "FEB")` therefore keeps matching
     // for the first days of March in both Firefox and Chrome. Reproducing an arithmetic
-    // slip is not fidelity, so this crate ends the range with February — the module doc
+    // slip is not fidelity, so this crate ends the range with February, the module doc
     // lists the difference, and this pins it.
     #[test]
     fn a_range_ending_in_a_short_month_does_not_spill_into_the_next_one() {
@@ -1122,10 +1124,10 @@ mod tests {
         assert!(!time_range(&strings(&["18", "20"]), &policy));
         assert!(time_range(&strings(&["13", "0", "13", "59"]), &policy));
         assert!(!time_range(&strings(&["13", "0", "13", "30"]), &policy));
-        // The ending minute is whole — the four-argument form runs to :59 — so 13:45:07 is
-        // inside a range written as ending at 13:45. This row is the only thing that would
-        // see it end at :00 instead — the `13,0,13,59` above included, because that end is a
-        // quarter of an hour past the pinned clock whichever second it carries.
+        // The ending minute is whole (the four-argument form runs to :59), so 13:45:07 is
+        // inside a range written as ending at 13:45. No other row detects an end at :00
+        // instead, the `13,0,13,59` above included, because that end is a quarter of an
+        // hour past the pinned clock whichever second it carries.
         assert!(time_range(&strings(&["13", "0", "13", "45"]), &policy));
         assert!(time_range(
             &strings(&["13", "45", "0", "13", "45", "10"]),
@@ -1139,6 +1141,9 @@ mod tests {
         assert!(!time_range(&strings(&["22", "0", "6", "0"]), &policy));
         assert!(time_range(&strings(&["12", "0", "6", "0"]), &policy));
         assert!(!time_range(&strings(&["nope"]), &policy));
+        // Three and five numbers are no documented shape, even where a prefix would match.
+        assert!(!time_range(&strings(&["13", "0", "14"]), &policy));
+        assert!(!time_range(&strings(&["13", "0", "0", "14", "0"]), &policy));
     }
 
     #[test]
@@ -1184,7 +1189,7 @@ mod tests {
     fn the_default_policy_reads_the_clock_as_gmt() {
         // `time_ranges` above already pins 13:45 as the hour, but not why. The offset is 0
         // unless the caller sets it, so an argument list without `"GMT"` answers exactly as
-        // one with it — the divergence from the browser reference that `PacPolicy`'s doc
+        // one with it, the divergence from the browser reference that `PacPolicy`'s doc
         // records. A non-zero default separates the two, and would otherwise show up as an
         // arithmetic failure in every other test here rather than as a moved default.
         let policy = pinned();

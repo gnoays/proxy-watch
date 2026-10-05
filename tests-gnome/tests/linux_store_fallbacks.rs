@@ -9,20 +9,22 @@
 //! between that vector and the caller's `ProxyConfig` there is nothing else.
 //!
 //! ```text
-//! cargo test --test linux_store_fallbacks
+//! cargo test -p proxy-watch-gnome-tests --test linux_store_fallbacks
 //! ```
 //!
 //! What the missing hand-off costs is a silent one. `read()` still succeeds, still reports
-//! the GNOME proxy, and reports `fallbacks` empty — which reads as "KDE holds nothing
-//! here". A caller that trusts it cannot tell this machine from one where `kioslaverc`
-//! genuinely does not exist, and the field is compared by [`PartialEq`], so a watcher
-//! would also skip the snapshot where the degradation appears and the one where it clears.
+//! the GNOME proxy, and reports `fallbacks` empty, which reads as "KDE holds nothing
+//! here". A caller that trusts it cannot tell this machine from one where `kioslaverc` does
+//! not exist, and the field is compared by [`PartialEq`], so a watcher would also skip the
+//! snapshot where the degradation appears and the one where it clears.
 //!
 //! A separate binary because `GSETTINGS_BACKEND` and the XDG variables are process-wide,
 //! and the keyfile backend rather than dconf because a fixture must not write to the
-//! machine's own settings — the same reasoning as `tests/gsettings_use_same_proxy.rs`.
+//! machine's own settings, the same reasoning as
+//! `tests-gnome/tests/gsettings_use_same_proxy.rs`.
 #![cfg(all(target_os = "linux", feature = "linux-gnome", feature = "linux-kde"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::fs;
@@ -49,13 +51,13 @@ fn a_desktop_store_that_could_not_be_read_is_named_in_the_answer() {
     // A *directory* where the file goes. `read_to_string` fails on it with something other
     // than `NotFound`, which is the one distinction `read_kioslaverc`'s cascade draws: a
     // missing layer is skipped, a layer that exists and cannot be read fails the read. Any
-    // other way of making the file unreadable — a mode-000 file, an unsearchable parent —
+    // other way of making the file unreadable (a mode-000 file, an unsearchable parent)
     // depends on not being root, and the WSL and container environments this suite runs in
     // often are.
     fs::create_dir_all(root.join("kioslaverc")).expect("creating the unreadable layer");
 
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and it runs before any GSettings call — so no backend exists yet to read them.
+    // in it, and it runs before any GSettings call, so no backend exists yet to read them.
     unsafe {
         std::env::set_var("GSETTINGS_BACKEND", "keyfile");
         std::env::set_var("XDG_CONFIG_HOME", &root);
@@ -63,7 +65,7 @@ fn a_desktop_store_that_could_not_be_read_is_named_in_the_answer() {
         // the cascade would fail on this one before reaching it either way, but the
         // fixture should not depend on which layers the host happens to ship.
         std::env::set_var("XDG_CONFIG_DIRS", root.join("absent"));
-        // GNOME leads, so GSettings is read first and `kioslaverc` is the trailing store —
+        // GNOME leads, so GSettings is read first and `kioslaverc` is the trailing store,
         // the only position from which a failure is softened at all.
         std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
     }
@@ -104,7 +106,7 @@ fn a_desktop_store_that_could_not_be_read_is_named_in_the_answer() {
         "a store that could not be read has no mode to report: {kde:?}"
     );
     // ...so this list is the only place the caller can learn that the source was consulted
-    // at all rather than simply unconfigured.
+    // at all rather than unconfigured.
     assert_eq!(
         fallbacks,
         vec![ProxyConfigSource::Kioslaverc],

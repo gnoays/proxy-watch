@@ -1,0 +1,20 @@
+[package]
+name = "proxy-watch-python"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Python bindings for proxy-watch"
+publish = false
+
+[lib]
+# `proxy_watch` is the core crate's name here; the module Python imports is named by
+# `#[pymodule(name = ...)]` and by `module-name` in `pyproject.toml`.
+name = "proxy_watch_python"
+crate-type = ["cdylib"]
+
+# maturin sets `PYO3_BUILD_EXTENSION_MODULE`, which keeps libpython out of the link. A plain
+# `cargo build` on Linux or macOS needs it set by hand, or the link asks for libpython.
+[dependencies]
+proxy-watch = { path = "../..", default-features = false }
+proxy-watch-shared = { path = "../shared" }
+pyo3 = { version = "0.29", features = ["abi3-py310", "generate-import-lib"] }

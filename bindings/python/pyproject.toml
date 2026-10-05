@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.9.3,<2"]
+build-backend = "maturin"
+
+[project]
+name = "proxy-watch"
+version = "0.1.0"
+description = "The operating system's proxy settings, layered with *_proxy, for Python"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+# Written by `cargo xtask stage-licenses python <target> bindings/python` before a build;
+# THIRD-PARTY-LICENSES.txt differs by target, so each wheel carries its own.
+license-files = ["LICENSE-*", "THIRD-PARTY-LICENSES*"]
+requires-python = ">=3.10"
+keywords = ["proxy", "pac", "wpad", "http_proxy", "system-proxy", "proxy-settings", "no_proxy"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Internet :: Proxy Servers",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/gnoays/proxy-watch"
+Issues = "https://github.com/gnoays/proxy-watch/issues"
+
+[tool.maturin]
+module-name = "proxy_watch"

@@ -5,18 +5,18 @@
 //! backend (`src/sys/win/`) the `unsafe` that stays outside this file is deliberate and
 //! local: `notify.rs`'s watch loop (`WatchedKey::arm`, `wait`) and the two `SetEvent`
 //! calls that wake it from the owner's thread rather than from inside it
-//! (`Watch::poll_now`, `Watch::drop`); and `mod.rs`'s two WinHTTP calls — the per-user
-//! configuration it reads *first*, and the machine defaults — which carry their own RAII
+//! (`Watch::poll_now`, `Watch::drop`); and `mod.rs`'s two WinHTTP calls (the per-user
+//! configuration it reads *first*, and the machine defaults), which carry their own RAII
 //! wrappers next to their only caller (plus the test-only helpers in both files' `tests`
 //! modules: `mod.rs` writes registry values, `notify.rs` signals events).
 //!
-//! `src/pac/winhttp.rs` — the `pac-windows-native` engine, which is Windows-only too —
+//! `src/pac/winhttp.rs` (the `pac-windows-native` engine, which is Windows-only too)
 //! reuses this file's [`Event`], [`wide`], [`wide_ptr_to_string`] and [`hresult_error`]
 //! rather than duplicating them. It is not, though, the crate's largest body of
 //! `unsafe`: this backend's own total (this file, `notify.rs`, and `mod.rs`) is larger.
 //!
-//! Note on the `windows` crate 0.62 API: most functions that used to return `BOOL` now
-//! return `windows::core::Result<()>`, while the `Reg*` family returns a bare
+//! In the `windows` crate 0.62 API most functions return `windows::core::Result<()>`,
+//! while the `Reg*` family returns a bare
 //! [`WIN32_ERROR`] that must be compared against `ERROR_SUCCESS` by hand.
 
 use std::ffi::{OsString, c_void};
@@ -87,8 +87,8 @@ unsafe impl Send for RegKey {}
 impl RegKey {
     // Open `root\path` for `access`.
     //
-    // Returns `Ok(None)` when the key does not exist — the group policy key usually
-    // does not — so that "absent" is not an error the caller has to pattern match on
+    // Returns `Ok(None)` when the key does not exist (the group policy key usually
+    // does not), so that "absent" is not an error the caller has to pattern match on
     // an OS error code for.
     pub(super) fn open(
         root: HKEY,
@@ -134,7 +134,7 @@ impl RegKey {
     // wrongly typed value is treated as "not configured" rather than as an error,
     // because a third party writing garbage there must not break the watcher.
     // A `REG_EXPAND_SZ`'s `%VAR%` references are returned exactly as stored, never
-    // expanded — the same choice `kioslaverc`'s `apply` documents for `$e`: a
+    // expanded, the same choice `kioslaverc`'s `apply` documents for `$e`: a
     // configuration read must not execute process environment substitution inside this
     // library. `RegQueryValueExW` above is the non-expanding half of the pair Win32 gives
     // (`RegGetValueW` expands unless told `RRF_NOEXPAND`), so the choice is also the one
@@ -159,10 +159,10 @@ impl RegKey {
             return Ok(None);
         }
         // Taking only the whole pairs drops a trailing odd byte rather than erroring on
-        // it — the same reading Win32 itself gives a byte count one short of a whole
+        // it, the same reading Win32 itself gives a byte count one short of a whole
         // `u16`. Once the units are decoded, `to_string_lossy` substitutes U+FFFD for a
         // UTF-16 sequence that is not valid (an unpaired surrogate) rather than refusing
-        // the value — the same choice `kde`'s `String::from_utf8_lossy` documents for its
+        // the value, the same choice `kde`'s `String::from_utf8_lossy` documents for its
         // own not-quite-valid bytes.
         let units: Vec<u16> = data
             .as_chunks::<2>()
@@ -227,7 +227,7 @@ impl RegKey {
 
             let mut data = vec![0u8; len as usize];
             // SAFETY: `data` has exactly `len` writable bytes and `len` is passed by
-            // pointer so the API can report how many it actually wrote.
+            // pointer so the API can report how many it wrote.
             let status = unsafe {
                 RegQueryValueExW(
                     self.key,
@@ -273,7 +273,7 @@ impl Drop for RegKey {
 }
 
 // How many size-then-data query pairs [`RegKey::raw_value`] runs in all before it gives
-// up on `ERROR_MORE_DATA` — not how many it redoes, which is one fewer: the first pair is
+// up on `ERROR_MORE_DATA`, not how many it redoes, which is one fewer: the first pair is
 // the ordinary read. `classify_requery` compares `attempt + 1` against this for that
 // reason. Bounded so a value that is rewritten on every poll cannot turn a single read
 // into an infinite loop.
@@ -286,7 +286,7 @@ const MAX_REQUERY_ATTEMPTS: u32 = 3;
 // without touching the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Requery {
-    // The status is terminal — success, "not found", or any other error — and the
+    // The status is terminal (success, "not found", or any other error) and the
     // caller should turn it into the usual `Ok`/`Err`.
     Done,
     // `ERROR_MORE_DATA` with attempts still left in the budget: redo the query from the
@@ -324,7 +324,7 @@ impl Event {
         Ok(Self(handle))
     }
 
-    // The raw handle, for the Win32 calls that take one — the waits, `SetEvent`,
+    // The raw handle, for the Win32 calls that take one: the waits, `SetEvent`,
     // `RegNotifyChangeKeyValue`. Those three are an example rather than a roster, and must
     // stay one: a comment that names a subset of the callers is wrong the moment one is
     // added. What holds at every use is that ownership stays with this `Event`, whose
@@ -362,7 +362,7 @@ pub(crate) unsafe fn wide_ptr_to_string(ptr: *const u16) -> Option<String> {
     // SAFETY: `ptr` is valid for `len` `u16`s by the loop above.
     let units = unsafe { std::slice::from_raw_parts(ptr, len) };
     // `to_string_lossy` substitutes U+FFFD for a UTF-16 sequence that is not valid (an
-    // unpaired surrogate) rather than refusing the value — see `string_value`'s doc
+    // unpaired surrogate) rather than refusing the value; see `string_value`'s doc
     // comment above for the same choice on the registry-string path.
     Some(OsString::from_wide(units).to_string_lossy().into_owned())
 }
@@ -370,9 +370,7 @@ pub(crate) unsafe fn wide_ptr_to_string(ptr: *const u16) -> Option<String> {
 // A raw pointer that may be moved to the watcher thread.
 //
 // Used for the event handles the watcher struct owns and the thread must be able to wait
-// on. Which ones is not written down here, for the reason [`Event::raw`] gives: the list
-// went stale once already, when a second event was added beside the shutdown one without
-// this file being touched.
+// on. Which ones is not written down here, for the reason [`Event::raw`] gives.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SendPtr(pub(super) *mut c_void);
 
@@ -392,13 +390,13 @@ mod tests {
     //! These tests cover [`classify_requery`], the pure decision at the heart of
     //! [`RegKey::raw_value`]'s retry loop, and the context that loop's failures carry.
     //!
-    //! **Unverified:** the race `classify_requery` exists for — another process rewriting
-    //! a value in the microsecond gap between the sizing call and the data call — is not
+    //! **Unverified:** the race `classify_requery` exists for (another process rewriting
+    //! a value in the microsecond gap between the sizing call and the data call) is not
     //! exercised end to end, here or anywhere else in the tree. Reproducing it needs two
     //! threads racing a real registry write against a real read inside that window, which
     //! lands as a flaky test rather than as a regression test.
-    //! **Risk:** the retry budget could be wrong — too small to outlast a real burst of
-    //! rewrites, or spent on a status that was never going to clear — and these tests
+    //! **Risk:** the retry budget could be wrong (too small to outlast a real burst of
+    //! rewrites, or spent on a status that was never going to clear), and these tests
     //! would still pass, because they ask only what the classifier decides and never
     //! whether the loop around it recovers.
     //! **Symptom:** a value another process rewrites often, `ProxyServer` while a
@@ -460,7 +458,7 @@ mod tests {
 
     // The backend opens the same subkey path under both roots, so a failure that names
     // only the value leaves the caller unable to tell a machine-wide policy problem from
-    // a problem with this user's own hive — two different people to escalate to.
+    // a problem with this user's own hive, two different people to escalate to.
     //
     // A key opened for notifications alone cannot answer a value query, which provokes a
     // real `RegQueryValueExW` failure without touching the machine: no ACL edit, no
