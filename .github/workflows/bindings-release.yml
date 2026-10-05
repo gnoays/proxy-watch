@@ -347,10 +347,12 @@ jobs:
           set -euo pipefail
           # The runner's Node lives under `/usr/local`, which only root can write.
           sudo npm install -g "npm@$NPM_VERSION"
-          for package in dist/proxy-watch-*-[0-9]*.tgz; do
+          # The leading `./` makes npm read each argument as a file: `dist/<name>.tgz`
+          # parses as a GitHub `owner/repo` shorthand.
+          for package in ./dist/proxy-watch-*-[0-9]*.tgz; do
             npm publish "$package" --access public
           done
-          npm publish dist/proxy-watch-[0-9]*.tgz --access public
+          npm publish ./dist/proxy-watch-[0-9]*.tgz --access public
 
   pypi:
     name: publish (PyPI)
