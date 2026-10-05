@@ -202,6 +202,10 @@ fn cargo_build(
         // rustc prints the line only while it writes a static library, so the build that
         // produces it is the one that reports it.
         flags.push("--print native-static-libs");
+        // The line is read back out of stderr, so it has to arrive as plain text: under
+        // `CARGO_TERM_COLOR=always`, which the release workflow sets, it ends in an ANSI
+        // reset that the linker then reads as part of the last library's name.
+        cargo.env("CARGO_TERM_COLOR", "never");
     }
     if !flags.is_empty() {
         let triple = target.to_uppercase().replace('-', "_");
