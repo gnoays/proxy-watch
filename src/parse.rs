@@ -6,45 +6,50 @@
 //! # Writing a bypass list
 //!
 //! Every store has one, no two of them read it the same way, and the differences decide
-//! which hosts go direct. What an entry means to this crate, by the list it is written in
-//! — the store's own reading, except where a cell says the two part company:
+//! which hosts go direct. What an entry means to this crate depends on the list it is
+//! written in: it is the store's own reading, except where a cell says the two differ:
 //!
 //! | Entry | `no_proxy`, KDE `NoProxyFor` | Windows `ProxyOverride` | macOS `ExceptionsList` | GNOME `ignore-hosts` |
 //! |---|---|---|---|---|
-//! | separator between entries | `,` alone — a `;` leaves the two names one dead rule, and an entry still holding a space is rejected | `;`, `,` or whitespace | the array is the separator | the array is the separator |
+//! | separator between entries | `,` alone: a `;` leaves the two names one dead rule, and an entry still holding a space is rejected | `;`, `,` or whitespace | the array is the separator | the array is the separator |
 //! | `example.com` | that host **and everything under it** | that host alone | that host alone | that host **and everything under it** |
-//! | `.example.com`, `*.example.com` | the subdomains, not `example.com` itself | `*.example.com` is the subdomains; `.example.com` is **rejected** — Windows has no reading for a leading `.` (below) | the subdomains | the same rule as the bare name: the domain *and* its subdomains |
+//! | `.example.com`, `*.example.com` | the subdomains, not `example.com` itself | `*.example.com` is the subdomains; `.example.com` is **rejected**: Windows has no reading for a leading `.` (below) | the subdomains | the same rule as the bare name: the domain *and* its subdomains |
 //! | a `*` anywhere else (`192.168.*`) | a glob here, which is Chromium's reading; Go and libproxy take it as literal text no host carries | a glob | syntax only as a trailing `.*`, which misses the bare host a Mac's own `name.*` still reaches; anything else is rejected | never syntax; rejected |
-//! | a bare `*` | every destination direct | every destination direct | rejected — it matches no host on a Mac | rejected, same reason |
-//! | `10.0.0.0/8` | the network | **rejected** — Windows has no `/` in this grammar, and one entry holding it turns the proxy off for every destination (below); write the range as `10.*` | the network | the network |
-//! | `example.com:8080` | holds the entry to that port | holds it | **rejected** — macOS compares the whole entry to the host name, so a port kills it | holds it, but a portless `http://` URL is asked about with port 0 and will not meet it |
-//! | `<local>`, `<-loopback>` | read | read | read | read |
+//! | a bare `*` | every destination direct | every destination direct | rejected: it matches no host on a Mac | rejected, same reason |
+//! | `10.0.0.0/8` | the network | **rejected**: Windows has no `/` in this grammar, and one entry holding it turns the proxy off for every destination (below); write the range as `10.*` | the network | the network |
+//! | `example.com:8080` | holds the entry to that port | holds it | **rejected**: macOS compares the whole entry to the host name, so a port kills it | holds it, but a portless `http://` URL is asked about with port 0 and will not meet it |
+//! | `<local>`, `<-loopback>` | read | read | read | **rejected**: GLib reads neither and compares the token to a host so named |
+//! | an entry ending in a dot (`example.com.`) | the dot is the DNS root and comes off; KDE: **rejected**; KIO compares the text | **rejected** | the dot comes off, as CFNetwork reads it | **rejected** |
+//! | a trailing dot on the destination (`example.com.`) | shed, so `example.com` matches it; KDE: kept, so it does not | kept | shed | kept |
+//! | no entry at all | `localhost`, `127.0.0.0/8`, `::1`, `*.localhost` and link-local go direct; KDE: nothing does | `localhost`, `loopback`, `127.0.0.1`, `::1` and link-local go direct | `localhost`, `127.0.0.1` and `::1` go direct while the dictionary has a bypass key; with none, nothing does | nothing goes direct |
 //! | a space at either end | trimmed | trimmed | **kept**, and no host carries it, so the entry is rejected | trailing trimmed, leading kept and rejected |
 //!
-//! A rejected entry is not dropped in silence: it lands in
+//! A rejected entry lands in
 //! [`BypassRules::rejected`](crate::BypassRules::rejected) with the reason, so a rule that
-//! does nothing reads as doing nothing rather than as live.
+//! does nothing is not mistaken for a live one.
 //!
-//! Two spellings cost a Windows list more than themselves, and both are refused here rather
-//! than read. An entry starting with `.` is granted nothing by any reader measured: WinINet
-//! refuses the whole list over one, while WinHTTP and the registry reading keep the list and
-//! send the subdomains to the proxy regardless — `*.name` is the spelling to write. An entry
-//! holding a `/`, a CIDR block included, goes further still: the registry reading stops
-//! using the proxy at all and every destination goes direct. Both land in `rejected` with
-//! the reason while the entries beside them stay live — which is narrower than what the
-//! machine does with the same list, and as wide a claim as the readings support.
+//! Windows readers differ on entries starting with `.`: WinINet refuses the whole list,
+//! while WinHTTP and the registry keep it but proxy the subdomains. Write `*.name`.
+//! A `/` makes the registry reading send every destination direct. Both spellings are
+//! rejected here while neighboring entries stay live.
 //!
-//! Two rows are worth stating flat. A bare name changes meaning between the first column
+//! A bare name changes meaning between the first column
 //! and the next two, so `contoso.com` in `no_proxy` covers `api.contoso.com` and the same
 //! text in `ProxyOverride` does not. And `<local>` / `<-loopback>` are read out of every
-//! list here so the sources share one vocabulary, while only Windows' own resolver acts on
-//! them: a macOS or GNOME store spelling one gets a bypass from this crate and none from
-//! the machine. `the_local_token_bypasses_nothing_here` in `tests/mac_exceptions_list.rs`
-//! measures the macOS half; GNOME's is read off GLib, in `src/sys/linux/gsettings_map.rs`.
+//! list but GNOME's so the sources share one vocabulary, while WinINet is the only resolver
+//! that acts on both and KDE's KIO acts on `<local>` alone: a macOS store spelling one gets
+//! a bypass from this crate and none from the machine.
+//! `the_local_token_bypasses_nothing_here` in `tests/mac_exceptions_list.rs` measures that.
+//! A GNOME entry spelling one is rejected, because GLib reads it as a host name.
+//!
+//! The last row is [`BypassRules::implicit`](crate::BypassRules::implicit): the
+//! destinations each resolver sends direct when no entry names them. The Windows and macOS
+//! cells are measured against WinINet and CFNetwork; the GNOME and KDE cells are read off
+//! GLib's and KIO's matchers, which have no such set.
 
 use std::collections::HashMap;
 
-use crate::bypass::{BypassDialect, BypassRules};
+use crate::bypass::{BypassDialect, BypassRules, ImplicitBypass};
 use crate::diagnostic::{RejectedValue, RejectionKind, RejectionSource};
 use crate::endpoint::{ProxyEndpoint, ProxyEntry, ProxyScheme, Scheme};
 use crate::error::Error;
@@ -53,23 +58,11 @@ use crate::mode::ProxyMode;
 /// The port assumed when a Windows `ProxyServer` entry omits one.
 pub const WINDOWS_DEFAULT_PORT: u16 = 80;
 
-// Characters that separate entries in a bypass list.
-//
-// [`no_proxy`] is the only splitter that takes these, so its sources are the ones that
-// matter: the environment variable, where Go's `httpproxy` splits on `,` alone, and KDE's
-// `NoProxyFor`, where every implementation that reads the file does the same —
-// `g_strsplit (value->str, ",", -1)` in libproxy's `config-kde.c`, and a tokenizer over
-// `", "` in Chromium's `proxy_config_service_linux.cc`. Windows takes the wider
-// [`WINDOWS_BYPASS_SEPARATORS`], and GNOME's array never reaches here at all
-// (`sys::linux::gsettings_map::bypass_from_settings`).
-//
-// `;` is not here, though neither character can occur inside a host name and taking both
-// would be the safe-looking superset. That reading is beside the point: a `;`-separated
-// list is not two rules anywhere else, it is one rule that matches nothing. Splitting it
-// sends a pair of hosts direct that every supplier's own reader puts through the proxy,
-// which is the one direction this crate must not invent. Kept whole it is the same dead rule
-// everyone else is holding — no record, because `;` is a character
-// [`crate::endpoint::parse_host`] takes and the entry is only unmatchable, not malformed.
+// Go's `httpproxy` and libproxy's `config-kde.c` split on `,` alone. KF5 KIO's `revmatch`
+// (`kprotocolmanager.cpp`) and Chromium's `proxy_config_service_linux.cc` also split at a
+// space, which KDE's dialog cannot write; a space-only list is one entry here, refused.
+// `;` is not a separator: every supplier's reader keeps a `;` list whole as one dead rule,
+// and splitting it would send direct hosts they all proxy.
 const LIST_SEPARATORS: [char; 1] = [','];
 
 // The same, plus whitespace, for the Windows bypass list only.
@@ -78,7 +71,7 @@ const LIST_SEPARATORS: [char; 1] = [','];
 // semicolons or whitespace" (`WINHTTP_PROXY_INFO`), and Chromium reads the string
 // `WinHttpGetIEProxyConfigForCurrentUser` returns with
 // `base::StringTokenizer(proxy_bypass, ";, \t\n\r")`
-// (`ProxyConfigServiceWin::SetFromIEConfig`). Splitting on `;` and `,` alone turned
+// (`ProxyConfigServiceWin::SetFromIEConfig`). Splitting on `;` and `,` alone would turn
 // `ProxyOverride = "*.corp.example intranet"` into one `Domain` pattern that no host can
 // match, with nothing in [`BypassRules::rejected`] to say so.
 //
@@ -90,7 +83,7 @@ const WINDOWS_BYPASS_SEPARATORS: [char; 6] = [';', ',', ' ', '\t', '\r', '\n'];
 // Characters that separate entries in the Windows `ProxyServer` string.
 //
 // The same `WINHTTP_PROXY_INFO` page: "The proxy server list contains one or more of the
-// following strings separated by semicolons or whitespace." No `,` — that character is in
+// following strings separated by semicolons or whitespace." No `,`: that character is in
 // [`LIST_SEPARATORS`] because environment variables and GNOME put it there, and neither
 // writes this key. Named rather than spelled inline at the split so that the reason a
 // server list and a bypass list disagree about one character sits next to both.
@@ -99,11 +92,12 @@ const WINDOWS_SERVER_SEPARATORS: [char; 5] = [';', ' ', '\t', '\r', '\n'];
 /// Parse Windows `ProxyServer` ([`WINHTTP_CURRENT_USER_IE_PROXY_CONFIG`](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/ns-winhttp-winhttp_current_user_ie_proxy_config)).
 ///
 /// Bare `host:port` → [`Scheme::All`]; or `http=`/`https=`/`ftp=`/`socks=`/`all=`.
-/// Missing port → [`WINDOWS_DEFAULT_PORT`] (1080 for bare `socks=`). Empty scheme →
+/// Missing port → the port of the token's own `scheme://` when it has one, else
+/// [`WINDOWS_DEFAULT_PORT`] (1080 for bare `socks=`). Empty scheme →
 /// [`ProxyEntry::Disabled`]. Bad tokens skipped; recorded on [`windows_manual`]. A scheme
 /// named twice keeps the last token that was not skipped, so a bad last spelling leaves the
 /// earlier one standing. A `socks=` entry also fills every scheme the string left
-/// unset — the last two examples below are that rule and its limit.
+/// unset; the last two examples below are that rule and its limit.
 ///
 /// ```
 /// # use proxy_watch::{parse, ProxyScheme, Scheme};
@@ -140,11 +134,8 @@ fn proxy_server_with_rejected(spec: &str) -> (HashMap<Scheme, ProxyEntry>, Vec<R
         match split_scheme_key(token) {
             Some((key, value)) => {
                 let Some(scheme) = Scheme::from_name(key) else {
-                    // The module doc's rule, applied to a drop that is easy to miss: a
-                    // scheme endpoint that goes missing without a record is fail-open.
-                    // `gopher=proxy:80` on an old machine, or a plain typo like `htttp=`,
-                    // otherwise leaves `windows_manual` returning `ProxyMode::Direct` with
-                    // nothing anywhere to say a proxy had been configured at all.
+                    // Record unknown scheme keys so a dropped proxy cannot silently
+                    // become `ProxyMode::Direct`.
                     crate::trace::warning!(
                         "skipping a ProxyServer token with an unrecognised scheme key"
                     );
@@ -168,7 +159,7 @@ fn proxy_server_with_rejected(spec: &str) -> (HashMap<Scheme, ProxyEntry>, Vec<R
                             // `socks=h:1080`, with no `scheme://` of its own, is read as
                             // SOCKS4 and not SOCKS4a; [`ProxyScheme`]'s own doc carries the
                             // Microsoft table that says so. Set here, not in
-                            // `ProxyScheme::from_str`, which reads a *URI* scheme — where
+                            // `ProxyScheme::from_str`, which reads a *URI* scheme, where
                             // the same word means SOCKS5 instead.
                             if scheme == Scheme::Socks && endpoint.scheme_hint.is_none() {
                                 endpoint.scheme_hint = Some(ProxyScheme::Socks4);
@@ -221,16 +212,8 @@ fn proxy_server_with_rejected(spec: &str) -> (HashMap<Scheme, ProxyEntry>, Vec<R
     (map, rejected)
 }
 
-// The `socks=` → "everything else" fallback described on [`proxy_server`]'s doc comment:
-// fills [`Scheme::Http`]/[`Scheme::Https`]/[`Scheme::Ftp`] gaps, and [`Scheme::All`],
-// from [`Scheme::Socks`] once every token has been read — unless the string already
-// answered for [`Scheme::All`] itself, in either of the writings that reach the map: an
-// address (a bare `host:port`, or an `all=host:port`) or an `all=` that disabled it. The
-// second covers nothing, so the guard is not "already covered" but "already answered".
-// It reads the map rather than the string, so naming `all` is not by itself the answer:
-// an `all=` whose address failed to parse left a `rejected` record and no entry, and the
-// gap it leaves is filled from `socks=` like any other — the fail-open drop the module
-// doc sets out for every scheme key, not a special case for this one.
+// See `proxy_server`: an explicit `all=` answer blocks the SOCKS fallback, including
+// a disabled entry. A rejected `all=` leaves a gap that SOCKS fills.
 fn apply_socks_catch_all(map: &mut HashMap<Scheme, ProxyEntry>) {
     if map.contains_key(&Scheme::All) {
         return;
@@ -239,8 +222,6 @@ fn apply_socks_catch_all(map: &mut HashMap<Scheme, ProxyEntry>) {
         return;
     };
     let endpoint = endpoint.clone();
-    // `Scheme::All` is known absent by the early return above, so its `or_insert_with`
-    // always fires; the other three fill only where nothing explicit was written.
     for scheme in [Scheme::Http, Scheme::Https, Scheme::Ftp, Scheme::All] {
         map.entry(scheme)
             .or_insert_with(|| ProxyEntry::Use(endpoint.clone()));
@@ -259,17 +240,9 @@ fn warn_dropped_proxy_server_token(err: &Error) {
     );
 }
 
-// Split `http=host:port` into `("http", "host:port")`.
-//
-// Returns `None` when the token has no scheme key: only an `=` that appears before the first
-// `:`, `/`, `?` or `#` counts. The `:` is what keeps a percent-free password's `=` and a URL
-// query's from being read as a key separator — a URL names a scheme or a port, so it carries
-// a colon ahead of its path either way. The other three cover the shape that has no colon at
-// all: `proxy.corp/path?a=b` and `proxy.corp?a=b` are neither a URL nor a `host:port`, and
-// without them the token is recorded as an unknown scheme key named `proxy.corp/path?a` or
-// `proxy.corp?a`, a drop naming a scheme the token never had. With them the token reaches
-// `ProxyEndpoint::parse`, which cuts the authority at those same three characters — the
-// boundary set is that one, not a shorter guess at it.
+// Split `http=host:port` into `("http", "host:port")`. Only an `=` before the first `:`,
+// `/`, `?` or `#` separates a key, so a password's or query's `=` stays in the endpoint
+// text for `ProxyEndpoint::parse`, which cuts the authority at the same characters.
 fn split_scheme_key(token: &str) -> Option<(&str, &str)> {
     let eq = token.find('=')?;
     let boundary = token.find([':', '/', '?', '#']).unwrap_or(token.len());
@@ -283,24 +256,39 @@ fn split_scheme_key(token: &str) -> Option<(&str, &str)> {
 /// Parse a Windows `ProxyOverride` registry value into [`BypassRules`].
 ///
 /// Like [`no_proxy`], but entries are separated by `;`, `,` or whitespace, as WinHTTP
-/// documents, and **a bare name matches that name alone** rather than the domain under
-/// it: `contoso.com` here does not bypass `api.contoso.com`. Write `*.contoso.com` for
-/// the subdomains, which is also what Windows asks for — `.contoso.com` is rejected rather
-/// than read, because no measured reader grants it. A CIDR entry is rejected too, because
+/// documents, and **a bare name matches that name alone** rather than the domain under it:
+/// `contoso.com` here does not bypass `api.contoso.com`. Write `*.contoso.com` for the
+/// subdomains, which is also what Windows asks for; `.contoso.com` is rejected rather than
+/// read, because no measured reader grants it. A CIDR entry is rejected too, because
 /// Windows answers a `/` with the whole list: write the range as the wildcard Windows does
-/// read, `10.*`. `<local>` →
-/// [`HostPattern::Local`](crate::HostPattern::Local) and `<-loopback>` (IE9+) →
+/// read, `10.*`. `<local>` → [`HostPattern::Local`](crate::HostPattern::Local) and
+/// `<-loopback>` (IE9+) →
 /// [`HostPattern::SubtractImplicit`](crate::HostPattern::SubtractImplicit) are read by
-/// [`no_proxy`] as well as by this one, the
-/// way Chromium reads them ("we allow it on all platforms and interpret it the same way",
-/// `proxy_host_matching_rules.cc:113`). Malformed entries skipped into
-/// [`BypassRules::rejected`].
+/// [`no_proxy`] as well as by this one, the way Chromium reads them ("we allow it on all
+/// platforms and interpret it the same way", `proxy_host_matching_rules.cc:113`). Malformed
+/// entries skipped into [`BypassRules::rejected`].
 ///
-/// The bare-name rule is measured, not inherited: WinINet and WinHTTP were each handed a
-/// bypass list and a destination and asked where they connected. Both reimplementations
-/// this crate reads alongside — Chromium and libproxy — answer the question, and they
-/// answer it differently, so neither could settle it. The readings are the rows of
+/// An IPv4 address entry is read only as four decimal octets. WinINet and WinHTTP compare
+/// an address entry with the destination as text, so `012.1.2.3` there is not `10.1.2.3` in
+/// either position; such an entry is rejected, where [`no_proxy`] reads it as the address a
+/// URL parser would. Limitation: every entry point reads the destination folded (a `Url` or
+/// a `Host` already holds `012.1.2.3` as `10.1.2.3`, and
+/// [`matches_authority`](crate::BypassRules::matches_authority) parses its text the same
+/// way), so an entry `10.1.2.3` or `10.*` reports a bypass for a destination written
+/// `012.1.2.3`, which Windows hands to the proxy.
+///
+/// The bare-name rule is measured against WinINet and WinHTTP. The reimplementations this
+/// crate reads alongside, Chromium and libproxy, answer the question differently, so
+/// neither could settle it. The readings are the rows of
 /// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`.
+///
+/// The implicit set is measured the same way, and is [`ImplicitBypass::WinInet`]:
+/// `localhost`, `loopback`, `127.0.0.1`, `::1` and the link-local ranges. It excludes the
+/// rest of `127.0.0.0/8`, `*.localhost` and IPv4-mapped spellings. WinHTTP agrees on the
+/// link-local ranges and bypasses all of `127.0.0.0/8` even under `<-loopback>`. The store
+/// is WinINet's, so this follows WinINet, and a WinHTTP client is therefore told "proxy"
+/// for loopback it sends direct. The rows are
+/// `wininet_implicit_bypass_is_the_measured_six` in `tests/bypass.rs`.
 ///
 /// ```
 /// # use proxy_watch::parse;
@@ -334,32 +322,37 @@ pub fn proxy_override(spec: &str) -> BypassRules {
 }
 
 /// Parse `no_proxy` into [`BypassRules`]: `*`, CIDR, domains, `:port`, and a localhost
-/// bypass that stays on unless an entry clears it. Entries are separated by `,` alone — not
+/// bypass that stays on unless an entry clears it. Entries are separated by `,` alone, not
 /// whitespace and not `;`, which is what Go's `httpproxy` does and what KDE's readers do
 /// with `NoProxyFor`. Malformed → [`BypassRules::rejected`]. An entry
 /// that repeats one already in [`BypassRules::patterns`] is dropped, first spelling kept,
 /// so the list can be shorter than the string had entries.
 ///
-/// Go's `httpproxy` is the nearest relative and the separator above is its rule, but this
-/// does not implement it: what an entry *matches* follows Chromium's
-/// `ProxyHostMatchingRules` wherever the readers answer differently, and the rest of this
-/// doc is where they do. None of it is a corner case.
+/// Go's `httpproxy` uses the same separator, but this crate's matching follows
+/// Chromium's `ProxyHostMatchingRules` where the two readers differ.
 ///
-/// The Windows tokens `<local>` and `<-loopback>` are read here too, which Go does not
-/// do — Chromium feeds the `no_proxy` environment variable through the same
-/// `ProxyHostMatchingRules::ParseFromString` as any other bypass list, and that is where the
-/// tokens are recognised. See [`proxy_override`], which differs in its separators and in
-/// reading a bare name as the one host rather than as the domain under it.
+/// The Windows tokens `<local>` and `<-loopback>` are read here too, which Go does not do;
+/// Chromium feeds the `no_proxy` environment variable through the same
+/// `ProxyHostMatchingRules::ParseFromString` as any other bypass list, and that is where
+/// the tokens are recognised. See [`proxy_override`], which differs in its separators and
+/// in reading a bare name as the one host rather than as the domain under it.
 ///
-/// Two further departures from Go, both downstream of reading `*` as Chromium's glob
-/// rather than as Go's optional prefix. A star is matched against the destination's text,
-/// so `*.*.*.1` bypasses `10.0.0.1`, where Go answers no domain entry at all against an
-/// address destination (`httpproxy/proxy.go:367-369`). And an entry whose body ends in a
-/// label that reads as a number — `.example.123` — goes to [`BypassRules::rejected`]
-/// rather than being kept: unreachable for the *special* schemes these lists are written
-/// about, but a `custom://a.example.123/` it would have matched is proxied instead — and
-/// that URL is one this crate answers about, since `resolve` (the `resolve` feature's entry
-/// point) sends an unknown scheme to the catch-all entry rather than declining it.
+/// Two further departures from Go follow from reading `*` as Chromium's glob rather than
+/// Go's optional prefix. A star is matched against the destination's text, so `*.*.*.1`
+/// bypasses `10.0.0.1`, where Go answers no domain entry at all against an address
+/// destination (`httpproxy/proxy.go:367-369`). An entry whose body ends in a label that
+/// reads as a number (`.example.123`) goes to [`BypassRules::rejected`]. This is
+/// unreachable for the special schemes these lists are written about, but a
+/// `custom://a.example.123/` it would have matched is proxied instead. That URL matters
+/// because `resolve` sends an unknown scheme to the catch-all entry rather than declining
+/// it.
+///
+/// An IPv4 address written other than as four decimal octets is read the URL way, as
+/// Chromium's `IPAddress::AssignFromIPLiteral` reads it, in an address entry and in a CIDR
+/// block whose address has four parts: `012.1.2.3` is `10.1.2.3` and `012.1.2.0/24` is
+/// `10.1.2.0/24`. A block with a short-form address (`192.168.1/24`) is an error. Limitation: curl and Go read neither
+/// as an address, so under them the entry matches nothing, and this answers `Direct` for a
+/// destination those two proxy.
 ///
 /// ```
 /// # use proxy_watch::parse;
@@ -374,6 +367,13 @@ pub fn no_proxy(spec: &str) -> BypassRules {
     )
 }
 
+// KDE's `NoProxyFor` (and the variable it names under `ProxyType = 4`): `no_proxy`'s
+// separators and grammar, KIO's comparison.
+#[cfg_attr(not(all(target_os = "linux", feature = "linux-kde")), allow(dead_code))]
+pub(crate) fn kde_no_proxy_for(spec: &str) -> BypassRules {
+    bypass_entries_in(spec.split(LIST_SEPARATORS.as_slice()), BypassDialect::Kde)
+}
+
 // Fold a list's entries into one rule set, each read in its own dialect.
 //
 // Takes an iterator rather than a string because not every source is one: GNOME's
@@ -384,6 +384,24 @@ pub(crate) fn bypass_entries_in<'a>(
     dialect: BypassDialect,
 ) -> BypassRules {
     let mut rules = BypassRules::new();
+    // Each store's resolver has its own implicit set; `Suffix` is the environment variable's
+    // and KDE's dialect, and KDE's reader sets its own after this returns.
+    rules.implicit = match dialect {
+        BypassDialect::Suffix => ImplicitBypass::Broad,
+        BypassDialect::Windows => ImplicitBypass::WinInet,
+        BypassDialect::MacOs => ImplicitBypass::CfNetwork,
+        BypassDialect::Gnome | BypassDialect::Kde => ImplicitBypass::Empty,
+    };
+    // Only the environment variable's readers shed a destination's trailing dot and read
+    // an IPv4-mapped destination as the address it maps; every store's resolver compares
+    // what was written.
+    rules.strip_trailing_dot = dialect == BypassDialect::Suffix;
+    rules.ipv4_mapped_as_ipv4 = dialect == BypassDialect::Suffix;
+    if dialect == BypassDialect::Gnome {
+        rules.push_gnome_entries(entries);
+        rules.dedup_patterns();
+        return rules;
+    }
     for entry in entries {
         // Trimmed here and not left to `HostPattern::parse_in`, which trims only what it
         // parses: `push_entry_in` puts the string it was given into `BypassRules::rejected`,

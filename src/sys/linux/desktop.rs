@@ -24,12 +24,12 @@ use crate::mode::ProxyMode;
 pub(crate) const XDG_CURRENT_DESKTOP: &str = "XDG_CURRENT_DESKTOP";
 
 // Chromium's next fallback after `XDG_CURRENT_DESKTOP` (`base/nix/xdg_util.cc`,
-// `GetDesktopEnvironment()`) — "what everyone used in 2010", in that function's own
+// `GetDesktopEnvironment()`): "what everyone used in 2010", in that function's own
 // comment.
 pub(crate) const DESKTOP_SESSION: &str = "DESKTOP_SESSION";
 
 // A variable Chromium only checks for *presence*, after `DESKTOP_SESSION` has also
-// produced no recognised value — an older, GNOME-specific signal. "No recognised value"
+// produced no recognised value. An older, GNOME-specific signal. "No recognised value"
 // rather than "empty": a `DESKTOP_SESSION` Chromium does not know falls through to here
 // just as an absent one does.
 pub(crate) const GNOME_DESKTOP_SESSION_ID: &str = "GNOME_DESKTOP_SESSION_ID";
@@ -53,7 +53,7 @@ pub(crate) enum Desktop {
     Gnome,
     // Plasma / KDE.
     Kde,
-    // Nothing recognisable — an empty variable, a bare login shell, a container, a
+    // Nothing recognisable: an empty variable, a bare login shell, a container, a
     // tiling window manager, …
     Unknown,
 }
@@ -103,18 +103,18 @@ pub(crate) fn classify(value: Option<&str>) -> Desktop {
     Desktop::Unknown
 }
 
-// [`classify`], but falling back — only when `xdg_current_desktop` is itself unset or
-// empty — to the chain Chromium's `GetDesktopEnvironment()` (`base/nix/xdg_util.cc`)
+// [`classify`], but falling back, only when `xdg_current_desktop` is itself unset or
+// empty, to the chain Chromium's `GetDesktopEnvironment()` (`base/nix/xdg_util.cc`)
 // uses for the same purpose: `desktop_session`, then the mere presence of
 // `gnome_desktop_session_id_present` or `kde_full_session_present`, in that order.
 //
 // That gate is where this parts company with Chromium, which drops through to the same
 // chain whenever *no token matched*, set or not. The reason to stop instead: a
 // `XDG_CURRENT_DESKTOP` that names something is an answer, even when it is an answer this
-// crate has no store for, and the variables below it are the ones that go stale —
+// crate has no store for, and the variables below it are the ones that go stale;
 // `DESKTOP_SESSION` is written from the session file a display manager launched, and
 // `GNOME_DESKTOP_SESSION_ID` lingers in environments GNOME no longer runs. Overruling the
-// modern variable with either would be trusting the older signal precisely where the two
+// modern variable with either would be trusting the older signal where the two
 // disagree.
 //
 // The difference is narrow in any case: it only shows when the chain would have said KDE,
@@ -156,7 +156,7 @@ pub(crate) fn classify_with_fallback(
 // stage, kept where it resolves to a store this crate has.
 //
 // These are session-file names, not `XDG_CURRENT_DESKTOP` tokens, which is why the list
-// does not simply repeat [`KDE_TOKENS`] and [`GNOME_TOKENS`]: a display manager writes
+// does not repeat [`KDE_TOKENS`] and [`GNOME_TOKENS`]: a display manager writes
 // `DESKTOP_SESSION` from the name of the session file it launched (`kde4`, `kde-plasma`),
 // while the token lists hold the desktop names the XDG spec puts in `XDG_CURRENT_DESKTOP`
 // (`kde`, `plasma`). [`classify`] compares whole tokens for equality, so neither `kde4`
@@ -195,22 +195,21 @@ pub(crate) fn is_compiled_in(store: Store) -> bool {
 //
 // Reads `XDG_CURRENT_DESKTOP` and, only when needed, the fallback chain
 // [`classify_with_fallback`] documents.
-pub(crate) fn current() -> Desktop {
+pub(crate) fn current(env: &super::Env) -> Desktop {
     classify_with_fallback(
-        text_if_set(std::env::var_os(XDG_CURRENT_DESKTOP)).as_deref(),
-        text_if_set(std::env::var_os(DESKTOP_SESSION)).as_deref(),
-        std::env::var_os(GNOME_DESKTOP_SESSION_ID).is_some(),
-        std::env::var_os(KDE_FULL_SESSION).is_some(),
+        text_if_set(env.var_os(XDG_CURRENT_DESKTOP)).as_deref(),
+        text_if_set(env.var_os(DESKTOP_SESSION)).as_deref(),
+        env.var_os(GNOME_DESKTOP_SESSION_ID).is_some(),
+        env.var_os(KDE_FULL_SESSION).is_some(),
     )
 }
 
-// One variable as [`classify_with_fallback`] needs to see it: `None` only when it is
-// genuinely unset.
+// One variable as [`classify_with_fallback`] needs to see it: `None` only when it is unset.
 //
 // `env::var().ok()` cannot tell "unset" from "set to bytes that are not UTF-8", and those
 // are the two classes [`classify_with_fallback`] divides on: a present-but-unrecognised
 // `XDG_CURRENT_DESKTOP` stops there, an unset one falls through to `DESKTOP_SESSION` and
-// the presence-only variables — the older signals that go stale, which the doc above
+// the presence-only variables, the older signals that go stale, which the doc above
 // refuses to consult while the modern variable has spoken. A mangled value belongs to the
 // class that stops, and `to_string_lossy` puts it there: its replacement character matches
 // no token and is not whitespace, so the value stays present and unrecognised. It is also
@@ -223,8 +222,8 @@ fn text_if_set(value: Option<std::ffi::OsString>) -> Option<String> {
 
 // What one store had to say when the backend read it.
 //
-// The three-way split is the whole point: **"nobody configured this store" and "this
-// store is deliberately set to go direct" are different answers**.
+// The three-way split distinguishes an unconfigured store from one explicitly set to go
+// direct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Reading {
     // The store does not exist here at all: GNOME's schema is not installed,
@@ -232,18 +231,17 @@ pub(crate) enum Reading {
     // contributes nothing, and a machine where *both* stores are `Absent` is
     // [`Error::Unsupported`](crate::Error::Unsupported).
     //
-    // A store whose read failed **while the leading store was already `Configured`**
-    // also arrives here, softened by [`read_store_fail_soft`] below: its
-    // answer would not have been used anyway, so failing the whole lookup over it would
-    // refuse an answer this crate is holding. So `Absent` means "contributes nothing",
-    // not strictly "does not exist" — which is worth knowing, because it is the one way a
-    // store that *did* have something to say can end up contributing nothing at all. A
-    // failure with no configured store ahead of it does *not* arrive here: there the
-    // store that failed was the effective one, and its error is returned.
+    // A store whose read failed **while the leading store was already `Configured`** also
+    // arrives here, softened by [`read_store_fail_soft`] below: its answer would not have
+    // been used anyway, so failing the whole lookup over it would refuse an answer this
+    // crate is holding. So `Absent` means "contributes nothing", not strictly "does not
+    // exist": this is the only case where a store that would otherwise contribute an
+    // answer contributes nothing. A failure with no configured store ahead of it does
+    // *not* arrive here: there the store that failed was the effective one, and its error
+    // is returned.
     Absent,
-    // The store exists, but nobody has ever configured it — see
-    // [`super::gsettings_map::configured_mode`] and
-    // [`super::kioslaverc::configured_from_kioslaverc`] for how each store tells that
+    // The store exists but is unconfigured; see [`super::gsettings_map::configured_mode`]
+    // and [`super::kioslaverc::configured_from_kioslaverc`] for how each store tells that
     // apart from an explicit "no proxy".
     Unset,
     // The store carries a configuration, **including a deliberate
@@ -299,7 +297,7 @@ pub(crate) fn read_in_order(
 // `leading` is what the leading store answered, and `None` when `read` *is* the leading
 // store. Softening rests on this store's answer not being the one the caller gets, and
 // that holds only while the leading store has an answer of its own: against a leading
-// `Configured` — the effective value — this store's failure costs nothing that would have
+// `Configured` (the effective value), this store's failure costs nothing that would have
 // been reported. A leading `Unset` or `Absent` makes *this* store the effective one, and
 // softening there replaces a configured proxy with a `Direct` that measured nothing. That
 // is the silent misdetection this backend exists to prevent; it is also what
@@ -336,7 +334,7 @@ fn read_store_fail_soft(
 }
 
 // Warn when the store that would have won is not in this build, and the store that
-// therefore wins instead belongs to a desktop nobody is running.
+// therefore wins instead belongs to a desktop that is not running.
 //
 // Also the second thing `fallbacks` records on this platform, and the one with the worse
 // consequence: a store that failed to read at least tried, while this one was never
@@ -346,7 +344,7 @@ fn read_store_fail_soft(
 // states about everything it does not decide itself: these tests are compiled on every
 // target, and a `cfg(feature)` rule whose tests only run on Linux is one nothing on this
 // project's development machines ever exercises. `compiled_in` is [`is_compiled_in`] taken
-// as a parameter for the second half of the same reason — the condition this whole function
+// as a parameter for the second half of the same reason: the condition this whole function
 // is about never holds in an `--all-features` build, which is the one the tests run in.
 #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 pub(crate) fn note_if_the_leading_store_was_compiled_out(
@@ -386,8 +384,8 @@ pub(crate) fn note_if_the_leading_store_was_compiled_out(
              the other desktop's — which may be stale. Enable the feature for the desktop \
              this process actually runs under."
         ),
-        // The quieter half of the same fault, and the more misleading one: nothing is
-        // left to report, so the answer is a `Direct` that never measured anything.
+        // This case of the same fault is more misleading because nothing is left to report:
+        // the answer is a `Direct` that never measured anything.
         Reading::Unset => crate::trace::warning!(
             desktop = ?desktop,
             leading_store = ?order(desktop)[0],
@@ -429,6 +427,15 @@ pub(crate) fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The watcher thread classifies from the copy taken at construction, so the desktop is
+    // whatever that copy says, not what the live environment says.
+    #[test]
+    fn the_desktop_comes_from_the_copied_environment() {
+        let env = super::super::Env::from_pairs(&[("XDG_CURRENT_DESKTOP", "KDE")]);
+        assert_eq!(current(&env), Desktop::Kde);
+        assert_eq!(current(&super::super::Env::default()), Desktop::Unknown);
+    }
 
     #[test]
     fn the_common_spellings_are_recognised() {
@@ -486,7 +493,7 @@ mod tests {
 
     // The `DESKTOP_SESSION` list is not a narrowing of the `XDG_CURRENT_DESKTOP` token
     // lists and must not be rewritten into one: the two variables hold different
-    // namespaces — session-file names against XDG desktop names — so a value that is
+    // namespaces (session-file names against XDG desktop names), so a value that is
     // recognised in one and not the other is the reason the second list exists.
     #[test]
     fn a_session_file_name_is_recognised_only_in_the_desktop_session_fallback() {
@@ -504,13 +511,13 @@ mod tests {
         }
     }
 
-    // Each classifier lower-cases *and* trims, and neither trim was held — the case rows
-    // above pass either way, and the whitespace-only rows answer `Unknown` whether the spaces
-    // are removed or merely fail to match. Padding is not what a display manager writes, but
-    // these are ordinary environment variables and a session script that exports one with a
-    // stray space is enough. Untrimmed, the token matches nothing, the desktop reads
-    // `Unknown`, and [`order`] then puts GSettings ahead of `kioslaverc` on a machine running
-    // Plasma: the store nothing writes, in front of the store the user configured.
+    // Each classifier lower-cases *and* trims, and neither trim was held: the case rows
+    // above pass either way, and the whitespace-only rows answer `Unknown` whether the
+    // spaces are removed or fail to match. Padding is not what a display manager writes,
+    // but these are ordinary environment variables and a session script that exports one
+    // with a stray space is enough. Untrimmed, the token matches nothing, the desktop reads
+    // `Unknown`, and [`order`] then puts GSettings ahead of `kioslaverc` on a machine
+    // running Plasma: the store nothing writes, in front of the store the user configured.
     #[test]
     fn a_token_with_spaces_around_it_still_names_its_desktop() {
         assert_eq!(classify(Some(" plasma ")), Desktop::Kde);
@@ -536,21 +543,19 @@ mod tests {
     #[test]
     fn a_present_but_unrecognised_xdg_current_desktop_does_not_fall_back() {
         // Chromium's own chain (`base/nix/xdg_util.cc`) would still consult DESKTOP_SESSION
-        // (and beyond) here; this crate deliberately stops — see classify_with_fallback's
-        // doc comment.
+        // (and beyond) here; this crate stops (see classify_with_fallback's doc comment).
         assert_eq!(
             classify_with_fallback(Some("sway"), Some("gnome"), true, true),
             Desktop::Unknown
         );
     }
 
-    // A variable set to bytes that are not UTF-8 is *set*, and the two classes above are
-    // not interchangeable. Read with `env::var().ok()` it arrived as `None`, so a mangled
-    // `XDG_CURRENT_DESKTOP` fell through to `DESKTOP_SESSION` and the presence-only
-    // variables — precisely the older, staler signals `classify_with_fallback` refuses to
-    // consult while the modern variable has spoken, and the store precedence flips with
-    // them. Only these two families can *build* such a value; anywhere else the test would
-    // set nothing and pass on nothing.
+    // A variable containing non-UTF-8 bytes is set. Do not read it with `env::var().ok()`:
+    // that turns it into `None`, allowing a mangled `XDG_CURRENT_DESKTOP` to fall through
+    // to the older `DESKTOP_SESSION` and presence-only signals and change store precedence.
+    // `classify_with_fallback` refuses those signals while the modern variable is set. Only
+    // Windows and Unix can construct this value; elsewhere the test would set nothing and
+    // pass without exercising it.
     #[cfg(any(windows, unix))]
     #[test]
     fn a_variable_that_is_not_unicode_still_counts_as_set() {
@@ -614,32 +619,26 @@ mod tests {
         );
     }
 
-    // Every token of [`GNOME_TOKENS`], each shown to shut the fallback chain rather than
-    // merely to produce a [`Desktop::Gnome`] nobody can tell from [`Desktop::Unknown`]:
-    // `order` maps the two onto the same pair, so a row asserting the variant alone would
-    // be a restatement of the table rather than a hold on it. The chain here is stacked to
-    // answer KDE from all three of its rungs at once, so a token that stops being
-    // recognised does not stay quiet — it flips the leading store.
+    // Every token of [`GNOME_TOKENS`] must stop the fallback chain. `order` maps
+    // [`Desktop::Gnome`] and [`Desktop::Unknown`] to the same store pair, so a variant-only
+    // check does not verify precedence. All three fallback levels here answer KDE; losing a
+    // GNOME token therefore changes the leading store.
     //
-    // Half the table is named nowhere else: `the_common_spellings_are_recognised` reaches
-    // `gnome`, `x-cinnamon`, `mate` and `unity`, spells `gnome-classic` only as
-    // `GNOME-Classic:GNOME` — where the bare `GNOME` beside it answers first — and never
-    // mentions `gnome-flashback`, `cinnamon` or `pantheon` at all. Those four answer to this
-    // test alone, on Windows and under WSL alike.
+    // `the_common_spellings_are_recognised` covers `gnome`, `x-cinnamon`, `mate` and
+    // `unity`. Its `GNOME-Classic:GNOME` case also matches the bare `GNOME`, and it does
+    // not cover `gnome-flashback`, `cinnamon` or `pantheon`. This test checks those four
+    // independently on Windows and WSL.
     //
-    // Cinnamon and Pantheon are the two that carry weight rather than redundancy: Mint
-    // sets `XDG_CURRENT_DESKTOP=X-Cinnamon` on some releases and `Cinnamon` on others, and
-    // elementary OS sets `Pantheon` with no second token behind it, so for those sessions
-    // the entry here is the only thing standing between the desktop and a fallback chain
-    // that any leftover `KDE_FULL_SESSION` turns into a KDE answer. The other two are
-    // belt-and-braces — GNOME Classic and Flashback both append `:GNOME` — and are held
-    // anyway, because a table is easier to keep right when no row is exempt.
+    // Mint sets `XDG_CURRENT_DESKTOP=X-Cinnamon` on some releases and `Cinnamon` on others;
+    // elementary OS sets `Pantheon` without a second token. Recognising them prevents a
+    // leftover `KDE_FULL_SESSION` from selecting KDE. GNOME Classic and Flashback append
+    // `:GNOME`, but testing their individual tokens keeps every table row covered.
     #[test]
     fn every_gnome_token_stops_the_fallback_chain() {
         // Spelled out rather than iterated over [`GNOME_TOKENS`]. A loop over the constant
         // renames itself along with the table, so it would stay green through a rename of
         // the four entries above; written out, the strings answer to the table instead of
-        // repeating it. The length check is what a loop would otherwise have bought — a
+        // repeating it. The length check is what a loop would otherwise have bought: a
         // token added to the table and not to this list.
         const TOKENS: [&str; 8] = [
             "gnome",
@@ -686,7 +685,7 @@ mod tests {
         }
     }
 
-    // Which store this build can actually read, in the configurations where the question
+    // Which store this build can read, in the configurations where the question
     // has an answer worth asking. Under `--all-features` [`is_compiled_in`] answers
     // `true` for `Store::GSettings` and for `Store::Kioslaverc` alike, so exchanging the
     // answers there changes nothing, so a run that only ever builds `--all-features`
@@ -701,7 +700,7 @@ mod tests {
     //
     // The consequence a swap would have is a warning naming the wrong store
     // ([`note_if_the_leading_store_was_compiled_out`]) and a watcher judging the wrong
-    // one leading (`watcher::is_leading_store`) — neither of which changes a public
+    // one leading (`watcher::is_leading_store`), neither of which changes a public
     // value, so there is no end-to-end reading that would catch it instead.
     #[cfg(all(feature = "linux-kde", not(feature = "linux-gnome")))]
     #[test]
@@ -734,7 +733,7 @@ mod tests {
 
     // The regression test for the rule that the running desktop's store wins even when
     // it is configured to go direct: an explicit "no proxy" in the desktop the user is
-    // actually running must not be overruled by the other store.
+    // running must not be overruled by the other store.
     #[test]
     fn an_explicit_direct_in_the_leading_store_wins() {
         let assembled = assemble(
@@ -863,9 +862,9 @@ mod tests {
 
     // The trailing store's failure against each of the leading store's three answers. Only
     // a leading `Configured` is an effective value, and only then is the trailing store's
-    // answer one the caller was never going to get — the sole reading under which losing
-    // it costs nothing. A leading `Unset` or `Absent` makes the store that failed the
-    // effective one, so softening there hands back a `Direct` nobody measured.
+    // answer one the caller was never going to get, the sole reading under which losing it
+    // costs nothing. A leading `Unset` or `Absent` makes the store that failed the
+    // effective one, so softening there hands back an unmeasured `Direct`.
     #[test]
     fn a_second_store_error_is_softened_only_when_the_leading_store_is_configured() {
         let leading = [Reading::Absent, Reading::Unset, gnome(ProxyMode::Direct)];
@@ -993,7 +992,8 @@ mod tests {
 
     // [`assemble`] takes the two readings by store, so [`read_in_order`] has to undo the
     // precedence order it read them in. Under KDE the store it read first is the *second*
-    // element of the pair it returns, which is the one place a swap would show.
+    // element of the pair it returns, which is the only position where a swap is
+    // observable.
     #[test]
     fn the_two_readings_come_back_in_store_order_whichever_store_led() {
         let from_gsettings = gnome(manual("gnome.corp:8080"));

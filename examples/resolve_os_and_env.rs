@@ -1,16 +1,16 @@
 //! Combine OS settings and `*_proxy` env, then `resolve()` URLs.
 //!
-//! The library keeps these apart on purpose: env vars do not change from outside the
-//! process, so they are not on `ProxyWatcher`'s stream (`examples/env.rs`). There is also
-//! no single "load everything" API — precedence is a policy choice, which is why the caller
-//! names it: read both, then
+//! The library keeps these apart: env vars do not change from outside the process, so they
+//! are not on `ProxyWatcher`'s stream (`examples/env.rs`). There is also no single "load
+//! everything" API; precedence is a policy choice, so the caller names it: read both, then
 //! [`ProxyConfig::with_env`](proxy_watch::ProxyConfig::with_env) with the
 //! [`EnvPrecedence`](proxy_watch::EnvPrecedence) this program wants, then resolve.
 //!
 //! Default order is **env first** (curl-like). Pass `--os-first` to rank env below the OS
-//! sources — which is a rank, not a veto: on a machine whose OS settings read cleanly and
+//! sources, which is a rank, not a veto: on a machine whose OS settings read cleanly and
 //! configured nothing, the environment still answers. A systemd unit on a desktop host is
-//! usually in that case, and it is why `--os-first` is not spelled "ignore the environment".
+//! usually in that case, and it is why `--os-first` is not spelled "ignore the
+//! environment".
 //! A container with no desktop store at all is a different case: `read()` fails there with
 //! `Error::Unsupported` before either rank gets a say.
 //!
@@ -21,7 +21,7 @@
 //! cargo run --example resolve_os_and_env -- --os-first https://example.com/
 //! ```
 //!
-//! PAC / WPAD still surface as `Error::PacNotSupported` from `resolve()` — same as
+//! PAC / WPAD still surface as `Error::PacNotSupported` from `resolve()`, same as
 //! `examples/resolve.rs`. Script evaluation is `examples/pac.rs`.
 
 use proxy_watch::{EnvPrecedence, ProxyConfigSource, ProxyEnv, ProxyStep, Url, read, resolve};
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnvPrecedence::BeforeSystem
     };
     // `with_env` carries the OS snapshot's `fallbacks` and stamps the result with the older
-    // of the two reads, which is why this is one call and not an assembled source list.
+    // of the two reads, so this is one call and not an assembled source list.
     let config = read()?.with_env(&ProxyEnv::from_env()?, precedence);
 
     println!(
@@ -74,11 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !config.fallbacks.is_empty() {
         println!("fallbacks: {:?}", config.fallbacks);
     }
-    // Not the same as "no `*_proxy` variables are set". What is folded in as nothing at all is
-    // an environment that specified nothing *and* dropped nothing, and an empty value is a
-    // specification: `http_proxy=` means "no proxy for http", so it leaves an `Env` source and,
-    // under the default policy here, outranks the OS. A value that could not be parsed leaves
-    // one too — behind the OS sources rather than in front of them.
+    // Not the same as "no `*_proxy` variables are set". What is folded in as nothing at all
+    // is an environment that specified nothing *and* dropped nothing, and an empty value is
+    // a specification: `http_proxy=` means "no proxy for http", so it leaves an `Env`
+    // source and, under the default policy here, outranks the OS. A value that could not be
+    // parsed leaves one too, behind the OS sources rather than in front of them.
     if config.source(ProxyConfigSource::Env).is_none() {
         println!("(the process environment contributed nothing to this snapshot)\n");
     } else {

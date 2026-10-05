@@ -8,17 +8,17 @@
 //!
 //! Two things make that possible. `Sandbox::Snap` is decided from `$SNAP/meta/snap.yaml`
 //! (GLib's own rule, `gio/gsandbox.c`), and `SNAP` is an environment variable a test can
-//! set — unlike Flatpak's `/.flatpak-info`, an absolute path only root can create. And the
+//! set, unlike Flatpak's `/.flatpak-info`, an absolute path only root can create. And the
 //! portal is reached by bus name, so a service this file owns answers in its place.
 //!
 //! ```text
-//! dbus-run-session -- cargo test --test portal_watch
+//! dbus-run-session -- cargo test -p proxy-watch-gnome-tests --test portal_watch
 //! ```
 //!
 //! The bus is not optional and neither is owning the name: on a real GNOME or KDE session
 //! `org.freedesktop.portal.Desktop` already has an owner, `DO_NOT_QUEUE` turns that into a
 //! refusal rather than a wait, and this file self-skips through `support::skip_or_fail`.
-//! The real portal is never contacted in that case — the skip happens before the first
+//! The real portal is never contacted in that case; the skip happens before the first
 //! read. CI's ubuntu job runs the integration tests under `dbus-run-session`, where the
 //! name is free, so a skip there means the bus is missing and must turn the job red.
 //!
@@ -26,6 +26,7 @@
 //! constant reaches `call_sync`, at a cost of five seconds of wall clock per run.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::sync::Mutex;
@@ -38,11 +39,9 @@ use gio::prelude::*;
 use proxy_watch::{Error, ProxyConfigSource, ProxyEntry, ProxyMode, Scheme};
 
 // The catch-all assertion is the only thing in this file that resolves a URL, and the
-// gate above asks for `linux-gnome`, not for `resolve`. Imported unconditionally these
-// three named `proxy_watch::resolve` in a build that has none, so
-// `--no-default-features --features linux-gnome` failed to compile the test target while
-// the library itself built clean. No CI leg could see it: neither feature matrix carries
-// an entry with a Linux backend on and `resolve` off.
+// gate above asks for `linux-gnome`, not for `resolve`, so its three imports carry the
+// same `cfg`: without it `--no-default-features --features linux-gnome` does not compile
+// this target, and no CI leg builds a Linux backend with `resolve` off.
 #[cfg(feature = "resolve")]
 use proxy_watch::{ProxyEndpoint, ProxyStep, Url};
 
@@ -61,7 +60,7 @@ enum Answer {
     Refused,
     /// A proxy string no endpoint can be built from.
     Unparseable,
-    /// One probed scheme is proxied and the other four are not — the shape that tells
+    /// One probed scheme is proxied and the other four are not, the shape that tells
     /// "every probe said direct" apart from "some probe did".
     OneProxiedRestDirect,
     /// A proxy named without a scheme and without a port, so that the answer's port is
@@ -90,7 +89,7 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
     )
     .expect("writing the fake snap manifest");
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and no thread below has been started yet — so nothing can be reading.
+    // in it, and no thread below has been started yet, so nothing can be reading.
     unsafe {
         std::env::set_var("SNAP", &snap);
     }
@@ -128,7 +127,7 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
     // And what the catch-all row is *for*, read off the public answer rather than off the
     // slot it was filed under. `resolve` sends every URL scheme this crate does not model
     // to `Scheme::All`, so without the `none://` probe a sandboxed caller was told `Direct`
-    // for these while the host had a proxy for them — the misdetection this module exists
+    // for these while the host had a proxy for them, the misdetection this module exists
     // to prevent, in the one shape the per-scheme loop above cannot see, because every
     // scheme it asks about has a concrete entry that beats the catch-all.
     #[cfg(feature = "resolve")]
@@ -161,11 +160,11 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
     // 3. *Every* probe, not any of them. `read_mode` collapses to `Direct` only when no
     //    probed scheme came back with a proxy; a single proxied scheme keeps the mode
     //    `Manual`, with the four that answered `direct://` recorded as having answered it
-    //    rather than left absent. This step is the only thing holding the `all`: relaxing it
-    //    to `any` leaves the rest of the tree green, because step 2 above is the only other
-    //    shape that reaches the branch and it satisfies both readings. What the
-    //    relaxation costs is the sandbox misdetection this module exists to prevent, in its
-    //    quietest form: a host that proxies HTTP and nothing else would be reported as
+    //    rather than left absent. This step is the only thing holding the `all`: relaxing
+    //    it to `any` leaves the rest of the tree green, because step 2 above is the only
+    //    other shape that reaches the branch and it satisfies both readings. Relaxing it
+    //    lets through the sandbox misdetection this module exists to prevent, in its least
+    //    visible form: a host that proxies HTTP and nothing else would be reported as
     //    having no proxy at all, with no error anywhere, and `direct://` for four of five
     //    probes is what an ordinary split-tunnel PAC answers.
     *ANSWER.lock().expect("the answer lock") = Answer::OneProxiedRestDirect;
@@ -184,9 +183,9 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
         // The entry, not the endpoint. `endpoint_for` answers `None` for a slot the read
         // never filled just as readily as for one it filled with `Disabled`, so asking it
         // cannot tell "the portal said direct for this scheme" from "this scheme was never
-        // probed" — and `per_scheme` is a public field, so that is a distinction a caller
-        // can see. Ask about endpoints here instead and dropping the `Disabled` insert leaves
-        // the whole tree green. The last row is `Scheme::All`, where the record
+        // probed", and `per_scheme` is a public field, so that is a distinction a caller
+        // can see. Ask about endpoints here instead and dropping the `Disabled` insert
+        // leaves the whole tree green. The last row is `Scheme::All`, where the record
         // decides rather than merely informs: were it absent, every scheme the portal
         // answered `direct://` for would fall through to whatever the catch-all holds.
         assert_eq!(
@@ -199,7 +198,7 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
 
     // 4. The port the crate supplies when the portal names none. GLib hands out a URI and
     //    nothing in the reply is required to carry a port, so `DEFAULT_PORT` is a decision
-    //    this crate makes on the sandbox's behalf and one nothing else measures — changing
+    //    this crate makes on the sandbox's behalf and one nothing else measures: changing
     //    it from 80 to 8080 leaves every other test green. A wrong constant sends the
     //    sandbox's traffic to a port on the right host that is very likely closed, which
     //    surfaces as a connection failure the caller cannot trace back to a proxy setting.
@@ -216,8 +215,8 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
         config.effective
     );
 
-    // 5. A portal that fails is an error, not a quiet `Direct` — the misdetection the
-    //    whole sandbox branch exists to prevent.
+    // 5. A portal that fails is an error, not a `Direct` with no error, the misdetection
+    //    the whole sandbox branch exists to prevent.
     *ANSWER.lock().expect("the answer lock") = Answer::Refused;
     let error = proxy_watch::read().expect_err("a failed Lookup must not read as Direct");
     let Error::Sandboxed { sandbox, reason } = &error else {
@@ -225,7 +224,7 @@ fn the_portal_fallback_rebuilds_a_mode_from_its_five_probes() {
     };
     // Named the way it was detected. The manifest written at the top of this test says
     // `confinement: strict`, so the kind here is Snap and nothing else, and the word is a
-    // public field — the one thing this error tells whoever has to work out why a host with
+    // public field, the one thing this error tells whoever has to work out why a host with
     // a proxy read as having none. This assertion is the only thing holding that mapping:
     // transposing the `Flatpak` and `Snap` arms of `Sandbox::name` leaves the rest of the
     // tree green, because every other test that reaches this error matches
@@ -267,7 +266,7 @@ fn serve_the_fake_portal() -> bool {
         let context = glib::MainContext::new();
         // Everything the service does happens inside this, because the context that is
         // thread-default at registration time is the one GDBus dispatches its callbacks
-        // on — both the method call and the two name handlers.
+        // on: both the method call and the two name handlers.
         context
             .with_thread_default(|| serve(&context, ready, lost))
             .expect("a freshly created main context is not owned by another thread");
@@ -279,7 +278,7 @@ fn serve_the_fake_portal() -> bool {
         Err(_) => "no answer from the session bus within 5s".to_owned(),
     };
     skip_or_fail(&format!(
-        "{reason}. Run this under `dbus-run-session -- cargo test --test portal_watch`."
+        "{reason}. Run this under `dbus-run-session -- cargo test -p proxy-watch-gnome-tests --test portal_watch`."
     ));
     false
 }
@@ -287,7 +286,7 @@ fn serve_the_fake_portal() -> bool {
 /// The body of [`serve_the_fake_portal`]'s thread, with `context` already thread-default.
 ///
 /// Returns only if the session bus cannot be reached: the loop it ends on is never
-/// stopped, and neither the registration nor the [`gio::OwnerId`] is ever dropped — the
+/// stopped, and neither the registration nor the [`gio::OwnerId`] is ever dropped; the
 /// service lives as long as the test binary.
 fn serve(context: &glib::MainContext, ready: Outcome, lost: Outcome) {
     let connection = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {

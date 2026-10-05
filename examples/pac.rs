@@ -1,18 +1,18 @@
 //! Route URLs through a PAC script, including the part this crate refuses to do for you.
 //!
 //! ```text
-//! cargo run --features pac-boa --example pac
-//! cargo run --features pac-boa --example pac -- http://intranet/ https://example.net/
+//! cargo run --features pac-quickjs --example pac
+//! cargo run --features pac-quickjs --example pac -- http://intranet/ https://example.net/
 //! ```
 //!
-//! Two things are worth watching here.
+//! Two things to watch here.
 //!
 //! **The script body is an input.** `ProxyMode::Pac` carries a *URL*, and the crate will
-//! not download it — that would mean an HTTP client in the dependency
-//! graph of a crate whose point is that it has almost none. `pac::requirement()` tells
-//! you what to fetch before you commit to a request, and `resolve_with_pac()` says the
-//! same thing as `Error::PacFetchRequired` if you skip the check. This example fetches
-//! nothing: it uses a built-in script, and shows where your own HTTP client would go.
+//! not download it; that would mean an HTTP client in the dependency graph of a crate that
+//! keeps its dependencies to almost none. `pac::requirement()` tells you what to fetch
+//! before you commit to a request, and `resolve_with_pac()` says the same thing as
+//! `Error::PacFetchRequired` if you skip the check. This example fetches nothing: it uses a
+//! built-in script, and shows where your own HTTP client would go.
 //!
 //! **The default policy is the paranoid one.** `dnsResolve` returns `null`,
 //! `myIpAddress()` answers `127.0.0.1`, and evaluation is abandoned after five seconds.
@@ -47,18 +47,18 @@ const DEFAULT_URLS: &[&str] = &[
 
 /// Drop any `user:password@` before printing a PAC URL.
 ///
-/// The crate masks credentials in everything it renders itself — `ProxyMode`'s `Debug`,
+/// The crate masks credentials in everything it renders itself: `ProxyMode`'s `Debug`,
 /// every `Error`'s `Display`. Reach past those into a `Url` field, as the two call sites
 /// below do, and the masking is yours to redo: a `PacRequirement::Fetch` or a
 /// `PacFetchRequired` carries the URL exactly as the machine had it, credentials and all,
 /// because that is what the caller has to fetch.
 ///
 /// A `String` and not a `Url`, so that the failing path cannot be ignored by accident.
-/// `Url::set_username` answers `Err` rather than doing nothing quietly, and `url` 2.5.8
-/// refuses three cases: no host, an empty host, and the `file` scheme. That last one is
-/// reachable here — a PAC URL is whatever the machine has configured, and `file:` is a
-/// legal thing to configure. On `Err` the clone is still the original, so returning it
-/// would print exactly what this function exists to hide.
+/// `Url::set_username` answers `Err` rather than leaving the URL unchanged without an
+/// error, and `url` 2.5.8 refuses three cases: no host, an empty host, and the `file`
+/// scheme. That last one is reachable here: a PAC URL is whatever the machine has
+/// configured, and `file:` is a legal thing to configure. On `Err` the clone is still the
+/// original, so returning it would print the credentials this function exists to hide.
 fn without_credentials(url: &Url) -> String {
     let mut safe = url.clone();
     if safe.set_username("").is_err() || safe.set_password(None).is_err() {
@@ -68,7 +68,7 @@ fn without_credentials(url: &Url) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // What the machine is actually configured with, if anything is readable here.
+    // What the machine is configured with, if anything is readable here.
     match ProxyWatcher::new() {
         Ok(watcher) => {
             let current = watcher.current();
@@ -141,8 +141,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // `endpoint()` is `None` for `Direct` and for nothing else.
                         None => "DIRECT".to_owned(),
                         Some(endpoint) => match endpoint.scheme_hint {
-                            // The hint is the scheme worth printing: `socks5h` vs `socks5`
-                            // says who resolves the host name.
+                            // The hint is the scheme to print: `socks5h` vs `socks5` says
+                            // who resolves the host name.
                             Some(_) => endpoint.to_string(),
                             // Without a hint it prints a bare `host:port`, so name the
                             // protocol from the step. (`scheme()` is `None` only for

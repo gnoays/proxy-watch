@@ -5,19 +5,40 @@
 [![CI](https://github.com/gnoays/proxy-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/gnoays/proxy-watch/actions/workflows/ci.yml)
 [![Audit](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml/badge.svg)](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml)
 
-Read the operating system's proxy configuration on Windows, macOS and Linux — and get a
-`Stream` item every time it changes.
+Read the operating system's proxy configuration on Windows, macOS, Linux, Android and
+iOS, and get a `Stream` item every time it changes. On a host set to PAC, a URL's route
+comes from the OS's own PAC engine or a bundled one.
 
-A one-shot read at process start goes stale: a PAC URL pushed by policy, or a proxy
-switched out from under a long-running program, never reaches code that read once and
-cached the answer. This crate exists so that change arrives as a `Stream` item — within
-what each backend can see. Windows reads whichever connection is currently active, not
-every connection configured; **Platform support** below says what else each one leaves out.
+```rust,no_run
+use futures_util::StreamExt;
+use proxy_watch::{ProxyWatcher, WatchEvent};
 
-Backends prefer the OS notification API: `RegNotifyChangeKeyValue` on Windows,
-`SCDynamicStore` on macOS, GSettings signals or a `kioslaverc` file watch on Linux.
-Sandboxed Linux (Flatpak/Snap portal) has no change signal — set
-`WatchOptions::poll_interval` there, or the stream stays on the first snapshot.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut watcher = ProxyWatcher::new()?;
+    while let Some(event) = futures_executor::block_on(watcher.next()) {
+        if let WatchEvent::Snapshot { state, .. } = event {
+            println!("proxy: {:?}", state.config.effective);
+        }
+    }
+    Ok(())
+}
+```
+
+A one-shot read at process start goes stale: code that read once and cached the answer
+never sees a PAC URL pushed by policy, or a proxy switched out from under a long-running
+program. This crate delivers that change as a `Stream` item.
+
+## Which part you need
+
+- **The settings once**, for a program that starts, reads and exits: `read()`.
+- **The settings as they change**, for a long-running program: `ProxyWatcher`, a `Stream`
+  that opens with a snapshot.
+- **The route for one URL**, bypass rules applied: `resolve()`, and a PAC engine from the
+  feature table below when the host uses PAC or WPAD.
+- **An HTTP client that follows the OS**: `reqwest`'s `Proxy::custom` fed by a watcher.
+- **Only `http_proxy` / `no_proxy`**: `ProxyEnv::from_env()`, on every platform.
+
+Each has a section under **Usage**.
 
 ## Install
 
@@ -25,27 +46,15 @@ Sandboxed Linux (Flatpak/Snap portal) has no change signal — set
 cargo add proxy-watch
 ```
 
-The default features include GNOME support, which on Linux needs GLib's development files
-(`libglib2.0-dev`, `glib2-devel`) at build time; Windows and macOS builds never reach for
-them. A Linux build with no C dependency turns the defaults off and asks for the KDE half
-instead:
-
-```sh
-cargo add proxy-watch --no-default-features --features resolve,linux-kde
-```
-
-That command is also the answer to the licence question `linux-gnome` raises. The Rust
-bindings it pulls in — `gio`, `glib` and their `-sys` crates — are MIT, and this crate
-carries none of GLib's own code; GLib itself is LGPL-2.1-or-later, reached at run time as
-a shared library through `pkg-config`. Turning the feature off drops the C library from
-the picture entirely.
+GNOME support, on by default, opens GLib at run time: a build needs no C library or
+headers, and a machine without GLib reads the other stores.
 
 ## Usage
 
-[`examples/`](examples/) carries a runnable file per section — `current`, `watch`,
-`resolve`, `reqwest_client` — plus `env`, `resolve_os_and_env` and `pac`
-(`cargo run --example <name>`). The full API reference is on
-[docs.rs](https://docs.rs/proxy-watch).
+[`examples/`](examples/) has a runnable file per section (`current`, `watch`, `resolve`,
+`reqwest_client`), plus `env`, `resolve_os_and_env` and `pac`
+(`cargo run --example <name>`; `pac` needs `--features pac-quickjs`). The API reference, every feature's limits and each
+platform's details are on [docs.rs](https://docs.rs/proxy-watch).
 
 ### Read it once
 
@@ -57,17 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`read()` starts no watcher: no thread, and no change-notification route to register. That
-last part is the reason it exists rather than being `ProxyWatcher::new()?.current()` —
-arming notifications can fail on a machine whose settings still read fine, and only the
-watcher has to care.
-
-If configuration and watcher liveness must describe the same instant, use the atomic
-`ProxyWatcher::state()` observation instead of separate `current()` and `health()` calls.
-
-`read()` reports the OS stores alone. `http_proxy` / `no_proxy` are a second snapshot,
-`ProxyEnv::from_env()`, and which one wins is a policy you name rather than one this crate
-picks — most command-line tools want the environment first, the way `curl` reads it:
+`read()` reports the OS settings only. `http_proxy` / `no_proxy` come from
+`ProxyEnv::from_env()`, and you choose which one wins. This puts the environment first:
 
 ```rust,no_run
 use proxy_watch::{read, EnvPrecedence, ProxyEnv};
@@ -79,16 +79,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-On a Linux host with no desktop store at all — a server, a container, CI — `read()` itself
-answers `Error::Unsupported`, and the environment is the only configuration there. Treat
-that error as "use `ProxyEnv` alone", not as fatal.
+On a Linux host with neither desktop's store (no GNOME proxy schema and no `kioslaverc`,
+as on most servers, containers and CI hosts), `read()` answers `Error::Unsupported`. Treat
+that as "use `ProxyEnv` alone", not as fatal. With the schema installed and nothing set,
+it answers `Direct` instead.
 
 ### Watch it
 
-`ProxyWatcher` is a `futures_core::Stream` on OS threads of its own, so it needs no async
-runtime: `StreamExt::next()` gives one future per item, and anything that blocks on a
-future drives it. Neither `futures-util` nor `futures-executor` is a dependency of this
-crate — add them yourself, or `.await` the same `next()` from whatever runtime you have.
+`ProxyWatcher` runs on OS threads of its own, so it needs no async runtime. This example
+drives it with `futures-executor`; add `futures-util` and `futures-executor` yourself, or
+`.await` `next()` from the runtime you have.
 
 ```rust,no_run
 use futures_util::StreamExt;
@@ -110,29 +110,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The first item is always a snapshot of the current configuration, emitted at subscription
-time. After that a snapshot means the configuration really changed, *or* that a
-notification route was lost — the health rides the same stream, so a watcher that has gone
-deaf says so instead of only falling quiet. Snapshots equal to the previous one are
-dropped, and notifications are coalesced over a 200 ms debounce window
-(`WatchOptions::debounce`).
+The first item is the current configuration. After that, a snapshot means the
+configuration changed or a notification route was lost, which `state.health` shows.
+Changes are coalesced over 200 ms (`WatchOptions::debounce`). After a
+`WatchEvent::Error`, a recovery that changes nothing publishes nothing; call `current()` to
+check.
 
-Nothing is promised after a `WatchEvent::Error`. If the next successful read returns the
-same configuration and no route changed, there is nothing to publish and the stream stays
-silent; confirm recovery with `current()` or `state()` rather than waiting for an item. A
-snapshot does follow whenever the configuration or the health actually moved.
-
-With the `tokio` feature, `watch_channel()` moves the watcher into a background task and
-publishes to a `tokio::sync::watch::Receiver`, which clones freely — that is how you get
-more than one consumer. It has to be called from inside a runtime, and it is **configuration
-only**: it drops both the errors and the health, so a failed re-read or a dead route leaves
-the last good configuration published with nothing to mark it. Poll the `Stream` yourself,
-or read `ProxyWatcher::state()`, if you need either.
+With the `tokio` feature, `watch_channel()` publishes to a `tokio::sync::watch::Receiver`,
+which clones for more than one consumer. Call it inside a runtime.
 
 ### Decide how to reach a URL
 
-`resolve()` turns a snapshot into an ordered list of `ProxyStep`s, applying the bypass
-rules, the per-scheme precedence and the `<local>` / CIDR / wildcard patterns:
+`resolve()` turns a snapshot into the ordered `ProxyStep`s to try, bypass rules applied:
 
 ```rust,no_run
 use proxy_watch::{read, resolve, Url};
@@ -149,29 +138,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`endpoint()` and not `to_url()`, for two reasons. `ProxyEndpoint`'s `Display` masks
-credentials and a `Url`'s does not — `to_url()` exists to hand `user:password@` to a
-client, so printing one prints the proxy password. And `to_url()` also answers `None` for
-an endpoint whose host cannot be written into a URL, which would print `DIRECT` for a
-machine that has a proxy. Use `to_url()` where the URL is *sent*, as the `reqwest` snippet
-below does.
-
 On a machine configured with a PAC script or WPAD it **fails**, with
-`Error::PacNotSupported`. Falling back to a direct connection would route traffic around a
-proxy the administrator configured, so the choice is the caller's.
+`Error::PacNotSupported`, instead of answering direct. To get an answer there, pass the
+snapshot to `pac::PacResolver`:
 
-To evaluate a script instead, enable `pac` — plus `pac-boa` for a pure-Rust engine — and
-call `resolve_with_pac()` with a body you already have; that path never downloads. On
-Windows, `pac-windows-native` hands discovery, download and evaluation to WinHTTP
-instead. `PacPolicy`'s rustdoc covers the safety envelope and the two CVEs behind its
-defaults.
+```rust,ignore
+let resolver = PacResolver::new(PacPolicy::new()).with_system_native()?;
+let steps = resolver.resolve_config(&config, &url, None)?;
+```
+
+- **Let the OS evaluate it**: enable `pac-native`. On Windows, macOS, iOS and Android
+  the OS downloads and runs the script; elsewhere `with_system_native()` does nothing.
+- **Evaluate a script you have**: enable `pac-quickjs`. It runs a body carried in the
+  settings, or one you fetched and pass as the last argument; it never downloads
+  (`examples/pac.rs`). Android and iOS builds leave the engine out and answer as if none
+  were enabled.
+- **Keep the script out of your process**: enable `pac-subprocess` and attach a
+  `SubprocessEvaluator` with `with_evaluator()`. It runs `proxy-watch-pac-worker`, which
+  `cargo install proxy-watch --features pac-subprocess,pac-quickjs` builds. The worker
+  sandboxes itself only on Linux (x86-64, AArch64); elsewhere the evaluator refuses it
+  until you call `allow_unsandboxed()`.
+
+WPAD on Windows and Apple platforms stays `PacNotSupported` until you build the native
+resolver `with_wpad(true)` and attach it with `with_native()`.
 
 ### With `reqwest`
 
-`reqwest` fixes its proxy at `Client` build time
-([#2674](https://github.com/seanmonstar/reqwest/issues/2674)), but `Proxy::custom` runs a
-closure each time a connection is opened, so a config kept fresh by a watcher makes an
-existing `Client` follow the OS for every destination it is not already connected to
+`reqwest` fixes its proxy when the `Client` is built, but `Proxy::custom` asks on every new
+connection, so a config kept fresh by a watcher makes one `Client` follow the OS
 ([`examples/reqwest_client.rs`](examples/reqwest_client.rs)):
 
 ```rust,ignore
@@ -183,142 +177,95 @@ let client = reqwest::Client::builder()
     .build()?;
 ```
 
-A connection already in the pool keeps its old route, because hyper-util keys the pool on
-the destination alone: expect the change after `pool_idle_timeout` (90 s by default), or
-set `pool_max_idle_per_host(0)`, or rebuild the `Client` on each event.
-
-Turning a `resolve` error into `None` via `.ok()?` is fail-open (direct), and two errors
-reach it: `PacNotSupported` on a PAC/WPAD machine, and `ProxyEntryUnusable` where the
-configured proxy for that scheme could not be read. Fail the request, or call
-`resolve_with_pac()` / WinHTTP for the first — the full example spells that out.
+A pooled connection keeps its old route until `pool_idle_timeout` (90 s by default); set
+`pool_max_idle_per_host(0)` to apply a change at once. `.ok()?` sends the request direct on
+any `resolve` error, `PacNotSupported` included. `Proxy::custom` cannot fail a request, so
+decide PAC hosts before the closure runs; the full example says how.
 
 ## Pitfalls
 
-- **`read()` blocks, and not always briefly.** Both non-Windows backends wait on a system
-  service that can be absent: a `configd` still coming up is retried for five seconds, and
-  inside a Linux sandbox each portal `Lookup` is bounded at five seconds — per call, and a
-  sandboxed read asks five of them. Keep it off a UI thread.
+- **`read()` can block for seconds** on macOS and inside a Linux sandbox, while a system
+  service comes up or times out. Keep it off a UI thread.
 - **A PAC or WPAD machine makes `resolve()` fail** with `Error::PacNotSupported` rather
   than answering `DIRECT`, so a caller that treats an error as "go direct" routes traffic
-  around the administrator's proxy. Handle it, or enable `pac`.
-- **Windows reports one connection and one step**: the active connection's settings only,
-  and when auto-detect, a PAC URL and static servers are all enabled, only the first.
-- **A sandboxed watcher never fires** without `WatchOptions::poll_interval` — the portal
+  around the administrator's proxy. Handle it, or pass the snapshot to `PacResolver` with a
+  PAC engine enabled.
+- **Windows reports one connection and one mode**: the active connection's settings only,
+  and when more than one is enabled, auto-detect wins over a PAC URL, which wins over
+  static servers.
+- **A sandboxed watcher never fires** without `WatchOptions::poll_interval`: the portal
   has no change signal, so the stream stays on its first snapshot.
+- **A `kioslaverc` that is a symlink into another directory is read but not watched**: the
+  watch is on the config directories, and an edit to the link's target fires nothing there.
+  Set `WatchOptions::poll_interval` if a dotfile manager links it.
 - **`ProxyStep::to_url()` carries the password in the clear.** It exists to hand
   `user:password@` to a client; `endpoint()`'s `Display` masks it, so print that one.
 - **`watch_channel()` publishes configuration only.** A failed re-read or a dead
   notification route leaves the last good configuration standing with nothing marking it.
 
-## Where a host's settings live
-
-Reproducing a report, or writing a setting to test against, means knowing which store is
-being read — which is not always the one the GUI writes.
-
-| Platform | Store | Where it comes from |
-|---|---|---|
-| Windows | Per-user WinINet through `WinHttpGetIEProxyConfigForCurrentUser`, falling back to `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` (`ProxyServer`, `ProxyOverride`, `AutoConfigURL`) | Settings → Network & Internet → Proxy |
-| Windows | The WinHTTP machine default, `WinHttpGetDefaultProxyConfiguration` | `netsh winhttp set proxy`. Reported, but never `effective` — the per-user store outranks it |
-| Windows | `HKLM\Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings` | Group Policy. Also reported, also behind the per-user store |
-| macOS | The `SCDynamicStore` proxy dictionary (`HTTPProxy`, `ExceptionsList`, `ProxyAutoConfigURLString`, …) | System Settings → Network → *service* → Details → Proxies, or `sudo networksetup -setwebproxy <service> <host> <port>`. Read it back with `scutil --proxy` |
-| Linux (GNOME) | GSettings `org.gnome.system.proxy` and its `.http` / `.https` / `.ftp` / `.socks` children | Settings → Network → Network Proxy, or `gsettings set org.gnome.system.proxy mode 'manual'` |
-| Linux (KDE) | `[Proxy Settings]` in `kioslaverc`, merged across the whole XDG cascade | System Settings → Network → Proxy, which writes `~/.config/kioslaverc` |
-| Any | `http_proxy`, `https_proxy`, `ftp_proxy`, `all_proxy`, `no_proxy` | The process environment, read by `ProxyEnv::from_env()`. Lowercase beats uppercase; on Windows any other casing is read after both. An `http_proxy` next to a non-empty `REQUEST_METHOD` is refused with `Error::CgiHttpProxy`, because a request header sets that variable |
-
-Each of those spells its bypass list differently, and the differences decide which hosts go
-direct. The `parse` module's docs have the table, entry shape by entry shape.
-
 ## Feature flags
 
 | Feature | Default | What it adds |
 |---|---|---|
-| `resolve` | **on** | `resolve()` and `ProxyStep`. No extra dependency |
-| `linux-gnome` | **on** | GNOME half of the Linux backend (GSettings, XDG portal fallback). Pulls in `gio`/`glib`, so GLib is a build-time C dependency |
-| `linux-kde` | **on** | KDE half (`kioslaverc` and its file watch). Pure Rust |
-| `tokio` | off | `watch_channel()`; pulls in `tokio` with only `rt` and `sync` |
-| `pac` | off | The `pac` module and `resolve_with_pac()`. Parsing and policy only — no JavaScript engine; you supply the script body. Implies `resolve` |
-| `pac-boa` | off | The engine for `pac`: pure-Rust `boa_engine`. Opt-in on purpose, since a PAC script is code from a network-controlled location. Implies `pac` |
-| `pac-windows-native` | off | Windows only: `pac::WinHttpPacResolver` — WPAD discovery, download, and evaluation via WinHTTP. No `PacInline`; `PacPolicy` does not apply on this path. Implies `pac` |
-| `tracing` | off | Log lines naming which source changed the configuration. Credentials, PAC bodies and echoed parse inputs are never logged |
-
-Platform backends are **not** feature-selected — they are chosen by target `cfg`, because
-a feature enabled anywhere in a dependency graph can never be turned off again.
-`linux-gnome` and `linux-kde` are the deliberate exception: they pick between stores
-*within* Linux. Turning `linux-gnome` off drops the C dependency; with both off, Linux
-behaves like an unsupported target — except inside a sandbox, where the portal fallback
-needs `linux-gnome` to be compiled in at all, so the answer is `Error::Sandboxed` rather
-than `Error::Unsupported`. Both are errors; a caller matching only on `Unsupported`
-misses that one.
+| `resolve` | **on** | `resolve()`: the proxy, or direct, for one URL |
+| `linux-gnome` | **on** | GNOME settings; opens GLib at run time |
+| `linux-kde` | **on** | KDE settings (`kioslaverc`) |
+| `tokio` | off | `watch_channel()`, a `tokio::sync::watch::Receiver` |
+| `tracing` | off | Logs naming which source changed; written to keep credentials out of them |
+| `pac-native` | off | PAC through the OS's own resolver on Windows, macOS, iOS and Android |
+| `pac-quickjs` | off | A bundled QuickJS engine for a PAC body you supply; needs a C compiler |
+| `pac-subprocess` | off | The same engine in a worker process of its own; the worker is built with `pac-quickjs` too |
+| `pac-windows-native` | off | The Windows part of `pac-native` (WinHTTP) |
+| `pac-macos-native` | off | The macOS part of `pac-native` (CFNetwork) |
+| `pac-ios-native` | off | The iOS part of `pac-native` (CFNetwork) |
+| `pac-android-native` | off | The Android part of `pac-native` (`ProxySelector`) |
+| `pac` | off | PAC parsing and policy with no engine; every `pac-*` feature turns it on |
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
-| Windows | Implemented, tested in CI (`RegNotifyChangeKeyValue` over `Internet Settings`, read through `WinHttpGetIEProxyConfigForCurrentUser`) |
-| macOS | Implemented, tested in CI headless (`SCDynamicStore` plus a `CFRunLoop`). GUI changes, network-location switching and MDM `GlobalHTTPProxy` are **unverified** on real hardware |
-| Linux (GNOME) | Implemented, tested in CI (`gio` `changed` signal), behind `linux-gnome` |
-| Linux (KDE) | Implemented, tested in CI (`kioslaverc` file watch, no desktop environment needed), behind `linux-kde` |
-| Linux (Flatpak/Snap) | Sandbox detected from `/.flatpak-info`, or — as GLib's `is_snap` does it — from `$SNAP/meta/snap.yaml` declaring anything but `confinement: classic`; read via the `ProxyResolver` portal (needs `linux-gnome`) or `Error::Sandboxed`. Watch needs `WatchOptions::poll_interval` (portal has no change signal). **Unverified** |
-| Environment variables | `ProxyEnv::from_env()` on every platform — a snapshot, never a `Stream`: nothing outside the process can change them, and a process changing its own is signalled nowhere. Re-read to pick that up; `ProxyEnv::captured_at()` says when the snapshot was taken |
+| Windows | Tested in CI |
+| macOS | Tested in CI without a GUI. GUI changes, network-location switches and MDM `GlobalHTTPProxy` are **unverified** on real hardware |
+| Linux (GNOME, KDE) | Tested in CI; behind `linux-gnome` and `linux-kde` |
+| Linux (Flatpak/Snap) | Read through the desktop portal (needs `linux-gnome`); watching needs `WatchOptions::poll_interval`. **Unverified** |
+| Android | The crate needs the app's `JavaVM` and a `Context`: `android-activity`, and `tao` from 0.36 (Tauri 2.12), register them with `ndk-context`, which the crate reads. A host that registers neither, `tao` before 0.36 among them, calls `proxy_watch::android::init` before the first read; a read before it fails, and under `panic = "abort"` aborts the process. Reading needs API 23+; watching needs API 26+ and in-memory code loading, or else `WatchOptions::poll_interval`. **Partly verified** on an emulator, registered through `ndk-context`, through `android::init` from a Tauri 2.11 app, and through what `tao` registers in a Tauri 2.12 app; no device has run it |
+| iOS | Watching needs `WatchOptions::poll_interval`: iOS gives an app no proxy change notification. **Partly verified** on a simulator |
+| Environment variables | `ProxyEnv::from_env()` on every platform; a snapshot, never a `Stream` |
 
-Everywhere else the constructors compile and return `Error::Unsupported` at runtime, so
-downstream code compiles on any target.
+Everywhere else the constructors compile and return `Error::Unsupported` at runtime.
 
-Where the table says **unverified**, the failure to expect is the quiet one: the crate
-reports no proxy while the host has one, and publishes no error. The crate docs open with
-what to look for on each. An issue carrying that output is worth more than any review —
-these are the surfaces this crate cannot verify on its own, and
+Where the table says **unverified**, expect this failure mode: no proxy reported while the
+host has one, and no error. If you see it,
 [the form](https://github.com/gnoays/proxy-watch/issues/new?template=unverified-surface.yml)
-asks for the pair that settles one: what the host is set to, and what the crate answered.
-
-Each backend documents its own limits at the top of its module. Those modules are private,
-so the text is in the source rather than on docs.rs; the limits worth knowing before
-relying on a backend are:
-
-- Windows 8 / Windows Server 2012 is the floor, and nothing checks it. The registry watch
-  arms `RegNotifyChangeKeyValue` with `REG_NOTIFY_THREAD_AGNOSTIC`, which Microsoft
-  documents as "only supported in Windows 8 and later" — the function itself goes back to
-  Windows 2000, so it is the flag and not the call that sets the floor — and
-  `pac-windows-native` calls `WinHttpCreateProxyResolver` and `WinHttpGetProxyForUrlEx`,
-  both of which list Windows 8 and Windows Server 2012 as their minimum supported client
-  and server. Behaviour on an older release has not been measured.
-- Windows reads the settings of the active connection only. `WinHttpGetIEProxyConfigForCurrentUser`
-  is documented as returning them for the current active connection — LAN, dial-up or VPN
-  alike — and this crate never enumerates connectoids to find the others. It also reports
-  only the first enabled step when auto-detect, a PAC URL and static servers are all on.
-- `kioslaverc` is merged across the whole XDG cascade (`/etc/xdg` through
-  `$XDG_CONFIG_HOME`), so a system value marked immutable (`[$i]`) is not overridden by a
-  user file. But a `[$e]` flag is not expanded: KDE substitutes `$VAR`/`${VAR}` from the
-  environment of whichever session read the file, and pulling process environment in on a
-  config file's say-so is not something a library that only reports should do. A `[$e]`
-  value that still contains a `$` is therefore recorded in `ProxyMode::rejected` rather
-  than reported as a host, a bypass pattern, or a PAC script — the literal text is not the
-  value the desktop is
-  using, and naming it as a proxy would invent a destination nobody configured. A `[$e]`
-  value with no `$` in it expands to itself and is read as written.
-- A `kioslaverc` watch can go silent if a watched directory is deleted. That surfaces as
-  `WatchHealth::degraded`.
+asks for what the host is set to and what the crate answered; a report needs both.
 
 ## Minimum supported Rust version
 
-**1.88**, and **1.92** with `linux-gnome` (its `gio`/`glib` declare that themselves).
-`linux-gnome` is a default feature, so a default build *on Linux* needs 1.92; 1.88 is the
-floor everywhere else. Both are checked in CI (`cargo check --all-targets`) rather than
-taken on trust.
+**1.88**, with every feature. CI checks it on Linux x86-64
+(`cargo check --all-targets --all-features`); the other targets' dependencies are not
+checked against it.
 
 ## Design
 
 - **Async-runtime agnostic:** `futures_core::Stream` on dedicated OS threads (`tokio` optional).
 - **`unsafe` is confined to the code that calls the OS directly.** Windows and macOS
-  backends and the WinHTTP PAC engine; the OS-independent core and the Linux backend
+  backends, the iOS backend and the Core Foundation conversion it shares with macOS, the
+  Android backend's JNI entry, the WinHTTP and CFNetwork PAC engines, the limits
+  `pac-subprocess` puts on its worker (a memory cap through `setrlimit` on Linux and a job
+  object on Windows, and the Linux seccomp filter), and the table through which
+  `linux-gnome` calls GLib; the OS-independent core and the rest of the Linux backend
   contain none of their own.
-- **Credentials stay masked** in `Debug`; `ProxyAuth` has no `Display`.
+- **Credentials stay masked** in `Debug`; `ProxyAuth` has no `Display`. That is the
+  `user:password@` of a URL; its query prints as it is, a PAC URL's `?key=` included,
+  because nothing about a query parameter says it is a secret and the PAC URL is what
+  tells two configurations apart.
 
 ## Contributing
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the checks CI applies and how to run them, what
-`#[ignore]` means here — it marks the tests that rewrite your machine's real proxy settings
-— and what the prose gates in `xtask/` require of a comment.
+`#[ignore]` means here (it marks the tests that rewrite your machine's real proxy settings)
+and what the prose gates in `xtask/` require of a comment.
 
 ## License
 

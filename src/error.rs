@@ -7,7 +7,7 @@ use crate::{RejectedValue, Scheme};
 
 /// Errors from reading OS proxy configuration, and from routing a URL through what was read.
 ///
-/// `#[non_exhaustive]`. No `#[from] io::Error` — I/O is always wrapped with context.
+/// `#[non_exhaustive]`. No `#[from] io::Error`: I/O is always wrapped with context.
 /// Hand-written [`Debug`]: [`PacFetchRequired`](Error::PacFetchRequired)'s [`url::Url`]
 /// would print credentials; other payloads are masked at construction or safe.
 #[derive(Error)]
@@ -16,7 +16,7 @@ pub enum Error {
     /// A Windows `ProxyServer` style specification could not be parsed.
     #[error("invalid proxy server specification {input:?}: {reason}")]
     InvalidProxyServer {
-        /// Offending token, masked — and withheld outright when it may be a credential.
+        /// Offending token, masked, and withheld outright when it may be a credential.
         input: String,
         /// Why parsing failed.
         reason: String,
@@ -57,7 +57,7 @@ pub enum Error {
     ///
     /// KDE's `ProxyType = 4` raises the same error on a wider rule, because there the
     /// *file* names the variable each slot reads: any name a request header could have set
-    /// — RFC 3875 §4.1.18's `HTTP_` prefix — is refused whichever slot named it, including
+    /// (RFC 3875 §4.1.18's `HTTP_` prefix) is refused whichever slot named it, including
     /// the one holding the bypass list. `variable` is that name as written.
     #[error("refusing to use {variable} value in CGI environment")]
     CgiHttpProxy {
@@ -78,7 +78,7 @@ pub enum Error {
     },
 
     /// Linux sandbox: desktop settings unreadable (Flatpak without dconf → keyfile
-    /// defaults). Portal fallback when possible; else this error — not a false Direct.
+    /// defaults). Portal fallback when possible; else this error, not a false Direct.
     #[error("running inside a {sandbox} sandbox: {reason}")]
     Sandboxed {
         /// Detected sandbox name.
@@ -87,10 +87,9 @@ pub enum Error {
         reason: String,
     },
 
-    /// No store to read. Off Windows/macOS/Linux there is no backend at all; on Linux it is
-    /// a reading and not a property of the build — *neither* desktop store answered, which
-    /// both desktop features being off guarantees and which a build with one of them on also
-    /// reaches whenever the schema and `kioslaverc` are both missing from the machine.
+    /// No store to read. A target with no backend has none at all; on Linux neither desktop
+    /// store answered, which both desktop features being off guarantees and which a build
+    /// with one of them on reaches when the schema and `kioslaverc` are missing.
     ///
     /// Not the answer inside a sandbox: that route is chosen before either store is
     /// consulted and reports [`Sandboxed`](Self::Sandboxed), including when the feature that
@@ -99,12 +98,14 @@ pub enum Error {
     Unsupported,
 
     /// `resolve()` needs PAC/WPAD evaluation (`resolve_with_pac` / `pac` feature).
-    /// Deliberately an error, not silent Direct.
+    /// An error, not silent Direct.
     ///
     /// `resolve_with_pac` answers with it too, for
-    /// [`WpadAutoDetect`](crate::ProxyMode::WpadAutoDetect) handed no script body:
-    /// discovery is a non-goal, so the fix there is to supply the script rather than to
-    /// change entry point. `mode` is `"wpad"` either way and does not tell the two apart.
+    /// [`WpadAutoDetect`](crate::ProxyMode::WpadAutoDetect) handed no script body: this
+    /// crate runs no discovery itself, so the fix there is to supply the script, or to hand
+    /// discovery to the OS through `WinHttpPacResolver` / `CfNetworkPacResolver` built
+    /// `with_wpad(true)`, which answer `WpadAutoDetect` with this error until they are.
+    /// `mode` is `"wpad"` in every case and does not tell them apart.
     #[error("resolving this URL requires evaluating a proxy auto-config script ({mode})")]
     PacNotSupported {
         /// Auto-config mode in effect.
@@ -114,37 +115,36 @@ pub enum Error {
     /// The system configured a proxy for this scheme, the value could not be used, and no
     /// other entry covers it.
     ///
-    /// Returning `ProxyStep::Direct` here would assert something
-    /// the platform does not do: KDE expands a `[$e]` value from the session environment and
-    /// proxies the request, and this crate deliberately does not expand it. Only a scheme
-    /// with no catch-all reaches this — a live `socksProxy` covers the drop first, exactly as
-    /// Chromium's `fallback_proxies` does. Where this reports, Chromium goes direct instead:
-    /// its `ProxyList::AddProxyChain` drops a malformed entry with "Silently discard
-    /// malformed inputs", leaving `MapUrlSchemeToProxyList` to answer `nullptr`.
-    // `{scheme}` names the slot, so the second half says "this request" rather than repeating
-    // it: for a `ws`/`wss` URL the slot is `Https` or `Socks`, and "nothing else covers https"
-    // would describe a request nobody made.
+    /// Returning `ProxyStep::Direct` here would assert something the platform does not do:
+    /// KDE expands a `[$e]` value from the session environment and proxies the request, and
+    /// this crate does not expand it. Only a scheme with no catch-all reaches this; a live
+    /// `socksProxy` covers the drop first, as Chromium's `fallback_proxies` does. Where
+    /// this reports, Chromium goes direct instead: its `ProxyList::AddProxyChain` drops a
+    /// malformed entry with "Silently discard malformed inputs", leaving
+    /// `MapUrlSchemeToProxyList` to answer `nullptr`.
+    // `{scheme}` names the slot, so the second half says "this request" rather than
+    // repeating it: for a `ws`/`wss` URL the slot is `Https` or `Socks`, and "nothing else
+    // covers https" would describe a request that was not made.
     #[error("the configured {scheme} proxy could not be used and nothing else covers this request")]
     ProxyEntryUnusable {
-        /// Which requests lost an answer — read off the drop's own attribution, not off the
-        /// slot it was found under. In every mode this crate builds the two are the same
-        /// value, because each backend files its record against the slot it dropped, so this
-        /// is the slot, and the slot is what decides coverage rather than the request's own
-        /// scheme: a lost catch-all reports [`Scheme::All`] whatever was asked for, and a
-        /// `ws`/`wss` request reports whichever of the chain it lost. A caller who hands
-        /// [`ProxyMode::manual`](crate::ProxyMode::manual) a record attributed to one scheme
-        /// under the key of another gets the attribution back rather than the key. Nothing
-        /// normalises the pair: the record is the caller's, and the same value is what
+        /// Which requests lost an answer, read off the drop's own attribution. In every
+        /// mode this crate builds, the attribution and the slot are the same value because
+        /// each backend files its record against the slot it dropped, so the slot decides
+        /// coverage rather than the request's own scheme. A lost catch-all reports
+        /// [`Scheme::All`] whatever was asked for, and a `ws`/`wss` request reports
+        /// whichever of the chain it lost. A caller who hands
+        /// [`ProxyMode::manual`](crate::ProxyMode::manual) a record attributed to one
+        /// scheme under the key of another gets the attribution back: nothing normalises a
+        /// caller-built mismatch, and the same value is what
         /// [`ProxyMode::rejected`](crate::ProxyMode::rejected) hands back.
         scheme: Scheme,
         /// First drop naming that scheme; masked at construction. The rest stay reachable
-        /// through [`ProxyMode::rejected`](crate::ProxyMode::rejected) *on the mode this
-        /// error was resolved against*, which is the caller's own `config.effective`
-        /// wherever the caller supplied it. Where a resolver builds a mode of its own it is
-        /// not: `WinHttpPacResolver::resolve_config` answers a WPAD miss by re-reading the
-        /// registry into a `Manual` and resolving against that, and the mode goes out of
-        /// scope with the call while the caller still holds `WpadAutoDetect`, which has no
-        /// list. This field is what survives that.
+        /// through [`ProxyMode::rejected`](crate::ProxyMode::rejected) on the mode this
+        /// error was resolved against, which is the caller's own `config.effective`
+        /// wherever the caller supplied it. This field survives when a resolver builds a
+        /// mode of its own that goes out of scope with the call: `WinHttpPacResolver`
+        /// answers a WPAD miss by re-reading the registry into a `Manual`, while the caller
+        /// still holds `WpadAutoDetect`, which has no list.
         rejected: RejectedValue,
     },
 
@@ -173,6 +173,19 @@ pub enum Error {
         timeout: std::time::Duration,
     },
 
+    /// Every PAC evaluation slot stayed taken for the whole of `PacPolicy::timeout`, so the
+    /// script never started. The PAC engines together run at most `limit` evaluation threads
+    /// per process, and a thread holds its slot until its script ends, past the timeout that
+    /// abandoned it. `pac-quickjs` interrupts a script at the deadline, and holds a slot past
+    /// it only while a host function such as `dnsResolve` has yet to return.
+    #[error("no PAC evaluation slot came free within {timeout:?} ({limit} still running)")]
+    PacSaturated {
+        /// Budget spent waiting.
+        timeout: std::time::Duration,
+        /// Evaluation threads this process allows at once.
+        limit: usize,
+    },
+
     /// `FindProxyForURL` returned nothing usable (malformed candidates skipped first).
     /// `result` masked at construction.
     #[error("PAC script returned no usable proxy candidate: {result:?}")]
@@ -181,15 +194,16 @@ pub enum Error {
         result: String,
     },
 
-    /// `pac` on but no engine (`pac-boa` or a custom `pac::PacEvaluator`).
-    ///
-    /// Not linked: the item exists only with the `pac` feature on, and this variant does not.
-    #[error("no PAC JavaScript engine is enabled; build with the `pac-boa` feature")]
+    /// `pac` on but no engine (`pac-quickjs` or a custom `pac::PacEvaluator`).
+    #[error(
+        "no PAC JavaScript engine is enabled; build with `pac-quickjs` (not on Android or iOS), \
+         or attach a native resolver through `pac::PacResolver`"
+    )]
     PacEngineUnavailable,
 }
 
 impl Error {
-    // Mask `user:password` in `input` once so Display/Debug stay safe downstream — with
+    // Mask `user:password` in `input` once so Display/Debug stay safe downstream, with
     // or without the `@` that would make it recognisable, since `input` is by definition
     // a token that failed to parse.
     pub(crate) fn proxy_server(input: impl AsRef<str>, reason: impl Into<String>) -> Self {
@@ -229,7 +243,7 @@ impl Error {
         }
     }
 
-    // Mask + sanitize, in that order — see
+    // Mask + sanitize, in that order; see
     // [`crate::util::redact_and_sanitize_untrusted`] (PAC return is attacker-chosen).
     #[cfg_attr(not(feature = "pac"), allow(dead_code))]
     pub(crate) fn pac_invalid_result(result: impl AsRef<str>) -> Self {
@@ -238,11 +252,15 @@ impl Error {
         }
     }
 
-    // Mask + sanitize engine/`throw` text. `pac/boa.rs` hands over what the engine said;
+    // Mask + sanitize engine/`throw` text. `pac/quickjs.rs` hands over what the engine said;
     // `pac/winhttp.rs` hands over a sentence it wrote itself and still comes through here,
     // so the variant is never built any other way.
     #[cfg_attr(
-        not(any(feature = "pac-boa", all(windows, feature = "pac-windows-native"))),
+        not(any(
+            pac_quickjs,
+            feature = "pac-subprocess",
+            all(windows, feature = "pac-windows-native")
+        )),
         allow(dead_code)
     )]
     pub(crate) fn pac_evaluation(reason: impl AsRef<str>) -> Self {
@@ -310,6 +328,11 @@ impl std::fmt::Debug for Error {
             Error::PacTimeout { timeout } => f
                 .debug_struct("PacTimeout")
                 .field("timeout", timeout)
+                .finish(),
+            Error::PacSaturated { timeout, limit } => f
+                .debug_struct("PacSaturated")
+                .field("timeout", timeout)
+                .field("limit", limit)
                 .finish(),
             Error::PacInvalidResult { result } => f
                 .debug_struct("PacInvalidResult")
@@ -442,9 +465,9 @@ mod tests {
 
     // `Error::proxy_server`/`Error::bypass` mask only their `input` field; `reason` is
     // trusted. `crate::util::split_host_port`'s `Err` tests that trust: on malformed
-    // input it hands back the tail of the string it was splitting, which — because
+    // input it hands back the tail of the string it was splitting, which, because
     // `ProxyEndpoint::parse` cuts the authority off at the first `/`/`?`/`#` *before* it
-    // looks for `@` — can be a stranded password fragment rather than a port. This drives
+    // looks for `@`, can be a stranded password fragment rather than a port. This drives
     // the real helper the way `endpoint.rs` does, not a made-up reason string.
     #[test]
     fn proxy_server_reason_does_not_leak_a_password_stranded_past_a_slash() {
@@ -462,8 +485,8 @@ mod tests {
         assert!(debug.contains("proxy.corp"), "{debug}");
     }
 
-    // `HostPattern::parse` never processes `@` — a bypass entry is not supposed to be a
-    // URL — so `bypass.rs` rejects any `@`-bearing entry outright, with a reason that
+    // `HostPattern::parse` never processes `@` (a bypass entry is not supposed to be a
+    // URL), so `bypass.rs` rejects any `@`-bearing entry outright, with a reason that
     // names the mistake instead of repeating it.
     #[test]
     fn bypass_reason_does_not_leak_a_password_before_an_at_sign() {
@@ -533,15 +556,15 @@ mod tests {
 
     // One row per variant. Only [`Error::PacFetchRequired`] needs the hand-written impl at
     // all; the other arms are what `derive(Debug)` would have written, copied out by hand
-    // because a hand-written impl cannot delegate to a derive for the rest. This test is the
-    // only thing that notices a copy drifting: `Sandboxed` printed without its `reason` — the
-    // field that says *why* the sandbox left nothing readable, and the whole content of that
-    // error — and `Unsupported` printed as `PacEngineUnavailable`, which leaves two distinct
-    // failures indistinguishable wherever a caller logs `{:?}`.
+    // because a hand-written impl cannot delegate to a derive for the rest. This test is
+    // the only thing that notices a copy drifting: `Sandboxed` printed without its `reason`
+    // (the field that says *why* the sandbox left nothing readable, and the whole content
+    // of that error), and `Unsupported` printed as `PacEngineUnavailable`, which leaves two
+    // distinct failures indistinguishable wherever a caller logs `{:?}`.
     //
-    // Exact strings, so that a label, an order or a name cannot change unseen. Where a field
-    // has a `Debug` of its own the expectation defers to it rather than copying it out,
-    // which is the one thing this impl does not own.
+    // Exact strings, so that a label, an order or a name cannot change unseen. Where a
+    // field has a `Debug` of its own the expectation defers to it rather than copying it
+    // out, because this impl does not control that rendering.
     #[test]
     fn every_variant_debug_names_itself_and_keeps_its_fields() {
         let rejected = RejectedValue::new(
@@ -608,7 +631,7 @@ mod tests {
                 ),
             ),
             (
-                // No credentials, so that the row pins the rendering and not the masking —
+                // No credentials, so that the row pins the rendering and not the masking,
                 // which `pac_fetch_required_masks_the_password_in_display_and_debug` owns.
                 Error::PacFetchRequired {
                     url: url::Url::parse("https://wpad.corp/proxy.pac").unwrap(),
@@ -624,6 +647,13 @@ mod tests {
                     timeout: std::time::Duration::from_millis(1500),
                 },
                 "PacTimeout { timeout: 1.5s }".to_owned(),
+            ),
+            (
+                Error::PacSaturated {
+                    timeout: std::time::Duration::from_millis(1500),
+                    limit: 4,
+                },
+                "PacSaturated { timeout: 1.5s, limit: 4 }".to_owned(),
             ),
             (
                 Error::pac_invalid_result("BOGUS"),

@@ -15,15 +15,20 @@ cargo xtask audit-docs
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 ```
 
-`--test-threads=1` is not decoration. Several tests read and write process-wide state — the
-environment, and on Windows the registry — so running them concurrently makes them observe
+These reach the library and `xtask/`. The workspace's other crates sit outside
+`default-members`, so they need `-p`: on Linux, the GLib-driven integration tests run as
+`dbus-run-session -- cargo test -p proxy-watch-gnome-tests --tests --all-features -- --test-threads=1`,
+and the `bindings` job in the workflow lists the steps for the binding crates.
+
+`--test-threads=1` is not decoration. Several tests read and write process-wide state (the
+environment, and on Windows the registry), so running them concurrently makes them observe
 each other's writes.
 
 `--all-features` never sees what breaks only with a feature *off*: with `resolve` off,
 `mod resolve` disappears and every intra-doc link to it goes unresolved in a build that line
 never makes. CI runs clippy, rustdoc and the suite once per row of `FEATURE_MATRIX` and
 `TEST_FEATURE_MATRIX` at the top of the workflow. Reproduce a row, or type-check the Linux
-backends from any host — clippy and rustdoc never link:
+backends from any host (clippy and rustdoc never link):
 
 ```sh
 cargo clippy --no-default-features --features resolve,linux-kde --all-targets -- -D warnings
@@ -32,17 +37,18 @@ cargo clippy --target x86_64-unknown-linux-gnu --no-default-features --features 
 
 macOS does not run from a non-Mac host. `cargo check --target aarch64-apple-darwin
 --all-targets` reaches `src/sys/mac/` and `tests/mac_watch.rs` and catches a rename or a
-signature drift — not an assertion that is simply false. `.github/workflows/mac-tests.yml`
+signature drift, not an assertion that is simply false. `.github/workflows/mac-tests.yml`
 is a `workflow_dispatch` that answers the rest on one runner.
 
 ## `#[ignore]` means "rewrites your real settings"
 
 Here `#[ignore]` does not mean broken or pending. It marks the tests that rewrite the
-development machine's own configuration — the Windows registry under `Internet Settings`.
+development machine's own configuration (the Windows registry under `Internet Settings`)
+or reach its network, as the macOS WPAD test in `src/pac/cfnetwork.rs` does.
 Plain `cargo test` skips them, and CI passes `--include-ignored` because a GitHub-hosted
 runner is discarded when the job ends. Pass it on your own machine only if you accept that
 your proxy settings are the subject of the test. For something that should run neither by
-default nor in the ordinary CI step, use an environment-variable gate instead —
+default nor in the ordinary CI step, use an environment-variable gate instead:
 `tests/mac_configd_denied.rs` is the shape to copy.
 
 ## The prose gates
@@ -62,15 +68,15 @@ the repair is nearly always to reword the sentence.
 
 Some surfaces cannot be reached from CI at all: a proxy changed through the macOS GUI, a
 network-location switch, an MDM `GlobalHTTPProxy` payload, the Flatpak and Snap portals.
-The failure there is the silent one — no proxy reported while the host has one, and no
-error — so what settles it is a pair taken on one machine at one moment: what the host is
+The failure there is the silent one (no proxy reported while the host has one, and no
+error), so what settles it is a pair taken on one machine at one moment: what the host is
 set to, read back from the OS, and what the crate answered against it. There is a form that
 asks for exactly that pair, under `.github/ISSUE_TEMPLATE/`.
 
 ## Cutting a release
 
-A release is a tag. `.github/workflows/release.yml` does the rest — publishes to crates.io
-through Trusted Publishing and creates the GitHub Release from the changelog — after
+A release is a tag. `.github/workflows/release.yml` does the rest (publishes to crates.io
+through Trusted Publishing and creates the GitHub Release from the changelog) after
 refusing anything that disagrees with itself:
 
 1. Bump `version` in `Cargo.toml`.
@@ -82,7 +88,7 @@ refusing anything that disagrees with itself:
 
 The workflow checks that the tag names the manifest version, that the changelog has a
 section and a link for it, that the tagged commit is on `main` with a successful CI run,
-and that `cargo publish --dry-run` passes — in that order, before anything irreversible.
+and that `cargo publish --dry-run` passes, in that order, before anything irreversible.
 Publishing waits on the `crates-io` environment, which is where a required reviewer goes
 if one is wanted.
 

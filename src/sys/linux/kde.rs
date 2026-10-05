@@ -1,13 +1,18 @@
 //! KDE: read/watch `kioslaverc` (`linux-kde`: pure Rust `notify` + `configparser`).
 //!
-//! File-based on purpose — see [`super::kioslaverc`] (KIO 6 → libproxy `config-kde`).
+//! File-based on purpose: see [`super::kioslaverc`] (KIO 6 → libproxy `config-kde`).
 //! Watches the **directory** (not the inode): KConfig atomic rename would orphan a file
 //! watch; also catches a first-time create, in the directories that exist when the watch
 //! is set up ([`watch_targets`] drops the rest). Like `KSharedConfig::openConfig` with
 //! `KConfig::CascadeConfig`, files from `XDG_CONFIG_DIRS` through `XDG_CONFIG_HOME` are
 //! applied from least to most specific ([`search_dirs`] / [`watch_targets`]).
+//!
+//! A `kioslaverc` that is a symlink is read through the link, but only its directory is
+//! watched, so an edit to a target in another directory fires nothing and the watch still
+//! reports itself live. `poll_now_re_reads_a_change_no_watch_can_see` in
+//! `tests/linux_watch.rs` uses that as its fixture; `WatchOptions::poll_interval`
+//! is the remedy.
 
-use std::env;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -20,10 +25,11 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::error::Error;
 
+use super::Env;
 use super::desktop::Reading;
 use super::kioslaverc::{self, FILE_NAME, KdeConfig, KioslavercSettings};
 
-// `XDG_CONFIG_DIRS` — the colon separated, left-to-right priority list of *system*
+// `XDG_CONFIG_DIRS`: the colon separated, left-to-right priority list of *system*
 // configuration directories (XDG Base Directory Specification). Unset, empty, or left with
 // nothing after [`search_dirs`] drops the relative entries defaults to the single entry
 // [`DEFAULT_CONFIG_DIRS`].
@@ -41,9 +47,9 @@ fn search_dirs(
     // A relative path is not a location: it resolves against the process's current
     // directory, so a watcher built before a `chdir` would go on watching one directory
     // while re-reading another. The XDG Base Directory Specification requires it to be
-    // ignored — "All paths set in these environment variables must be absolute. If an
+    // ignored, "All paths set in these environment variables must be absolute. If an
     // implementation encounters a relative path in any of these variables it should
-    // consider the path invalid and ignore it" — and ignoring `XDG_CONFIG_HOME` means
+    // consider the path invalid and ignore it", and ignoring `XDG_CONFIG_HOME` means
     // falling back to `$HOME/.config`, which is why this takes the first *usable* of the
     // two rather than filtering afterwards. `HOME` is held to the same rule because
     // `$HOME/.config` inherits whatever it held.
@@ -69,14 +75,13 @@ fn search_dirs(
         system.push(PathBuf::from(DEFAULT_CONFIG_DIRS));
     }
 
-    // `dirs.contains` scans a vector this loop is filling, the same shape
-    // `BypassRules::dedup_patterns` and `parse_find_proxy_result` moved off. It stays a
-    // scan here because the quantity it is quadratic in is not the one that would hurt
-    // first: every directory that survives becomes a `kioslaverc` open on each read and on
-    // each watcher wake, so a list long enough for the dedup to matter is already a list
-    // this module cannot afford to walk once. `XDG_CONFIG_DIRS` is also the only one of the
-    // four sources with no writer but the process's own launcher — the others are a remote
-    // script, a registry value group policy sets, and a `configd` array.
+    // `dirs.contains` scans a vector this loop is filling; `BypassRules::dedup_patterns`
+    // and `parse_find_proxy_result` use indexed deduplication. The quadratic scan is
+    // acceptable here because every surviving directory requires a `kioslaverc` open on
+    // each read and watcher wake. A list long enough for deduplication to matter is already
+    // too expensive to walk once. `XDG_CONFIG_DIRS` is written only by the process
+    // launcher; the other three sources are a remote script, a registry value set by group
+    // policy, and a `configd` array.
     for candidate in system {
         if !dirs.contains(&candidate) {
             dirs.push(candidate);
@@ -85,7 +90,7 @@ fn search_dirs(
     dirs
 }
 
-// `value`, unless it is absent or the empty string — the shared "unset or empty" rule
+// `value`, unless it is absent or the empty string, the shared "unset or empty" rule
 // `XDG_CONFIG_HOME` and `XDG_CONFIG_DIRS` both follow.
 //
 // No input can observe it, because the empty string fails every downstream test as well:
@@ -96,21 +101,21 @@ fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
     value.filter(|v| !v.is_empty())
 }
 
-// [`search_dirs`], reading the real environment.
-fn config_search_dirs() -> Vec<PathBuf> {
+// [`search_dirs`], reading `env`.
+fn config_search_dirs(env: &Env) -> Vec<PathBuf> {
     search_dirs(
-        env::var_os("XDG_CONFIG_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-        env::var_os(XDG_CONFIG_DIRS).as_deref(),
+        env.var_os("XDG_CONFIG_HOME").as_deref(),
+        env.var_os("HOME").as_deref(),
+        env.var_os(XDG_CONFIG_DIRS).as_deref(),
     )
 }
 
 struct KioslavercRead {
     settings: KioslavercSettings,
     // Outside the tests the only reader is the `layers =` trace in [`read_store`], which
-    // expands to `()` with `tracing` off — so in that build the field genuinely has no
+    // expands to `()` with `tracing` off, so in that build the field has no
     // reader. It is kept rather than cfg-ed away because the tests assert which layers the
-    // cascade actually walked, and `settings` alone cannot show that.
+    // cascade walked, and `settings` alone cannot show that.
     #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     paths: Vec<PathBuf>,
     found_proxy_settings: bool,
@@ -121,7 +126,7 @@ struct KioslavercRead {
 //
 // A layer that exists but cannot be read ends the whole read with an `Err`, rather than
 // being skipped like a missing one. The layers overwrite each other key by key, so a
-// dropped layer does not leave a gap a caller could see — it leaves a different answer,
+// dropped layer does not leave a gap a caller could see; it leaves a different answer,
 // and one that looks exactly like a correct one. Refusing to answer is the only outcome
 // that stays distinguishable.
 fn read_kioslaverc(dirs: Vec<PathBuf>) -> Result<Option<KioslavercRead>, Error> {
@@ -153,27 +158,24 @@ fn read_kioslaverc(dirs: Vec<PathBuf>) -> Result<Option<KioslavercRead>, Error> 
 }
 
 // Read and interpret `kioslaverc`.
-pub(crate) fn read_store() -> Result<Reading, Error> {
-    let Some(read) = read_kioslaverc(config_search_dirs())? else {
+pub(crate) fn read_store(env: &Env) -> Result<Reading, Error> {
+    let Some(read) = read_kioslaverc(config_search_dirs(env))? else {
         return Ok(Reading::Absent);
     };
 
     // Which absence, not which answer: entries are stored only while the scanner is inside
     // the section, so no section found means an empty store, and an empty store carries no
-    // `ProxyType` for `configured_from_kioslaverc` to read — the arm below reaches the same
-    // `Unset`. What separating them buys is the debug line, which would otherwise report a
-    // file that has no `[Proxy Settings]` at all as one that merely sets no `ProxyType`.
+    // `ProxyType` for `configured_from_kioslaverc` to read; the arm below reaches the same
+    // `Unset`. Distinguishing them lets the debug line avoid reporting a file that has no
+    // `[Proxy Settings]` at all as one that merely sets no `ProxyType`.
     if !read.found_proxy_settings {
         return Ok(Reading::Unset);
     }
     Ok(
         // `var_os`, not `var().ok()`: the latter cannot tell an unset variable from one
-        // holding bytes that are not UTF-8, and `env_mode` divides on exactly that.
-        // Spelled as a closure because naming the function would pin `K` to one lifetime
-        // rather than the higher-ranked bound the parameter asks for.
-        match kioslaverc::configured_from_kioslaverc(&read.settings, |name: &str| {
-            std::env::var_os(name)
-        })? {
+        // holding bytes that are not UTF-8, and `env_mode` divides on that.
+        match kioslaverc::configured_from_kioslaverc(&read.settings, |name: &str| env.var_os(name))?
+        {
             Some(KdeConfig { source, mode }) => Reading::configured(source, mode),
             None => {
                 crate::trace::debug!(
@@ -200,6 +202,56 @@ fn kioslaverc_ini() -> configparser::ini::Ini {
     // accepting a row the scanner would then interpret as valueless.
     defaults.delimiters = vec!['='];
     configparser::ini::Ini::new_from_defaults(defaults)
+}
+
+// One group header line, read as `KConfigIniBackend::parseConfig` reads it
+// (`kconfigini.cpp`, KF5 and KF6 alike): bracketed parts, each up to the first `]`, joined
+// with `\x1d` into a subgroup path while the next character is `[`; anything after the last
+// part is ignored. A part is exactly `$i` only when it is the line's last bracket: then it
+// marks the file immutable if it comes first, the group otherwise. A part is taken as
+// written (`printableToString` trims and unescapes only a part holding a backslash), so
+// `[ Proxy Settings ]` names a group KDE never reads, and `[Proxy Settings][$e]` names a
+// subgroup of it. `None` for a line with no closing `]`, which KConfig skips.
+struct GroupHeader {
+    name: String,
+    file_immutable: bool,
+    group_immutable: bool,
+}
+
+fn group_header(line: &str) -> Option<GroupHeader> {
+    let bytes = line.as_bytes();
+    let mut header = GroupHeader {
+        name: String::new(),
+        file_immutable: false,
+        group_immutable: false,
+    };
+    let mut start = 1;
+    loop {
+        let end = start + bytes.get(start..)?.iter().position(|&byte| byte == b']')?;
+        let part = &line[start..end];
+        if end + 1 == bytes.len() && part == "$i" {
+            if header.name.is_empty() {
+                header.file_immutable = true;
+            } else {
+                header.group_immutable = true;
+            }
+        } else {
+            if !header.name.is_empty() {
+                header.name.push('\x1d');
+            }
+            if part.contains('\\') {
+                header
+                    .name
+                    .push_str(&printable_to_string(part.trim_ascii()));
+            } else {
+                header.name.push_str(part);
+            }
+        }
+        start = end + 2;
+        if start > bytes.len() || bytes[end + 1] != b'[' {
+            return Some(header);
+        }
+    }
 }
 
 // Reverse `KConfigIniBackend::stringToPrintable`'s escaping (`kconfigini.cpp`) for one
@@ -281,13 +333,13 @@ fn printable_to_string(raw: &str) -> String {
                 // Upstream parts company here, and this is the one arm that is not a
                 // port of it. `printableToString` writes the backslash, warns, and
                 // returns `false`; its caller counts the error and stores the entry
-                // anyway — half-converted, and un-truncated because the early return
+                // anyway, half-converted, and un-truncated because the early return
                 // skips the final `truncate`. Handing the value back exactly as written
                 // is the only outcome that is never half of two readings, and it does
                 // not smuggle anything through: every reader that names a destination
-                // either refuses a backslash — `crate::endpoint::parse_host` and
+                // either refuses a backslash, `crate::endpoint::parse_host` and
                 // `HostPattern::parse` both count it a forbidden host character, so the
-                // value lands in `rejected` — or carries it into what it reports, which
+                // value lands in `rejected`, or carries it into what it reports, which
                 // is `parse_script_location` percent-encoding it so the `file:` URL names
                 // the path KDE stored rather than one a `\` separator invented.
                 warn_unknown_kconfig_escape(unknown);
@@ -377,28 +429,26 @@ fn apply_proxy_settings(
         // U+00A0 or U+3000 that KDE keeps would make this crate honour a proxy setting
         // the desktop it is reporting on ignores, which is the worse of the two wrong
         // answers. A UTF-8 BOM ahead of a first-line `[Proxy Settings]` therefore also
-        // defeats the header — U+FEFF is not whitespace on either side, and KConfig
+        // defeats the header: U+FEFF is not whitespace on either side, and KConfig
         // carries no BOM handling anywhere. Do not add BOM stripping for the same reason.
-        if let Some(section) = trimmed
-            .strip_prefix('[')
-            .and_then(|section| section.strip_suffix(']'))
-        {
-            if section.trim_ascii() == "$i" {
-                file_immutable = true;
-                in_proxy_settings = false;
-                current_group_immutable = false;
+        if trimmed.starts_with('[') {
+            let Some(header) = group_header(trimmed) else {
+                // KConfig warns and skips the line, staying in the group it was in, but
+                // only after resetting the group's lock to the file's, which it does first.
+                current_group_immutable = in_proxy_settings && file_immutable;
                 continue;
-            }
-            in_proxy_settings = kioslaverc::normalize_section(section) == kioslaverc::SECTION;
+            };
+            file_immutable |= header.file_immutable;
+            in_proxy_settings = header.name == kioslaverc::SECTION;
             // `file_immutable ||` is this function stating its own half of the rule, and no
             // input can observe it: the only caller that walks more than one file,
             // [`read_kioslaverc`], stops on the same flag, so the entries this marks are
             // never offered to a later file. It stays because the sentence above is a
-            // contract about `apply_proxy_settings` — a caller that read on rather than
-            // breaking would need exactly this term, and would get no test failure if it
+            // contract about `apply_proxy_settings`: a caller that read on rather than
+            // breaking would need this term, and would get no test failure if it
             // were gone.
             current_group_immutable =
-                in_proxy_settings && (file_immutable || kioslaverc::has_kconfig_flag(section, 'i'));
+                in_proxy_settings && (file_immutable || header.group_immutable);
             pending_group_immutable |= current_group_immutable;
             found |= in_proxy_settings;
             continue;
@@ -411,7 +461,7 @@ fn apply_proxy_settings(
         // On `trimmed`, like every test above it: the section test and the comment test
         // both run on the trimmed line, and a row that split on the raw one would disagree
         // with them about what the file says. Trimming the key half here as well would be
-        // the same rule in a second place — [`kioslaverc::normalize_key`] already does it,
+        // the same rule in a second place; [`kioslaverc::normalize_key`] already does it,
         // and it is the one function every reader of a key goes through.
         let (raw_key, value) = match trimmed.split_once('=') {
             Some((key, value)) => (key, Some(printable_to_string(value.trim_ascii()))),
@@ -446,7 +496,7 @@ pub(crate) struct LossFlags {
     // Seeded by [`watch`] when [`watch_targets`] dropped the leading candidate, and set by
     // the `notify` callback the first time it sees an event that ends *any* one of the
     // watched directories; see [`drop_ended_directories`] for what qualifies. The two are
-    // the same statement — some layer of the cascade cannot report — arrived at before and
+    // the same statement, some layer of the cascade cannot report, arrived at before and
     // after construction.
     lost: Arc<AtomicBool>,
     // How many watched directories can still deliver an event. Starts at the number
@@ -458,13 +508,13 @@ impl LossFlags {
     // Whether at least one directory of the cascade is beyond the watch: removed or
     // renamed since, or the leading candidate that was never there to register.
     //
-    // The route is degraded from this moment on — the directory can be created and
-    // written to and nothing will report it — even while [`LossFlags::is_live`] is still
+    // The route is degraded from this moment on, the directory can be created and
+    // written to and nothing will report it, even while [`LossFlags::is_live`] is still
     // `true` for the directories that survive.
     // `Acquire`, paired with the callback's `Release` store: whoever reads `true` here is
     // then guaranteed to see the `live_directories` decrement that preceded it. Without
     // that pairing the coordinator's `LossReport::check` could read `true` with a stale
-    // count, report only the first half of the loss, and never get a second look —
+    // count, report only the first half of the loss, and never get a second look,
     // once the last directory is gone no further event arrives to bring it back.
     pub(crate) fn any_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
@@ -548,22 +598,22 @@ impl FileWatch {
 // machine whose only layer is `/etc/xdg` is still perfectly readable.
 //
 // What that costs is a layer created *later*. [`read_store`] walks [`config_search_dirs`]
-// unfiltered, so a `kioslaverc` written into a directory that did not exist here is read —
-// and being the more specific layer, it wins — while no event ever announces it. Watching
+// unfiltered, so a `kioslaverc` written into a directory that did not exist here is read,
+// and being the more specific layer, it wins, while no event ever announces it. Watching
 // the parent instead would close it, but for `~/.config` the parent is `$HOME`, written to
 // constantly for reasons that have nothing to do with proxies. Only
-// [`crate::WatchOptions::poll_interval`] actually closes the hole.
+// [`crate::WatchOptions::poll_interval`] closes the hole.
 //
 // So the second return says the hole is open, and `watch` seeds [`LossFlags::lost`] from
 // it. That much is owed by consistency alone: a `~/.config` deleted a second *after*
 // construction reaches `drop_ended_directories` and is reported degraded, while the same
-// directory already absent a second *before* it was reported as nothing at all — one end
+// directory already absent a second *before* it was reported as nothing at all: one end
 // state, two opposite answers from `health()`.
 //
-// It is deliberately only the *leading* candidate, not any dropped one. Debian's shipped
+// It is only the *leading* candidate, not any dropped one. Debian's shipped
 // `/etc/X11/Xsession.d/60x11-common_xdg_path` prepends `/etc/xdg/xdg-$DESKTOP_SESSION` to
 // `XDG_CONFIG_DIRS` without ever checking that it is there, and on Ubuntu 22.04 here it is
-// not — so "any dropped candidate" would report a degraded route on an ordinary desktop
+// not, so "any dropped candidate" would report a degraded route on an ordinary desktop
 // session, every time. (`/etc/xdg` itself exists and is owned by four packages including
 // `systemd`, so a machine with no `/etc/xdg` at all is not the noisy case; the session's
 // own profile directory is.) The leading candidate is the one that wins the cascade
@@ -580,9 +630,9 @@ fn watch_targets(dirs: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
 }
 
 // Start watching `kioslaverc`, sending `()` on `trigger` for every relevant event.
-pub(crate) fn watch(trigger: SyncSender<()>) -> Result<Option<FileWatch>, Error> {
-    let (directories, leading_dropped) = watch_targets(config_search_dirs());
-    // Nothing observable rides on this — a watch registered on no directory answers `false`
+pub(crate) fn watch(trigger: SyncSender<()>, env: &Env) -> Result<Option<FileWatch>, Error> {
+    let (directories, leading_dropped) = watch_targets(config_search_dirs(env));
+    // Nothing observable rides on this: a watch registered on no directory answers `false`
     // to `is_live` from birth, so `health()` reads the same either way. What it saves is the
     // inotify instance itself, held open for a registration that can never fire.
     if directories.is_empty() {
@@ -632,8 +682,8 @@ pub(crate) fn watch(trigger: SyncSender<()>) -> Result<Option<FileWatch>, Error>
 // can hold the same closure production runs and drive it with a synthesized event.
 //
 // `watch` is its only caller, and the seam is what it is for. Inside `watch` the only way
-// to reach the join below — `drop_ended_directories` deciding how many directories ended,
-// the counters recording it, the wake that publishes it — is to remove a directory the
+// to reach the join below, `drop_ended_directories` deciding how many directories ended,
+// the counters recording it, the wake that publishes it, is to remove a directory the
 // watcher has already registered and wait on the kernel. The halves are covered separately,
 // so without the seam a decrement that publishes the wrong count, or a flag set only on the
 // *last* loss, is held by nothing.
@@ -642,12 +692,11 @@ fn loss_callback(
     directories: Vec<PathBuf>,
     trigger: SyncSender<()>,
 ) -> impl FnMut(notify::Result<notify::Event>) {
-    // Whether the WARN below has already been emitted. A local rather than `lost`, which
-    // now starts `true` on the machine above: the two questions stopped being the same one
-    // the moment the flag could be seeded before any directory had ended.
+    // Track whether the WARN below has been emitted separately from `lost`: that flag can
+    // start `true` on the machine above, before any directory ends or warning is emitted.
     let mut warned = false;
     // Owned by the callback and shrunk as directories end, so the same directory reported
-    // twice — a `DELETE_SELF` and a `MOVE_SELF` can both name it — is counted once.
+    // twice, a `DELETE_SELF` and a `MOVE_SELF` can both name it, is counted once.
     let mut watched = directories;
     move |event: notify::Result<notify::Event>| {
         // A failed event is still evidence that *something* happened; re-reading is
@@ -661,7 +710,7 @@ fn loss_callback(
                     // `Release` publishes the `fetch_sub` above along with the flag; see
                     // [`LossFlags::any_lost`]. The WARN is guarded separately so that it is
                     // still emitted once even though every watched directory can terminate
-                    // separately — reaching zero needs no such guard, since `watched` is
+                    // separately, reaching zero needs no such guard, since `watched` is
                     // empty afterwards.
                     flags.lost.store(true, Ordering::Release);
                     let first = !std::mem::replace(&mut warned, true);
@@ -694,7 +743,7 @@ fn loss_callback(
             Err(_) => true,
         };
         if relevant {
-            // Every other loss has a second chance — a surviving directory can fire again
+            // Every other loss has a second chance: a surviving directory can fire again
             // and `LossReport::check` runs on every one of those. This one has none: with
             // the last directory gone no further event exists, so if this wake is the one
             // that gets refused, the flags above may never be published to the coordinator
@@ -946,7 +995,7 @@ mod tests {
 
     // The case the directory walk exists for: `kioslaverc` lives only in the *last*
     // candidate (an `/etc/xdg` default), so the higher-priority directories must be
-    // watched too — that is where the file that will take over gets created.
+    // watched too; that is where the file that will take over gets created.
     #[test]
     fn a_lower_priority_holder_still_watches_the_directories_ahead_of_it() {
         let f = fixture("lower", &["home", "etc"], &["home", "etc"], &["etc"]);
@@ -975,7 +1024,7 @@ mod tests {
     }
 
     // A candidate directory that does not exist cannot be handed to inotify, so it is
-    // dropped from the prefix rather than failing the watch — and when the one dropped is
+    // dropped from the prefix rather than failing the watch, and when the one dropped is
     // the *leading* candidate, the watch that remains cannot report the layer that would
     // win, so it says so.
     #[test]
@@ -990,7 +1039,7 @@ mod tests {
     // The shape Debian's `60x11-common_xdg_path` puts on an ordinary desktop session: it
     // prepends `/etc/xdg/xdg-$DESKTOP_SESSION` to `XDG_CONFIG_DIRS` without checking that
     // the directory is there, and usually it is not. Reporting that as a degraded route
-    // would fire on every such machine, and it is the weaker hole besides — a `kioslaverc`
+    // would fire on every such machine, and it is the weaker hole besides: a `kioslaverc`
     // appearing in a middle layer only changes the answer when no higher layer sets the
     // key, and the higher layer here is watched.
     #[test]
@@ -1016,7 +1065,7 @@ mod tests {
     }
 
     // Nothing exists at all: there is nothing to watch, which `watch` reports as
-    // `Ok(None)` rather than as a failure — and no degraded route either, even though the
+    // `Ok(None)` rather than as a failure, and no degraded route either, even though the
     // leading candidate is among the missing. A route that was never established is the
     // not-configured-at-all case `WatchHealth::degraded` excludes by its own documentation.
     #[test]
@@ -1080,7 +1129,7 @@ mod tests {
     }
 
     // The ordinary case: `kioslaverc` itself is deleted. That is a configuration change,
-    // not a lost watch — the directory is still registered.
+    // not a lost watch: the directory is still registered.
     #[test]
     fn removing_the_file_itself_does_not_end_the_watch() {
         use notify::event::RemoveKind;
@@ -1093,7 +1142,8 @@ mod tests {
         assert!(is_interesting(&event), "it is still a change to report");
     }
 
-    // A directory nobody asked us to watch, and an unrelated file next to the one we do.
+    // A directory outside the requested watch set, and an unrelated file beside the
+    // watched file.
     #[test]
     fn events_elsewhere_do_not_end_the_watch() {
         use notify::event::{DataChange, ModifyKind, RemoveKind};
@@ -1145,7 +1195,7 @@ mod tests {
         );
         assert_eq!(live, vec![PathBuf::from("/etc/xdg")]);
 
-        // The same directory reported a second time — inotify can produce both shapes —
+        // The same directory reported a second time (inotify can produce both shapes)
         // must not be subtracted twice.
         assert_eq!(
             drop_ended_directories(
@@ -1203,7 +1253,7 @@ mod tests {
 
     // The join neither half above reaches: the callback `watch` installs, driven with the
     // events `notify` delivers. A partial loss has to set the flag `health()` reads *and*
-    // leave the survivors counted — that is the state the middle row of
+    // leave the survivors counted; that is the state the middle row of
     // `a_kioslaverc_watch_that_lost_a_directory_is_degraded_while_the_rest_still_report`
     // (`super::watcher`) stages by hand, and staging it is all that held it: nothing showed
     // the callback could produce it.
@@ -1235,7 +1285,7 @@ mod tests {
         assert!(flags.is_live(), "/etc/xdg still delivers");
 
         // The second, and the route is dark. The wake that carries it is a blocking `send`,
-        // so the buffer has to be empty when it runs — as it is here, and as it is for the
+        // so the buffer has to be empty when it runs, as it is here, and as it is for the
         // coordinator, which consumes a wake before opening the read it leads to.
         callback(Ok(directory_event(
             notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)),
@@ -1268,7 +1318,7 @@ mod tests {
 
     // The last loss of all sends a wake that is not allowed to be refused, because there is
     // no later event to carry the same news: every watched directory is gone. A `try_send`
-    // onto a full buffer publishes nothing — `Full` leaves no happens-before edge — so the
+    // onto a full buffer publishes nothing (`Full` leaves no happens-before edge), so the
     // flags stored just above it can stay invisible to the coordinator, and
     // `has_live_notifications` goes on claiming a route that is silent for good.
     //
@@ -1285,7 +1335,7 @@ mod tests {
 
         let (flags, wakes, mut callback) = callback_over_two_directories();
 
-        // An ordinary change nobody has consumed yet fills the one slot.
+        // An ordinary unconsumed change fills the one slot.
         callback(Ok(directory_event(
             notify::EventKind::Modify(ModifyKind::Data(DataChange::Content)),
             "/etc/xdg/kioslaverc",
@@ -1321,7 +1371,7 @@ mod tests {
     }
 
     // `notify` reports an exhausted `fs.inotify.max_user_watches` as an `io::Error` carrying
-    // ENOSPC, and [`Error::Io`]'s `source` is a public field — so which `io::ErrorKind` a
+    // ENOSPC, and [`Error::Io`]'s `source` is a public field, so which `io::ErrorKind` a
     // caller can match on is part of what this crate returns, not an implementation detail.
     // Rendering every `notify` failure through `io::Error::other` would collapse that one
     // into the same shapeless `Other` as a failure with no `io::Error` behind it at all.
@@ -1420,8 +1470,8 @@ httpProxy=proxy.corp:8080
     // The group marker freezes the keys it covered, not only the group. The *group* lock is
     // deferred to the end of the file, so a repeated section in that same file is still read;
     // what stops it overwriting the administrator's value is the immutability the marker put
-    // on the entry itself. Nothing else in this file observes that argument — a later file is
-    // refused by the deferred group lock instead.
+    // on the entry itself. Nothing else in this file observes that argument, a later file
+    // is refused by the deferred group lock instead.
     #[test]
     fn a_group_marker_freezes_its_keys_against_a_later_section_in_the_same_file() {
         let text = "\
@@ -1460,7 +1510,7 @@ httpProxy[$d]
     // The row above only shows the deleted value not coming back, which a blank would do
     // too. A deletion is not a blank: `[$d]` removes the key, so the slot was never named
     // and no entry is filed for it, while `httpProxy=` names the slot with nothing in it
-    // and files `Disabled`. Both route direct, so only the map tells them apart — and that
+    // and files `Disabled`. Both route direct, so only the map tells them apart, and that
     // is the difference between "KDE turned this scheme's proxy off" and "KDE says nothing
     // about this scheme". Another slot has to carry a proxy for either to be visible at
     // all: with nothing left in the map `manual_mode` answers `Direct` whichever way this
@@ -1489,20 +1539,29 @@ httpProxy[$d]
         ));
     }
 
+    // KConfig reads a flag suffix left to right and stops at `d`, so the immutability counts
+    // only when `i` comes first. `[$di]` is what KConfig's own writer emits for an immutable
+    // deletion, and reads back as a plain one; reading it as immutable would refuse a value
+    // KDE applies and answer Direct where the desktop proxies.
     #[test]
-    fn an_immutable_deletion_refuses_a_later_recreation() {
-        let text = "\
-[Proxy Settings]
-ProxyType=1
-httpProxy=old.corp:8080
-httpProxy[$di]
-httpProxy=new.corp:9090
-";
-        let settings = proxy_settings(text, Path::new("kioslaverc"))
-            .unwrap()
-            .expect("[Proxy Settings] is present");
-        let config = kioslaverc::config_from_kioslaverc(&settings, |_| None).unwrap();
-        assert!(config.mode.endpoint_for(Scheme::Http).is_none());
+    fn an_immutable_deletion_refuses_a_later_recreation_only_when_i_comes_first() {
+        let http_after = |flags: &str| {
+            let text = format!(
+                "[Proxy Settings]\nProxyType=1\nhttpProxy=old.corp:8080\nhttpProxy[{flags}]\n\
+                 httpProxy=new.corp:9090\n"
+            );
+            let settings = proxy_settings(&text, Path::new("kioslaverc"))
+                .unwrap()
+                .expect("[Proxy Settings] is present");
+            kioslaverc::config_from_kioslaverc(&settings, |_| None)
+                .unwrap()
+                .mode
+                .endpoint_for(Scheme::Http)
+                .map(|endpoint| endpoint.authority())
+        };
+        assert_eq!(http_after("$id"), None);
+        assert_eq!(http_after("$di").as_deref(), Some("new.corp:9090"));
+        assert_eq!(http_after("$d").as_deref(), Some("new.corp:9090"));
     }
 
     #[test]
@@ -1646,7 +1705,7 @@ httpsProxy=second.corp:8443
     // accumulates rather than following the last header it saw: a `[Proxy Settings][$i]`
     // and then a plain `[Proxy Settings]` in the same file must still lock the group.
     // Tracking the last header instead lets the administrator's lock be undone by an
-    // unflagged repetition of its own group — which is what KConfig writes whenever a
+    // unflagged repetition of its own group, which is what KConfig writes whenever a
     // second component appends a key to a file that already has the section.
     //
     // The test above cannot see that: the marker also marks the entries it covered, so a
@@ -1689,7 +1748,7 @@ httpsProxy=second.corp:8443
     // `~/.config/kioslaverc` carries a great deal that has nothing to do with proxying, so a
     // user layer that exists and names no proxy group is the common case rather than a
     // contrived one. [`read_store`] turns a `false` here straight into [`Reading::Unset`]
-    // without ever asking what `ProxyType` the merged settings hold — the equivalence its
+    // without ever asking what `ProxyType` the merged settings hold: the equivalence its
     // comment argues (no group means an empty store means no `ProxyType`) is true of one
     // file and false across a cascade. Folded per-layer instead of accumulated, the machine
     // below reports no KDE configuration at all and sends its traffic straight past the
@@ -1744,13 +1803,11 @@ httpsProxy=second.corp:8443
         );
     }
 
-    // The marker's line is trimmed before the brackets come off, so padding *inside* them
-    // survives to the comparison — the same reason `normalize_section` trims a group name.
-    // Compared untrimmed, `[ $i ]` is no longer the marker and is not `[Proxy Settings]`
-    // either, so it silently becomes an ordinary group nobody reads: the admin who wrote it
-    // locks nothing, and the user layer below overrides the lock it thinks it set.
+    // KConfig takes a bracketed part as written, so `[ $i ]` is a group named ` $i `, not the
+    // file marker: it locks nothing, and the user layer above reads on. Treating it as the
+    // marker would answer with a lock the desktop does not apply.
     #[test]
-    fn a_padded_file_immutable_marker_still_ends_the_cascade() {
+    fn a_padded_file_immutable_marker_is_an_ordinary_group() {
         let f = fixture(
             "immutable-file-padded",
             &["home", "etc"],
@@ -1769,17 +1826,53 @@ httpsProxy=second.corp:8443
         .unwrap();
 
         let read = read_kioslaverc(f.dirs.clone()).unwrap().unwrap();
-        assert_eq!(read.paths, vec![f.dirs[1].join(FILE_NAME)]);
+        assert_eq!(read.paths.len(), 2, "{:?}", read.paths);
         let config = kioslaverc::config_from_kioslaverc(&read.settings, |_| None).unwrap();
         assert_eq!(
             config.mode.endpoint_for(Scheme::Http).unwrap().authority(),
-            "system.corp:8080"
+            "user.corp:9090"
         );
     }
 
+    // Group headers as `kconfigini.cpp` reads them: anything after the closing `]` is ignored
+    // (so the section still opens, losing it reads a proxied desktop as unconfigured), a
+    // second bracket that is not a final `$i` names a subgroup, and padding inside the
+    // brackets is part of the name.
+    #[test]
+    fn a_group_header_is_read_as_kconfig_reads_it() {
+        let opens = |header: &str| {
+            let text = format!("{header}\nProxyType=1\nhttpProxy=p.corp 8080\n");
+            proxy_settings(&text, Path::new("kioslaverc"))
+                .unwrap()
+                .is_some()
+        };
+        assert!(opens("[Proxy Settings]"));
+        assert!(opens("[Proxy Settings] trailing text"));
+        assert!(opens("[Proxy Settings]# a comment KConfig does not have"));
+        assert!(opens("[Proxy Settings][$i]"));
+        assert!(!opens("[ Proxy Settings ]"));
+        assert!(!opens("[Proxy Settings][$e]"));
+        // The space ends the header, so the `[$i]` after it is ignored text, not a lock.
+        assert!(opens("[Proxy Settings] [$i]"));
+        assert!(
+            !group_header("[Proxy Settings] [$i]")
+                .unwrap()
+                .group_immutable
+        );
+        // No closing bracket: KConfig skips the line, and the validator here refuses the file.
+        assert!(proxy_settings("[Proxy Settings\nProxyType=1\n", Path::new("kioslaverc")).is_err());
+
+        let header = group_header("[Proxy Settings][$i]").unwrap();
+        assert_eq!(header.name, "Proxy Settings");
+        assert!(header.group_immutable && !header.file_immutable);
+        let header = group_header("[$i]").unwrap();
+        assert!(header.file_immutable && header.name.is_empty());
+        assert_eq!(group_header("[a][b]x").unwrap().name, "a\x1db");
+    }
+
     // A layer that exists but cannot be read ends the whole read; see [`read_kioslaverc`].
-    // Skipped instead, this reads as `system.corp:8080` — indistinguishable from a correct
-    // reading of a machine whose user layer simply holds nothing, so a caller has no way to
+    // Skipped instead, this reads as `system.corp:8080`, indistinguishable from a correct
+    // reading of a machine whose user layer holds nothing, so a caller has no way to
     // tell that the layer which was supposed to have the last word never spoke.
     //
     // The unreadable layer is a directory rather than a mode-000 file because root ignores
@@ -1826,6 +1919,28 @@ httpsProxy=second.corp:8443
         assert!(config.mode.endpoint_for(Scheme::Http).is_none());
     }
 
+    // A deletion of a key no layer has set yet still leaves a tombstone, as `setEntry`
+    // inserts one; an immutable one (`[$id]`) blocks the more specific layer.
+    #[test]
+    fn an_absent_immutable_deletion_blocks_a_later_layer() {
+        let f = fixture("absent-delete-id", &["home", "etc"], &["home", "etc"], &[]);
+        std::fs::write(
+            f.dirs[1].join(FILE_NAME),
+            "[Proxy Settings]\nProxyType=1\nhttpProxy[$id]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            f.dirs[0].join(FILE_NAME),
+            "[Proxy Settings]\nhttpProxy=user.corp:9090\n",
+        )
+        .unwrap();
+
+        let read = read_kioslaverc(f.dirs.clone()).unwrap().unwrap();
+        let config = kioslaverc::config_from_kioslaverc(&read.settings, |_| None).unwrap();
+        assert!(config.mode.endpoint_for(Scheme::Http).is_none());
+    }
+
+    // `[$di]` is not immutable when read back, so the same layout lets the user layer win.
     #[test]
     fn an_absent_immutable_deletion_does_not_block_a_later_layer() {
         let f = fixture("absent-delete", &["home", "etc"], &["home", "etc"], &[]);
@@ -1974,8 +2089,8 @@ Proxy Config Script[$e]=/home/alice/proxy#1.pac
         }
     }
 
-    // Only *inline* comment stripping is disabled: a `#` at the very start of a line —
-    // `kconfigini.cpp`'s own rule — must still drop the whole line.
+    // Only *inline* comment stripping is disabled: a `#` at the very start of a line,
+    // `kconfigini.cpp`'s own rule, must still drop the whole line.
     //
     // Exercises `configparser` directly (through [`kioslaverc_ini`]), because a dropped
     // line and a kept line that matches no known key are both invisible higher up.
@@ -1995,7 +2110,7 @@ ProxyType=1
         );
     }
 
-    // KConfig gives `;` no comment role at all, so a `;`-led line is not dropped — the
+    // KConfig gives `;` no comment role at all, so a `;`-led line is not dropped; the
     // `;` is retained as the literal first character of a key. Intentional.
     #[test]
     fn a_leading_semicolon_line_is_not_a_comment() {
@@ -2015,9 +2130,9 @@ ProxyType=1
         );
     }
 
-    // The `configparser` read is kept only as a syntax validator — nothing higher up looks
-    // at the maps it builds — and this is what the validation is worth. The sequential
-    // scanner below it is deliberately forgiving: a row it cannot make sense of is not a
+    // The `configparser` read is kept only as a syntax validator (nothing higher up looks
+    // at the maps it builds), and this is what the validation is worth. The sequential
+    // scanner below it is forgiving: a row it cannot make sense of is not a
     // section header and carries no `=`, so it is skipped in silence, and the file goes on
     // to answer with the keys around it. So a `kioslaverc` truncated mid-write, or one an
     // editor mangled, would otherwise be reported as an ordinary proxy configuration whose
@@ -2044,14 +2159,14 @@ httpProxy=http://proxy.corp:8080
     }
 
     // ----------------------------------------------------------------------------
-    // KConfig's escaping must be reversed before a value reaches `manual_mode` — see
+    // KConfig's escaping must be reversed before a value reaches `manual_mode`, see
     // `printable_to_string` for the escape table. Every test below goes through the real
     // `configparser` INI read, because a hand-built `KioslavercSettings` cannot see this
     // class of bug at all.
     // ----------------------------------------------------------------------------
 
-    // KConfig protects a value's *leading or trailing* space — never one in the middle
-    // — by writing `\s`. Unreversed, `\shttp://…\s` reaches `ProxyEndpoint::parse` as
+    // KConfig protects a value's *leading or trailing* space, never one in the middle,
+    // by writing `\s`. Unreversed, `\shttp://…\s` reaches `ProxyEndpoint::parse` as
     // literal characters and fails to parse at all.
     #[test]
     fn leading_and_trailing_space_is_reversed_before_the_url_is_parsed() {
@@ -2108,7 +2223,7 @@ httpProxy=\\shttp://user:secret@proxy.example.test:8080\\s
             // The same refusal where it can be told apart from upstream's. `printable_to_string`
             // hands the *whole* value back as written once it meets an escape it does not know,
             // rather than keeping the conversions it had already made and the backslash it did
-            // not — the half-converted reading upstream stores. With no other escape in the
+            // not, the half-converted reading upstream stores. With no other escape in the
             // value the two spellings coincide, which is why the row above cannot see the
             // difference; here the `\s` in front is what separates them.
             (
@@ -2124,7 +2239,7 @@ httpProxy=\\shttp://user:secret@proxy.example.test:8080\\s
             // The other direction: a character KDE wrote as itself, in a value that also
             // holds an escape. The unescaper works in bytes because `\x` names one, so the
             // characters around the escapes have to be re-encoded rather than truncated to
-            // their low byte — "café" narrowed that way is not UTF-8 at all, and the
+            // their low byte, "café" narrowed that way is not UTF-8 at all, and the
             // `from_utf8_lossy` at the end turns it into a host with U+FFFD in it that
             // matches nothing and says so nowhere.
             (
@@ -2190,8 +2305,8 @@ httpProxy={http_proxy}
     }
 
     // The escape table above is only worth reversing if what it produces survives the next
-    // step. `\\` and `\t` decode to bytes a `file:` URL reads as syntax — a path separator
-    // and a character to delete — so the script location is where reversing an escape and
+    // step. `\\` and `\t` decode to bytes a `file:` URL reads as syntax (a path separator
+    // and a character to delete), so the script location is where reversing an escape and
     // then splicing the result into a URL hands back a path KDE never wrote. Both
     // spellings here are legal POSIX file names.
     #[test]
@@ -2222,10 +2337,10 @@ Proxy Config Script={written}
         }
     }
 
-    // Padding around a hand-edited row is removed before the escapes are read, and the order
-    // is the whole point: `\s` exists in KConfig so that a space the value really ends with
-    // survives being written to a file, and a trim applied after the decode would take that
-    // one back off again.
+    // Padding around a hand-edited row is removed before the escapes are read, and the
+    // order matters: `\s` exists in KConfig so that a space the value ends with survives
+    // being written to a file, and a trim applied after the decode would take that one back
+    // off again.
     //
     // The script location is the only slot that can tell. `normalize_address` trims the
     // `<scheme>Proxy` values a second time on its own, so padding there is invisible either
@@ -2281,7 +2396,7 @@ Proxy Config Script  =   /home/alice/proxy.pac\\s
     // carries no path, because the kernel dropped the events themselves. Every later
     // question in [`is_interesting`] therefore answers "not about kioslaverc", so without
     // the flag being asked first the wake is refused and the change that overflowed the
-    // queue is never noticed — the watch stays registered, `health()` keeps reporting a
+    // queue is never noticed; the watch stays registered, `health()` keeps reporting a
     // live route, and the caller holds a stale answer until something unrelated happens to
     // touch the file again or `WatchOptions::poll_interval` re-reads on its own.
     #[test]

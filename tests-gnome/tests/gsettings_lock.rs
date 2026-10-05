@@ -1,15 +1,15 @@
 //! An administrator lock on a key whose value never moves, built without root.
 //!
-//! `gnome::was_written` asks three questions, and the second one — `is_writable` — exists
+//! `gnome::was_written` asks three questions, and the second one, `is_writable`, exists
 //! for a single case the other two cannot see: an administrator forcing `mode='none'`, the
 //! schema's own default. Nothing is written, no default moves, and only the lock carries
 //! the intent. That case reads as untestable without root, because forcing a key looks
 //! like it needs a `system-db:` profile under `/etc/dconf/db`. It does not. `DCONF_PROFILE`
 //! names a profile file, `file-db:` reads a database anywhere on disk, and `dconf compile`
-//! builds one from a directory — all as the ordinary user.
+//! builds one from a directory, all as the ordinary user.
 //!
 //! ```text
-//! cargo test --test gsettings_lock
+//! cargo test -p proxy-watch-gnome-tests --test gsettings_lock
 //! ```
 //!
 //! No session bus: reads never go through `ca.desrt.dconf`, only writes do, and this file
@@ -17,13 +17,14 @@
 //! (Debian ships the compiler in `dconf-cli`, apart from the backend), so that is what the
 //! skip is for.
 //!
-//! The lock is what makes this the *benefit* of the `is_writable` clause rather than its
-//! cost. A backend read-only for some other reason makes every key unwritable, which the
-//! clause also reads as configured — a case `gnome.rs` documents and accepts. Here
-//! `ignore-hosts` stays writable in the same process, so what the crate answers to is one
-//! locked key, not a store it cannot write at all.
+//! With the lock, this is the *benefit* of the `is_writable` clause rather than its cost. A
+//! backend read-only for some other reason makes every key unwritable, which the clause
+//! also reads as configured, a case `gnome.rs` documents and accepts. Here `ignore-hosts`
+//! stays writable in the same process, so what the crate answers to is one locked key, not
+//! a store it cannot write at all.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::path::Path;
@@ -49,7 +50,7 @@ fn a_locked_key_at_its_default_value_is_a_configured_source() {
     };
 
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and it runs before any GSettings call — dconf reads `DCONF_PROFILE` once,
+    // in it, and it runs before any GSettings call: dconf reads `DCONF_PROFILE` once,
     // when its engine is first used, so a later write would not be read at all.
     unsafe {
         std::env::set_var("DCONF_PROFILE", &profile);
@@ -70,7 +71,7 @@ fn a_locked_key_at_its_default_value_is_a_configured_source() {
         return;
     }
 
-    // The fixture's own three properties, in the order `was_written` asks them. If any of
+    // The fixture's own three properties, one per question `was_written` asks. If any of
     // these stops holding, the assertion below would be measuring something else.
     let settings = gio::Settings::new(SCHEMA);
     assert!(
@@ -111,7 +112,7 @@ fn compile_the_locked_profile(root: &Path) -> Option<std::path::PathBuf> {
     std::fs::create_dir_all(keyfiles.join("locks")).expect("creating the fixture directory");
     // An administrator default equal to the schema default. Written as well as locked so
     // that the file-db is a store with something in it, which is the shape a site profile
-    // really has; the lock is what the crate answers to.
+    // has; the crate answers to the lock.
     std::fs::write(keyfiles.join("00-proxy"), "[system/proxy]\nmode='none'\n")
         .expect("writing the administrator default");
     std::fs::write(keyfiles.join("locks/proxy"), format!("{LOCKED_PATH}\n"))

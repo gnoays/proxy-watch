@@ -1,9 +1,8 @@
 [package]
 name = "proxy-watch"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
-# MSRV 1.88 (`let` chains). `linux-gnome` raises it to 1.92 via `glib`/`gio` 0.22;
-# the `msrv` CI job checks both floors.
+# MSRV 1.88 (`let` chains).
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Detect and watch operating system proxy configuration changes"
@@ -15,7 +14,10 @@ categories = ["network-programming", "os", "config"]
 # Allowlist: only what a crate consumer needs. Leading `/` is load-bearing
 # (gitignore-shaped; bare `README.md` would also match under `docs/`).
 include = [
+    "/build.rs",
     "/src/**/*.rs",
+    "/src/sys/android/ProxyChangeReceiver.java",
+    "/src/sys/android/receiver.dex",
     "/examples/*.rs",
     "/README.md",
     "/LICENSE-MIT",
@@ -23,7 +25,7 @@ include = [
 ]
 
 [workspace]
-members = ["xtask"]
+members = ["xtask", "tests-gnome", "bindings/shared", "bindings/node", "bindings/python", "bindings/c"]
 default-members = ["."]
 resolver = "3"
 
@@ -35,13 +37,33 @@ default = ["resolve", "linux-gnome", "linux-kde"]
 resolve = []
 # `watch_channel()` → `tokio::sync::watch`.
 tokio = ["dep:tokio"]
-# Linux stores (inert off-Linux). `linux-gnome` raises MSRV to 1.92.
-linux-gnome = ["dep:gio", "dep:glib"]
+# Linux stores (inert off-Linux). `linux-gnome` opens GLib at run time and needs no C
+# library or headers to build.
+linux-gnome = ["dep:libloading"]
 linux-kde = ["dep:notify", "dep:configparser"]
 # PAC evaluation. Engine features are additive (Cargo unions features).
 pac = ["resolve"]
-pac-boa = ["pac", "dep:boa_engine"]
+# QuickJS through `rquickjs`: compiles C, so it needs a C compiler for the target. On Android
+# and iOS it adds no engine (`build.rs`), so a desktop app's feature list builds there too.
+pac-quickjs = ["pac", "dep:rquickjs"]
 pac-windows-native = ["pac"]
+# macOS only: PAC bodies and PAC URLs through CFNetwork. No extra dependency.
+pac-macos-native = ["pac"]
+# iOS only: the same CFNetwork calls as `pac-macos-native`.
+pac-ios-native = ["pac"]
+# Android only: PAC through the framework's `ProxySelector`, which the system PAC service
+# answers. No extra dependency.
+pac-android-native = ["pac"]
+# Every native PAC resolver above; each builds only on its own OS, so one list serves all.
+pac-native = [
+    "pac-windows-native",
+    "pac-macos-native",
+    "pac-ios-native",
+    "pac-android-native",
+]
+# `pac::SubprocessEvaluator`: each evaluation in a `proxy-watch-pac-worker` process, killed at
+# the deadline. The parent side runs no JavaScript; the worker binary needs `pac-quickjs` too.
+pac-subprocess = ["pac", "dep:libc"]
 # Lifecycle / change logs. Off by default so the library does not pick a facade.
 tracing = ["dep:tracing"]
 
@@ -51,12 +73,10 @@ ipnet = "2.9"
 thiserror = "2"
 url = "2.5"
 
-# `pac-boa` only; default-off. `default-features = false` drops boa 0.21's
-# `float16`/`xsum`; larger surfaces (`annex-b`, `intl`, `temporal`) are already non-default.
-[dependencies.boa_engine]
-version = "0.21"
+# `pac-quickjs` only; default-off. `rquickjs-sys` ships no Android or iOS bindings.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.rquickjs]
+version = "0.14"
 optional = true
-default-features = false
 
 # Only `sync` + `rt`; absent when the `tokio` feature is off.
 [dependencies.tokio]
@@ -78,6 +98,7 @@ version = "0.62.2"
 features = [
     "Win32_Foundation",
     "Win32_Networking_WinHttp",
+    "Win32_System_JobObjects", # the `pac-subprocess` worker's memory limit
     "Win32_Security",         # SECURITY_ATTRIBUTES, required by CreateEventW
     "Win32_System_Registry",
     "Win32_System_Threading",
@@ -88,19 +109,30 @@ features = [
 core-foundation = "0.9"
 system-configuration = "0.7"
 
-# Optional via `linux-gnome` / `linux-kde`. Keep `gio`/`glib` on the same gtk-rs release.
+# Optional via `linux-gnome` / `linux-kde`.
 [target.'cfg(target_os = "linux")'.dependencies]
-gio = { version = "0.22", optional = true }
-glib = { version = "0.22", optional = true }
+libloading = { version = "0.8", optional = true }
 notify = { version = "8", optional = true }
 configparser = { version = "3", optional = true }
+# `pac-subprocess` only: `RLIMIT_AS` on the worker.
+libc = { version = "0.2", optional = true }
+
+# Android reads through the Java framework: `jni` calls it. The `JavaVM` and `Context` come
+# from `proxy_watch::android::init`, or else from `ndk-context`, which android-activity fills.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
+# iOS reads `CFNetworkCopySystemProxySettings`, the same dictionary schema macOS's store holds.
+[target.'cfg(target_os = "ios")'.dependencies]
+core-foundation = "0.9"
 
 [dev-dependencies]
 futures-executor = "0.3"
 # `StreamExt::next()` in the README and `examples/watch.rs`.
 futures-util = "0.3"
 # `examples/reqwest_client.rs` only.
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.13", default-features = false }
 # `tracing` feature tests only (always compiled as a dev-dep; never reaches consumers).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
@@ -108,6 +140,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # with the normal macOS dependency above.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 system-configuration = "0.7"
+
+[[bin]]
+name = "proxy-watch-pac-worker"
+path = "src/bin/proxy-watch-pac-worker.rs"
+required-features = ["pac-subprocess", "pac-quickjs"]
 
 [[example]]
 name = "resolve"
@@ -123,14 +160,33 @@ required-features = ["resolve"]
 
 [[example]]
 name = "pac"
-required-features = ["pac-boa"]
+required-features = ["pac-quickjs"]
 
 [package.metadata.docs.rs]
-all-features = true
+# Every feature but `pac-quickjs`. docs.rs builds every target below on Linux, where the build
+# script of `rquickjs-sys` hands the host `cc` MSVC flags (`/std:c11`) for Windows and `-arch`
+# for macOS, and `cc` rejects both. The Windows target is the default page. `android::init`
+# and `pac::AndroidPacResolver` appear on the Android page only.
+features = [
+    "resolve",
+    "linux-gnome",
+    "linux-kde",
+    "tokio",
+    "pac",
+    "pac-windows-native",
+    "pac-macos-native",
+    "pac-ios-native",
+    "pac-android-native",
+    "pac-native",
+    "pac-subprocess",
+    "tracing",
+]
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
 ]
 # Paired with `#![cfg_attr(docsrs, feature(doc_cfg))]` in `src/lib.rs`; neither half does
 # anything alone.

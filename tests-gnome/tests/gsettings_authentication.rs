@@ -3,15 +3,15 @@
 //! `org.gnome.system.proxy.http` is the only child carrying `use-authentication` and
 //! `authentication-user`, so `gnome::read_settings` asks for them on that child alone and
 //! `gsettings_map` turns them into the [`ProxyAuth`](proxy_watch::ProxyAuth) on the HTTP
-//! endpoint — the username a caller needs before it can answer a `407`.
+//! endpoint: the username a caller needs before it can answer a `407`.
 //!
 //! ```text
-//! cargo test --test gsettings_authentication
+//! cargo test -p proxy-watch-gnome-tests --test gsettings_authentication
 //! ```
 //!
-//! Asking for the pair on the `https` child instead — where the schema declares neither, so
+//! Asking for the pair on the `https` child instead (where the schema declares neither, so
 //! `read_key`'s `has_key` guard silently drops both and the endpoint comes back with no
-//! credentials at all — is a mistake this file alone would catch. `gsettings_map`'s own
+//! credentials at all) is a mistake this file alone would catch. `gsettings_map`'s own
 //! tests build the key map by hand, so they hold the *mapping* and say nothing about the
 //! reading that fills it; nothing else reads these two keys from a real store.
 //!
@@ -20,6 +20,7 @@
 //! session bus is needed: the keyfile backend goes nowhere near `ca.desrt.dconf`.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
+#[path = "../../tests/support/mod.rs"]
 mod support;
 
 use std::fs;
@@ -32,9 +33,9 @@ const SCHEMA: &str = "org.gnome.system.proxy";
 
 // Byte for byte what `gsettings set` writes here with the same two environment variables,
 // which is the only way to be sure of the group names: the keyfile backend does not spell
-// them out of the schema id, and a group it does not recognise is silently no store at all
-// — every key reads back at its schema default and the fixture looks like an empty machine.
-// Values are in `GVariant` text form, which is what makes `true` a `b` and `'alice'` an `s`.
+// them out of the schema id, and a group it does not recognise is silently no store at all;
+// every key reads back at its schema default and the fixture looks like an empty machine.
+// Values are in `GVariant` text form, so `true` is a `b` and `'alice'` an `s`.
 const STORE: &str = "[system/proxy]\n\
                      mode='manual'\n\
                      \n\
@@ -52,7 +53,7 @@ fn the_http_child_is_where_the_authentication_keys_are_read_from() {
     fs::write(store.join("keyfile"), STORE).expect("writing the keyfile store");
 
     // SAFETY: this is the only test in this binary and the only write to the environment
-    // in it, and it runs before any GSettings call — so no backend exists yet to read them.
+    // in it, and it runs before any GSettings call, so no backend exists yet to read them.
     unsafe {
         std::env::set_var("GSETTINGS_BACKEND", "keyfile");
         std::env::set_var("XDG_CONFIG_HOME", &root);
@@ -91,6 +92,6 @@ fn the_http_child_is_where_the_authentication_keys_are_read_from() {
         .as_ref()
         .expect("`use-authentication` is set, so the endpoint carries the user");
     assert_eq!(auth.username(), "alice");
-    // Not read at all, deliberately: see `gnome::READ_AUTHENTICATION_PASSWORD`.
+    // Not read at all: see `gnome::READ_AUTHENTICATION_PASSWORD`.
     assert_eq!(auth.password(), None);
 }

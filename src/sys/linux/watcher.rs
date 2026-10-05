@@ -2,28 +2,33 @@
 //!
 //! ```text
 //!  GSettings "changed"  ─┐
-//!  kioslaverc inotify   ─┼─→ one pending wake ─→ coordinator ─ debounce ─→ read_config
+//!  kioslaverc inotify   ─┼─→ one pending wake ─→ coordinator ─ debounce ─→ read_config_in
 //!  poll timer           ─┤                                                  │
 //!  Watch::poll_now      ─┘                                       Shared::emit ←─┘
 //! ```
 //!
-//! Every wake re-reads everything via [`super::backend::read_config`] (equality skip).
+//! Every wake re-reads everything via [`super::backend::read_config_in`] (equality skip),
+//! from the environment [`Watch::armed`] copied on the caller's thread: no thread here reads
+//! the process environment.
 //!
 //! This backend runs more than one OS thread: the coordinator always, the GSettings main
 //! loop while that subscription is live, the poll timer while
 //! [`WatchOptions::poll_interval`] is set, and whatever `notify` spawns for the inotify
-//! watch. Only [`Watch::poll_now`] wakes the coordinator from the caller's own thread.
+//! watch. [`Watch::poll_now`], and the one forced re-read [`Watch::spawn`] makes once the
+//! GSettings subscription is live, are what wake the coordinator from the caller's own
+//! thread.
 //! [`Drop`] joins the ones this module started.
 //!
 //! | Route | Notification |
 //! |---|---|
-//! | GSettings | `changed` on root + children |
+//! | GSettings | `changed` and `writable-changed` on root + children |
 //! | `kioslaverc` | inotify on config dir |
-//! | Portal | **none** — needs [`WatchOptions::poll_interval`] |
+//! | Portal | **none**: needs [`WatchOptions::poll_interval`] |
 //!
 //! Leading store watch failure without poll → fatal. Portal silence alone is never an
-//! [`Error`] (no public single-read API). [`Drop`] tears sources down, then the last
-//! [`Sender`].
+//! [`Error`]: a watcher left with it and no poll interval reports
+//! [`WatchHealth::is_frozen`](crate::WatchHealth::is_frozen). [`Drop`] tears sources down,
+//! then the last [`Sender`].
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
@@ -48,7 +53,8 @@ use crate::watch::{
     watch_fail_soft,
 };
 
-use super::backend::read_config;
+use super::Env;
+use super::backend::{Route, read_config_in, route};
 use super::desktop;
 use super::sandbox;
 
@@ -62,19 +68,19 @@ pub(crate) struct Watch {
     // Whether the sandbox forced the portal route, in which case there is nothing to
     // subscribe to.
     //
-    // Decided once, in [`Watch::armed`], and then fixed for this watcher's life —
-    // deliberately, and not the same rule the read path follows.
-    // [`backend::read_config`](super::backend::read_config) calls `sandbox::detect` on
-    // every read and says so. It can afford to, because a read starts from nothing; this
+    // Decided once, in [`Watch::armed`], and then fixed for this watcher's life, not the
+    // same rule the read path follows.
+    // [`backend::read_config_in`](super::backend::read_config_in) calls `sandbox::detect`
+    // on every read and says so. It can afford to, because a read starts from nothing; this
     // field is the route the subscriptions below were wired against, and re-deciding it
     // would describe a wiring that no longer matches what was registered.
     portal_route: bool,
-    // Whether GSettings is the store [`is_leading_store`] answers for — decided in
+    // Whether GSettings is the store [`is_leading_store`] answers for, decided in
     // [`Watch::armed`], out of the same reading of the environment as the `kioslaverc`
     // half, and fixed for the same reason `portal_route` is. The two answers describe one
     // wiring and are meant to be complementary, but `spawn` runs after the constructor's
-    // own `read_config`: asking again there could make both stores answer "leading", or
-    // neither — and neither fail-softens the failure of the store that has no fallback.
+    // own `read_config_in`: asking again there could make both stores answer "leading", or
+    // neither, and neither fail-softens the failure of the store that has no fallback.
     #[cfg(feature = "linux-gnome")]
     gsettings_is_leading: bool,
     // `None` until [`Watch::spawn`] runs, and for the portal route, which never attempts
@@ -86,6 +92,9 @@ pub(crate) struct Watch {
     kde: Option<KdeWatch>,
     poll: Option<Poll>,
     coordinator: Option<JoinHandle<()>>,
+    // Copied in [`Watch::armed`]; every read and watch registration takes its variables
+    // from here.
+    env: Env,
 }
 
 // The outcome of one attempt to establish the `kioslaverc` watch, kept apart from a bare
@@ -102,8 +111,8 @@ enum KdeWatch {
     // [`KdeWatch::is_live`] can ask it whether it is *still* established: a watched
     // directory that is removed or renamed is gone for good: removal drops the `notify`
     // watch, and a rename leaves it armed on the moved inode rather than on the path the
-    // reader uses. Losing *one* directory is not losing the registration — this is `false` only
-    // once every one has gone; the first loss is reported through
+    // reader uses. Losing *one* directory is not losing the registration: this is `false`
+    // only once every one has gone; the first loss is reported through
     // [`super::kde::FileWatch::any_lost`] instead.
     Live(super::kde::FileWatch),
     // No candidate directory exists; see the type doc.
@@ -124,15 +133,15 @@ impl KdeWatch {
     }
 }
 
-// The outcome of one attempt to start the GSettings subscription — the GNOME-side twin of
-// [`KdeWatch`], drawing the same line: [`GnomeWatch::NoSchema`] means
+// The outcome of one attempt to start the GSettings subscription, the GNOME-side twin of
+// [`KdeWatch`], drawing the same line: [`GnomeWatch::NoSchema`] means GLib or
 // `gsettings-desktop-schemas` is not installed, so there is no store here to subscribe to
 // and nothing is degraded; [`GnomeWatch::Degraded`] means a genuine start failure was
 // fail-softened by [`gnome_start_fail_soft`].
 #[cfg(feature = "linux-gnome")]
 enum GnomeWatch {
     // Established; dropping this stops the subscription and joins its thread. The payload
-    // is never read — it is carried solely so [`Drop for Watch`](Watch)'s
+    // is never read, it is carried solely so [`Drop for Watch`](Watch)'s
     // `self.gnome.take()` drops it, hence the explicit `allow`.
     Live(#[allow(dead_code)] super::gnome::Handle),
     // The schema is not installed; see the type doc.
@@ -143,16 +152,8 @@ enum GnomeWatch {
 
 #[cfg(feature = "linux-gnome")]
 impl GnomeWatch {
-    // Whether this counts as a live change-notification source for
-    // [`Watch::has_live_notification_source`].
-    //
-    // A verdict from start time, and it never changes afterwards: nothing on this side
-    // reports a subscription that stops delivering once it has been established. The KDE
-    // side does — [`super::kde::LossFlags`] reaches `health().degraded` through
-    // [`LossReport`] — so `has_live_notification_source` asks the GNOME arm a weaker
-    // question than the KDE arm, and this is the GNOME answer. Whether GIO offers
-    // something to build the other half out of has not been established here; what is
-    // established is that this answer means "it started", not "it is working".
+    // This reports that the GSettings subscription starts; it cannot detect later
+    // silence. KDE reports runtime loss through `super::kde::LossFlags` and `LossReport`.
     fn is_live(&self) -> bool {
         matches!(self, GnomeWatch::Live(_))
     }
@@ -181,7 +182,7 @@ pub(super) fn wake(trigger: &SyncSender<()>) -> bool {
 // Ask for a re-read on a send that is not allowed to be refused.
 //
 // A refused `try_send` costs nothing when a later wake can carry the same news, which is
-// the ordinary case — but it publishes nothing. `TrySendError::Full` says only that the
+// the ordinary case, but it publishes nothing. `TrySendError::Full` says only that the
 // buffer was full at that instant; it is not a send, so it leaves no happens-before edge,
 // and whatever the caller stored beforehand may still be invisible to the coordinator on
 // the pass that follows. Blocking here is what turns the store into something the
@@ -198,47 +199,32 @@ impl Watch {
     // Register everything that can be registered without a thread. The `kioslaverc`
     // inotify watch is registered here rather than in [`Watch::spawn`], which is what
     // spares it the re-read `spawn` sends for GSettings: the fd exists before the
-    // constructor's own `read_config`, so a change in the window between the two is
+    // constructor's own `read_config_in`, so a change in the window between the two is
     // already queued on it.
     #[cfg_attr(not(feature = "linux-kde"), allow(unused_variables))]
     #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
-    pub(crate) fn armed(options: &WatchOptions) -> Result<Self, Error> {
-        // One pending wake is the whole state: every sender means "re-read everything",
-        // so a second one queued behind the first would buy a second identical read. The
-        // capacity is what bounds the memory — an unbounded channel here grows for as long
-        // as senders outrun the coordinator, which cannot receive during `read_config`.
-        // A sender in a loop — the shape [`Watch::poll_now`] lets a caller write — against a
-        // one-second read queues millions of wakes and hundreds of megabytes of resident
-        // memory within a few debounce cycles, still climbing; at capacity 1 the backlog
-        // stays at one wake and the resident size does not move. Windows and macOS coalesce
-        // the same way —
-        // an auto-reset event and an `AtomicBool` respectively.
+    pub(crate) fn armed(options: &WatchOptions, env: &Env) -> Result<Self, Error> {
+        // Every sender requests a full re-read, so one pending wake coalesces bursts.
+        // Bounded capacity also prevents senders from growing a backlog while
+        // `read_config_in` blocks the coordinator.
         let (trigger, triggers) = mpsc::sync_channel(1);
-        let portal_route = !sandbox::detect().gsettings_is_trustworthy();
-        // Read once and answer both stores from it; see `gsettings_is_leading`.
-        #[cfg(any(feature = "linux-gnome", feature = "linux-kde"))]
-        let desktop = desktop::current();
+        let env = env.clone();
+        // Read once and answer both stores and the route from it; see `gsettings_is_leading`.
+        let desktop = desktop::current(&env);
+        let route = route(sandbox::detect(&env), desktop);
+        let portal_route = route == Route::Portal;
 
-        // No test holds this guard, and none in this repository can. `armed` runs before the
-        // constructor's `read_config` (`ProxyWatcher::with_options`), so a portal-route
-        // watcher is armed and then thrown away when that read fails — and the read only
-        // succeeds on this route when a real `org.freedesktop.portal.ProxyResolver` answers,
-        // which no test environment here provides — `--include-ignored` and every integration
-        // suite included.
-        //
-        // What it costs where the portal does answer is not a spare inotify watch.
-        // `kde_watch_fail_soft` is fallible, so on a KDE-flavoured sandbox with no
-        // `poll_interval` the `?` below would fail construction outright over a store this
-        // route never reads; short of that, `health` would file `Kioslaverc` under `degraded`
-        // for the same store. Both describe a wiring that is not there.
+        // A portal route reads no `kioslaverc` store; watching it could fail construction
+        // through `kde_watch_fail_soft` or misreport `Kioslaverc` as degraded.
         #[cfg(feature = "linux-kde")]
-        let kde = if portal_route {
+        let kde = if !matches!(route, Route::Stores { kioslaverc: true }) {
             None
         } else {
             Some(kde_watch_fail_soft(
                 trigger.clone(),
                 is_leading_store(desktop, desktop::Store::Kioslaverc),
                 options.poll_interval,
+                &env,
             )?)
         };
         // The outcome, not the intent: `kde_watch_fail_soft` fails soft, so being compiled
@@ -266,6 +252,7 @@ impl Watch {
             kde,
             poll: None,
             coordinator: None,
+            env,
         })
     }
 
@@ -292,22 +279,8 @@ impl Watch {
                 options.poll_interval,
             )?);
             if matches!(&self.gnome, Some(gnome) if gnome.is_live()) {
-                // The subscription went live after the constructor's initial read; ask for
-                // one re-read so a change in that window is not lost.
-                //
-                // No test holds this, and none can — `--include-ignored` and every
-                // integration suite
-                // included. Holding it needs a change the re-read sees and the subscription
-                // does not. Under dconf, a change made once the constructor has returned
-                // reaches the live subscription as well, so the re-read is never the only
-                // route that could have delivered it. Under the keyfile backend — whose
-                // `GFileMonitor` sits on a context no watcher thread iterates, see
-                // `tests/gsettings_writable_watch.rs` — the read path does not see the
-                // change at all, measured for a written value and for a `chmod` on the
-                // settings directory alike. And the window itself lies inside
-                // [`ProxyWatcher::with_options`](crate::ProxyWatcher), between the read it
-                // does and the subscription it starts, so there is nowhere else to write
-                // from.
+                // The GSettings subscription starts after the initial read. Re-read once
+                // to cover changes in that gap.
                 wake(&trigger);
             }
         }
@@ -356,6 +329,7 @@ impl Watch {
         };
 
         let options = options.clone();
+        let env = self.env.clone();
         self.coordinator = Some(
             thread::Builder::new()
                 .name("proxy-watch-linux".to_owned())
@@ -364,6 +338,7 @@ impl Watch {
                     crate::trace::debug!("the Linux coordinator thread started");
                     coordinate(
                         &options,
+                        &env,
                         &shared,
                         &triggers,
                         #[cfg(feature = "linux-kde")]
@@ -379,15 +354,10 @@ impl Watch {
         Ok(())
     }
 
-    // Whether at least one change notification source is actually live right now.
+    // Whether at least one change notification source is live right now.
     fn has_live_notification_source(&self) -> bool {
-        // Redundant today and kept deliberately. `armed` leaves `kde` `None` on this route
-        // and `spawn` only builds `gnome` off it, so the `gnome` arm and the `kde` arm
-        // below already answer false whenever this one would — deleting it changes no
-        // answer this crate can produce, which is why no test holds it. What it holds
-        // instead is the direction: the portal route has no notification of its own, and a
-        // future source registered without that in mind would otherwise be reported live to
-        // a caller the portal cannot wake.
+        // Redundant with the arms below today. It keeps a source added later from being
+        // reported live on the portal route, which has no notification of its own.
         if self.portal_route {
             return false;
         }
@@ -426,7 +396,7 @@ impl Watch {
         }
     }
 
-    // Ask the coordinator to re-read the configuration right now — the explicit re-check
+    // Ask the coordinator to re-read the configuration right now: the explicit re-check
     // path a caller can invoke directly.
     pub(crate) fn poll_now(&self) {
         if let Some(trigger) = &self.trigger {
@@ -452,17 +422,17 @@ impl Drop for Watch {
     }
 }
 
-// Whether `store` is the one whose failure leaves nothing behind it — what the
-// fatal-without-polling rule actually asks. Usually that is the store [`desktop::order`]
+// Whether `store` is the one whose failure leaves nothing behind it, what the
+// fatal-without-polling rule asks. Usually that is the store [`desktop::order`]
 // puts first for the desktop this process runs under, but a store that is not in this
 // build cannot be anything's fallback, so when the leading one is compiled out the other
-// store inherits the position rather than the position going unfilled. `backend`'s
-// [`warn_if_the_leading_store_was_compiled_out`](super::backend) draws the same line on
+// store inherits the position rather than the position going unfilled.
+// [`note_if_the_leading_store_was_compiled_out`](super::desktop::note_if_the_leading_store_was_compiled_out) draws the same line on
 // the read path, and `kde_is_the_last_live_route` in [`Watch::spawn`] on the runtime-loss
 // path; this is the same question asked at construction.
 //
 // The desktop is a parameter rather than something read here because both stores must be
-// answered from one reading — see [`Watch::gsettings_is_leading`](Watch).
+// answered from one reading: see [`Watch::gsettings_is_leading`](Watch).
 #[cfg_attr(
     not(any(feature = "linux-gnome", feature = "linux-kde")),
     allow(dead_code)
@@ -479,16 +449,16 @@ fn is_leading_store(desktop: desktop::Desktop, store: desktop::Store) -> bool {
 }
 
 // Why a Linux leading store's failure has no fallback left, for
-// [`crate::watch::fatal_watch_error`]'s `why_no_fallback` parameter — shared by both
+// [`crate::watch::fatal_watch_error`]'s `why_no_fallback` parameter, shared by both
 // [`kde_watch_fail_soft`] and [`gnome_start_fail_soft`] since it does not depend on
-// which of the two stores actually failed, only on the fact that it was the leading one.
+// which of the two stores failed, only on the fact that it was the leading one.
 //
 // The disjunction is [`is_leading_store`]'s second branch, and the reader is the one who
 // needs it: naming only the desktop's own store puts the wrong desktop in the message
 // whenever the position was inherited, which is a build where the leading store's feature
-// is off — precisely the build where a reader looking at `XDG_CURRENT_DESKTOP` would
+// is off: the build where a reader looking at `XDG_CURRENT_DESKTOP` would
 // conclude this error is about some other session's settings and stop reading.
-// `backend`'s [`warn_if_the_leading_store_was_compiled_out`](super::backend) says the same
+// [`note_if_the_leading_store_was_compiled_out`](super::desktop::note_if_the_leading_store_was_compiled_out) says the same
 // thing on the read path, which is where this wording is borrowed from.
 #[cfg_attr(
     not(any(feature = "linux-gnome", feature = "linux-kde")),
@@ -507,8 +477,9 @@ fn kde_watch_fail_soft(
     trigger: SyncSender<()>,
     leading: bool,
     poll_interval: Option<Duration>,
+    env: &Env,
 ) -> Result<KdeWatch, Error> {
-    match watch_fail_soft(leading, poll_interval, super::kde::watch(trigger)) {
+    match watch_fail_soft(leading, poll_interval, super::kde::watch(trigger, env)) {
         WatchFailSoft::Live(Some(watch)) => Ok(KdeWatch::Live(watch)),
         WatchFailSoft::Live(None) => Ok(KdeWatch::NoDirectory),
         WatchFailSoft::Degraded(error) => {
@@ -569,7 +540,7 @@ struct LossReport {
     last_live_route: bool,
     // Whether [`ProxyConfigSource::Kioslaverc`](crate::config::ProxyConfigSource) has
     // already been reported as degraded. The flags stay in place afterwards, because the
-    // second report — the route going completely dark — can arrive much later.
+    // second report (the route going completely dark) can arrive much later.
     degraded: bool,
 }
 
@@ -601,18 +572,20 @@ impl LossReport {
 
 // The coordinator loop: wait, debounce, re-read, emit.
 //
-// Every source — `GSettings::changed`, `kioslaverc` inotify, the [`Poll`] timer and
-// [`Watch::poll_now`] — arrives here as the same content-free `()`, and the answer is
-// always a full [`read_config`] rather than a partial update; see the module diagram.
+// Every source (`GSettings::changed`, `kioslaverc` inotify, the [`Poll`] timer and
+// [`Watch::poll_now`]) arrives here as the same content-free `()`, and the answer is always
+// a full [`read_config_in`](super::backend::read_config_in) rather than a partial update;
+// see the module diagram.
 fn coordinate(
     options: &WatchOptions,
+    env: &Env,
     shared: &Shared,
     triggers: &Receiver<()>,
     #[cfg(feature = "linux-kde")] mut kde_loss: LossReport,
 ) {
     while triggers.recv().is_ok() {
         // The fixed window `WatchOptions::debounce` describes; that is what holds the
-        // 1-second detection-latency SLO here, where a storm is the normal case — each
+        // 1-second detection-latency SLO here, where a storm is the normal case: each
         // GSettings key written fires its own signal.
         let deadline = Instant::now() + effective_debounce(options.debounce);
         loop {
@@ -633,14 +606,14 @@ fn coordinate(
         #[cfg(feature = "linux-kde")]
         kde_loss.check(shared);
         crate::trace::debug!("the debounce window closed; re-reading every Linux source");
-        publish(options, shared);
+        publish(env, shared);
     }
 }
 
 // Read the configuration once and hand the result to the stream side.
-fn publish(options: &WatchOptions, shared: &Shared) {
-    match read_config(options) {
-        // Emit only when the snapshot actually differs from the previous one.
+fn publish(env: &Env, shared: &Shared) {
+    match read_config_in(env) {
+        // Emit only when the snapshot differs from the previous one.
         Ok(config) => shared.emit(config),
         // A transient failure must not end the subscription.
         Err(error) => shared.fail(error),
@@ -653,7 +626,7 @@ fn publish(options: &WatchOptions, shared: &Shared) {
 // The floor is what stops a tiny interval spinning that `recv_timeout` into a busy loop.
 // The ceiling is what stops a huge one from silencing it: `Receiver::recv_timeout` turns
 // `timeout` into `Instant::now() + timeout` and, when that is not representable, waits with
-// a plain `recv` instead — indefinitely. A `Duration::MAX` interval would therefore leave
+// a plain `recv` instead, indefinitely. A `Duration::MAX` interval would therefore leave
 // the timer never firing while [`crate::watch::WatchHealth::is_frozen`] still answered
 // `false`, since a `poll_interval` was set. Windows and macOS cap at their own conversion
 // points (`poll_wait_millis`, `idle_wait`); this is the Linux one.
@@ -741,13 +714,11 @@ mod tests {
         );
     }
 
-    // The store whose failure has nothing behind it, asked of every desktop this crate
-    // classifies: exactly one store answers yes, and it is one this build can actually
-    // read. Neither arm of [`is_leading_store`] was held, and what the answer decides is
-    // whether a failed watch is fatal or fail-softened. Answer yes for every store and a
-    // degraded GSettings subscription kills a watcher that still has `kioslaverc`; keep
-    // the position on a store that is compiled out and the one store this build *can*
-    // read fails soft with nothing behind it, which is the silent half.
+    // For every classified desktop, exactly one readable store leads. `is_leading_store`
+    // decides whether a failed watch is fatal or fail-softened.
+    // Reporting every store as leading makes a degraded GSettings subscription kill a
+    // watcher that still has `kioslaverc`. Selecting a compiled-out store as leading makes
+    // the only readable store fail soft with no fallback and no indication of the loss.
     #[cfg(any(feature = "linux-gnome", feature = "linux-kde"))]
     #[test]
     fn one_store_this_build_can_read_leads_every_desktop() {
@@ -764,8 +735,8 @@ mod tests {
             assert!(desktop::is_compiled_in(leading[0]), "{desktop:?}");
             // And it is the store whose feature is on. The line above cannot say that:
             // transposing the `GSettings` and `Kioslaverc` arms of
-            // [`desktop::is_compiled_in`] is self-consistent — this function reads the
-            // *other* store whenever the answer is no — so the count stays one and the store
+            // [`desktop::is_compiled_in`] is self-consistent: this function reads the
+            // *other* store whenever the answer is no, so the count stays one and the store
             // it names still calls itself compiled in, while the leading position has moved
             // onto the store this build left out. What that costs is the half named above:
             // the store this build *can* read is no longer the leading one, so its failed
@@ -782,11 +753,11 @@ mod tests {
     }
 
     // A source that failed and was fail-softened is not a source. These are the arms
-    // [`Watch::has_live_notification_source`] — and through it
-    // [`WatchHealth::is_frozen`](crate::WatchHealth::is_frozen) — must not count, and this
-    // test is the only thing holding that. Read [`GnomeWatch::is_live`] as "anything except
-    // `NoSchema`" and a watcher whose subscription never started reports live notifications
-    // and never admits to being frozen.
+    // [`Watch::has_live_notification_source`] (and through it
+    // [`WatchHealth::is_frozen`](crate::WatchHealth::is_frozen)) must not count, and no
+    // other test checks that. Read [`GnomeWatch::is_live`] as "anything except `NoSchema`"
+    // and a watcher whose subscription never started reports live notifications and never
+    // admits to being frozen.
     #[cfg(any(feature = "linux-gnome", feature = "linux-kde"))]
     #[test]
     fn a_fail_softened_source_does_not_count_as_live() {
@@ -803,10 +774,10 @@ mod tests {
     }
 
     // The other half of [`Watch::health`]'s `kioslaverc` clause: a watch that *was*
-    // established and has since lost a directory. The test above works on the enum arms, and
-    // a loss does not change the arm — it stays [`KdeWatch::Live`] and says so through the
-    // payload — so this test is the only thing that would see a route which can no longer
-    // report a change go unnamed in `degraded`.
+    // established and has since lost a directory. The test above works on the enum arms,
+    // and a loss does not change the arm: it stays [`KdeWatch::Live`] and says so through
+    // the payload, so only this test detects a route which can no longer report a change
+    // going unnamed in `degraded`.
     //
     // The three rows are the distinction the clause exists for, and only the middle one
     // needs it: one directory of the cascade gone is degraded *and* still live, because the
@@ -833,6 +804,7 @@ mod tests {
                 )),
                 poll: None,
                 coordinator: None,
+                env: Env::default(),
             };
             let health = watch.health();
             let case = format!("lost={lost} live_directories={live_directories}");
@@ -849,10 +821,10 @@ mod tests {
     }
 
     // The survivor clause in [`LossReport::check`]: one lost directory out of several is a
-    // degrade and nothing more. This test is the only thing holding it, and what it holds off
-    // is a lie in the other direction from the usual one — the *first* loss of a cascade
-    // marking the route dark, so `is_frozen` answers yes about a watcher that still reports
-    // every change made to the directory `read_store` actually reads.
+    // degrade and nothing more. No other test checks this case, which prevents the opposite
+    // misreport: the *first* loss of a cascade marking the route dark, so `is_frozen`
+    // answers yes about a watcher that still reports every change made to the directory
+    // `read_store` reads.
     //
     // The three rows are what the clause distinguishes, run against one report in sequence
     // because the second half is defined to be sayable long after the first: the reports are
@@ -902,11 +874,10 @@ mod tests {
     }
 
     // [`wake`] answers whether the coordinator is still there to ask, which is not the same
-    // question as whether this particular send landed. This test is the only thing holding
-    // the difference, and
-    // [`Poll::start`] stops its thread on a `false`: read a full buffer as failure and the
-    // polling fallback — the one route a machine with no working notification has — ends the
-    // first time a wake happens to be already pending, which is exactly when the system is
+    // question as whether this particular send landed. No other test checks the difference,
+    // and [`Poll::start`] stops its thread on a `false`: read a full buffer as failure and
+    // the polling fallback (the one route a machine with no working notification has)
+    // ends the first time a wake happens to be already pending, which is when the system is
     // busy. It comes back only if the watcher is rebuilt.
     #[test]
     fn a_wake_nobody_has_drained_yet_is_not_a_dead_coordinator() {
@@ -922,7 +893,7 @@ mod tests {
 
     // The property the ceiling in [`poll_wait`] exists for: whatever the caller asks for,
     // `recv_timeout` must still be able to build a deadline out of it. The first assertion
-    // is the control — it is what the poll thread would be handed without the clamp, and
+    // is the control: it is what the poll thread would be handed without the clamp, and
     // `recv_timeout` answers an unrepresentable deadline by waiting forever instead.
     #[test]
     fn every_poll_wait_stays_a_deadline_recv_timeout_can_represent() {

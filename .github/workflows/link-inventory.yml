@@ -1,0 +1,197 @@
+name: Link inventory
+
+# What the linker puts into each binding binary on macOS, Windows and Android, and whether
+# the third-party notice names every Rust crate among it.
+#
+# Two passes per runner:
+# 1. `cargo xtask package`, as `bindings-release.yml` runs it, then the artifact check: the
+#    notices and archives exactly as a release would ship them.
+# 2. Each binary relinked with a linker map (`-Wl,-map` for ld64, `/MAP` for link.exe,
+#    `-Wl,-Map` for the NDK's lld), read by `.github/scripts/link_inventory.py`: the Rust
+#    crates, the C objects inside them, every other archive member and standalone object,
+#    the dynamic dependencies, and the linked crates the notice leaves out.
+#
+# Nothing is published or uploaded; the evidence is the job log and the step summary. A
+# failure in one binding or target is reported and the rest still run.
+
+# Dispatch only: each run costs macOS and Windows minutes, and what it answers changes with
+# the toolchain, the NDK or the dependency graph rather than with every commit.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_ABOUT_VERSION: 0.9.2
+  MATURIN_VERSION: 1.15.0
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  PYTHONUTF8: "1"
+
+jobs:
+  macos:
+    name: macos
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rust-src
+      - name: Versions
+        run: |
+          rustc -vV; cargo -V; ld -v 2>&1 | head -3; xcrun --show-sdk-version; sw_vers
+      - name: Install the packaging tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install "maturin==$MATURIN_VERSION"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package, as the release does
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo xtask package node "$target" dist
+            cargo xtask package python "$target" dist
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+          python3 .github/scripts/check_bindings_artifacts.py dist
+      - name: Link maps
+        run: |
+          out="$RUNNER_TEMP/maps"; mkdir -p "$out"
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            for b in node python c; do
+              lib="proxy_watch_$b"
+              extra=""
+              # A Python extension resolves the interpreter's symbols when it is loaded.
+              [ "$b" = python ] && extra="-C link-arg=-undefined -C link-arg=dynamic_lookup"
+              echo "::group::$b $t"
+              if cargo rustc --release --locked -p "proxy-watch-$b" --target "$t" --lib --crate-type cdylib -- \
+                  -C link-arg=-Wl,-map,"$out/$b-$t.map" $extra; then
+                otool -L "target/$t/release/lib$lib.dylib"
+                cargo xtask stage-licenses "$b" "$t" "$out/notice-$b-$t" > /dev/null
+                echo "::endgroup::"
+                python3 .github/scripts/link_inventory.py "$out/$b-$t.map" ld64 "$b $t" "$out/notice-$b-$t/THIRD-PARTY-LICENSES.txt"
+              else
+                echo "::endgroup::"
+                echo "::warning::$b $t did not link"
+              fi
+            done
+          done
+
+  windows:
+    name: windows
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+          components: rust-src
+      - name: Versions
+        run: |
+          rustc -vV; cargo -V; python --version
+          "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property catalog_productDisplayVersion || true
+      - name: Install the packaging tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/Scripts/pip" install "maturin==$MATURIN_VERSION"
+          echo "$RUNNER_TEMP/tools/Scripts" >> "$GITHUB_PATH"
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package, as the release does
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            cargo xtask package node "$target" dist
+            cargo xtask package python "$target" dist
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+          python .github/scripts/check_bindings_artifacts.py dist
+      - name: Link maps
+        run: |
+          out="$RUNNER_TEMP/maps"; mkdir -p "$out"
+          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            for b in node python c; do
+              lib="proxy_watch_$b"
+              map=$(cygpath -w "$out/$b-$t.map")
+              echo "::group::$b $t"
+              if cargo rustc --release --locked -p "proxy-watch-$b" --target "$t" --lib --crate-type cdylib -- \
+                  -C link-arg="/MAP:$map"; then
+                if command -v llvm-readobj > /dev/null; then
+                  llvm-readobj --coff-imports "target/$t/release/$lib.dll" | grep "Name:" | sort -u
+                fi
+                cargo xtask stage-licenses "$b" "$t" "$out/notice-$b-$t" > /dev/null
+                echo "::endgroup::"
+                python .github/scripts/link_inventory.py "$out/$b-$t.map" msvc "$b $t" "$out/notice-$b-$t/THIRD-PARTY-LICENSES.txt"
+              else
+                echo "::endgroup::"
+                echo "::warning::$b $t did not link"
+              fi
+            done
+          done
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,x86_64-linux-android
+          components: rust-src
+      - name: Versions
+        run: |
+          rustc -vV; cargo -V; echo "NDK: $ANDROID_NDK_LATEST_HOME"
+          cat "$ANDROID_NDK_LATEST_HOME/source.properties" || true
+          # The `env` context holds what a workflow sets, not the runner's own variables.
+          echo "env context sees ANDROID_NDK_LATEST_HOME as: '${{ env.ANDROID_NDK_LATEST_HOME }}'"
+      # API 21 is the floor Rust's Android targets build for. The linker paths come from the
+      # runner's environment, which a step's shell can read and the `env` context cannot.
+      - name: Android linkers
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$bin/x86_64-linux-android21-clang" >> "$GITHUB_ENV"
+      - name: Install the packaging tools
+        run: cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+      - name: Package, as the release does
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for target in aarch64-linux-android x86_64-linux-android; do
+            cargo xtask package c "$target" dist
+          done
+          ls -l dist
+          python3 .github/scripts/check_bindings_artifacts.py dist
+      - name: Link maps
+        run: |
+          out="$RUNNER_TEMP/maps"; mkdir -p "$out"
+          readelf="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for t in aarch64-linux-android x86_64-linux-android; do
+            b=c
+            echo "::group::$b $t"
+            if cargo rustc --release --locked -p "proxy-watch-$b" --target "$t" --lib --crate-type cdylib -- \
+                -C link-arg=-Wl,-Map="$out/$b-$t.map"; then
+              "$readelf" -d "target/$t/release/libproxy_watch_c.so" | grep -E "NEEDED|SONAME"
+              cargo xtask stage-licenses "$b" "$t" "$out/notice-$b-$t" > /dev/null
+              echo "::endgroup::"
+              python3 .github/scripts/link_inventory.py "$out/$b-$t.map" lld "$b $t" "$out/notice-$b-$t/THIRD-PARTY-LICENSES.txt"
+            else
+              echo "::endgroup::"
+              echo "::warning::$b $t did not link"
+            fi
+          done

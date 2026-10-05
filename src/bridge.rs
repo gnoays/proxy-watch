@@ -93,7 +93,7 @@ mod tests {
     use crate::watch::{WatchHealth, WatchState};
 
     // The health half the bridge is contracted to ignore, as a baseline the events below
-    // share — except the last, which departs from it deliberately. That one is the event
+    // share, except the last, which departs from it. That one is the event
     // that shows anything reaching a receiver got there through the config: it moves the
     // health and nothing else, and no receiver wakes.
     fn live() -> WatchHealth {
@@ -129,7 +129,7 @@ mod tests {
 
     // A stream the test feeds one event at a time. The bridge consumes everything already
     // waiting in a single poll, so a stream handing out a canned list cannot show what any
-    // one event did — the receiver first looks after the last of them has been folded in.
+    // one event did: the receiver first looks after the last of them has been folded in.
     struct Fed(tokio::sync::mpsc::UnboundedReceiver<WatchEvent>);
 
     impl Stream for Fed {
@@ -170,7 +170,7 @@ mod tests {
             assert_eq!(*clone.borrow(), changed);
 
             // What the bridge must publish nothing for, sent once the receiver has caught
-            // up with everything before it — anything sent earlier is folded into the
+            // up with everything before it: anything sent earlier is folded into the
             // change above by the channel and shows nothing.
             //
             // A transient failure must not disturb the channel, and a route that died
@@ -219,9 +219,9 @@ mod tests {
         }
     }
 
-    // The watcher owns an OS thread and a change notification, so the bridge must let
-    // go of it as soon as nobody is listening — without waiting for a configuration
-    // change that may never come.
+    // The watcher owns an OS thread and a change notification, so the bridge must let go of
+    // it as soon as no listeners remain, without waiting for a configuration change that
+    // may never come.
     #[test]
     fn dropping_the_last_receiver_releases_the_watcher() {
         let dropped = Arc::new(AtomicBool::new(false));

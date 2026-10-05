@@ -1,0 +1,18 @@
+Third-party licenses
+
+This artifact links the Rust crates and C sources listed below, and the Rust standard
+library, whose section ends this file. Each license text follows the crates it covers. The
+artifact's own code is under MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE beside
+this file.
+{{#each licenses}}
+
+================================================================================
+{{name}} ({{id}})
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+{{/each}}

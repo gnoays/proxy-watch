@@ -8,7 +8,7 @@ body:
       label: What happens, and what the documentation says instead
       description: >-
         Name the API or the sentence where you can. The README's **Pitfalls** section lists
-        the behaviours that most often read as bugs and are documented ones — Windows
+        the behaviours that most often read as bugs and are documented ones: Windows
         reporting the active connection and the first enabled step only, `*_proxy` being a
         snapshot rather than a stream, a sandboxed watcher needing `poll_interval`.
     validations:
@@ -41,14 +41,14 @@ body:
     attributes:
       label: How the proxy is configured on that host
       description: >-
-        Everything that applies, if you know — which store holds the setting decides which
+        Everything that applies, if you know: which store holds the setting decides which
         code path reads it. Skip it if you are not sure; the output above usually says.
       multiple: true
       options:
         - Proxy servers set in the settings GUI
         - A PAC URL, or auto-detect / WPAD
         - Environment variables (`http_proxy` and friends)
-        - Policy or MDM — Windows Group Policy, `netsh winhttp set proxy`, a macOS profile
+        - "Policy or MDM: Windows Group Policy, `netsh winhttp set proxy`, a macOS profile"
         - Hand-edited `gsettings` or `kioslaverc`
         - Inside Flatpak or Snap
     validations:

@@ -7,17 +7,17 @@
 //! redirects `HKEY_LOCAL_MACHINE` for the calling process only and needs no privilege at
 //! all: the shadow lives under `HKEY_CURRENT_USER`, which this process may always write.
 //!
-//! The three states that buys are a policy key holding a proxy, one holding a value the
-//! reader cannot use, and no HKLM at all — the last of which is the only way to fail an
+//! The three states this enables are a policy key holding a proxy, one holding a value the
+//! reader cannot use, and no HKLM at all, the last of which is the only way to fail an
 //! HKLM notification route without editing an ACL, and so the only way to reach the
 //! degraded half of `WatchHealth` on this platform.
 //!
-//! Its own test binary, deliberately, and nothing in it that is not about the shadow. The
-//! redirection is process-wide, so any test running beside it — on another thread of the
-//! same binary — would read the shadow too, including tests that have nothing to do with
-//! proxies. The tests below are all about it and none holds it across a yield point, so
-//! under the `--test-threads=1` every integration binary here already requires they cannot
-//! overlap; each also asserts the *unshadowed* machine first, which is what would catch a
+//! Its own test binary, with nothing in it that is not about the shadow. The redirection is
+//! process-wide, so any test running beside it (on another thread of the same binary)
+//! would read the shadow too, including tests that have nothing to do with proxies. The
+//! tests below are all about it and none holds it across a yield point, so under the
+//! `--test-threads=1` every integration binary here already requires they cannot overlap;
+//! each also asserts the *unshadowed* machine first, which is what would catch a
 //! redirection another one leaked.
 
 #![cfg(windows)]
@@ -36,22 +36,22 @@ use windows::core::PCWSTR;
 /// creating `a\b` creates `a` as well, and deleting `a\b` does not take `a` with it.
 const SHADOW_ROOT: &str = r"Software\proxy-watch-test-shadow-hklm";
 
-/// The key the backend reads, relative to `HKEY_LOCAL_MACHINE` — the same string
+/// The key the backend reads, relative to `HKEY_LOCAL_MACHINE`, the same string
 /// `POLICY_INTERNET_SETTINGS` holds in `src/sys/win/mod.rs`. Spelled out here rather than
 /// imported because it is private, which is also what makes this test worth having: it
 /// reaches the backend only through the public read.
 const POLICY_INTERNET_SETTINGS: &str =
     r"Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-/// Not routable and not resolvable: `.invalid` is reserved for exactly this
+/// Not routable and not resolvable: `.invalid` is reserved for this
 /// (<https://www.rfc-editor.org/rfc/rfc6761#section-6.4>). Nothing in this test connects
 /// anywhere, but a value that leaked past a failed cleanup should not be one that could.
 const POLICY_PROXY: &str = "policy.invalid:9999";
 
-/// A `AutoConfigURL` `url::Url::parse` refuses, which is the one way to make
+/// A `AutoConfigURL` `url::Url::parse` refuses, which is the only way to make
 /// `read_group_policy_mode` fail without taking away this process's right to read a key it
-/// owns. `group_policy_source`'s own comment names this case — "a mistyped policy
-/// `AutoConfigURL`" — as the reason every failure of that read softens.
+/// owns. `group_policy_source`'s own comment names this case ("a mistyped policy
+/// `AutoConfigURL` ") as the reason every failure of that read softens.
 const MALFORMED_PAC_URL: &str = "not a url";
 
 /// A policy proxy is read, reported, and does not answer.
@@ -130,14 +130,14 @@ fn a_policy_proxy_is_reported_and_the_per_user_store_still_answers() {
 /// [`proxy_watch::ProxyConfig::fallbacks`] is the difference between "this machine has no
 /// proxy group policy" and "this read did not learn what its policy holds", and on Windows
 /// the only thing that fills it in is the `.with_fallbacks(...)` at the end of
-/// `sys::win::read_config`. This test is the only thing holding that call.
+/// `sys::win::read_config`. No other test checks that call.
 /// `sys::win::tests::every_policy_read_that_failed_is_reported_as_no_policy_and_recorded`
 /// does assert that `group_policy_source` pushes the source, but it passes its own
 /// `&mut Vec` in and reads it back out, so it holds the push and not the hand-off; between
 /// that vector and the caller's `ProxyConfig` there is nothing else.
 ///
 /// What the missing hand-off costs is silent. `read()` still succeeds, still answers from
-/// HKCU, and still reports no `GroupPolicy` source — which it also does on a machine that
+/// HKCU, and still reports no `GroupPolicy` source, which it also does on a machine that
 /// has no policy. The field is compared by [`PartialEq`], so a watcher would additionally
 /// skip the snapshot where the degradation appears and the one where it clears.
 ///
@@ -147,8 +147,8 @@ fn a_policy_proxy_is_reported_and_the_per_user_store_still_answers() {
 fn a_policy_key_that_could_not_be_read_is_named_in_the_answer() {
     let unshadowed = proxy_watch::read().expect("reading this machine's own configuration");
     // Both preconditions in one place: a real policy would make the shadow not the only
-    // thing measured, and a host that already records a fallback — a WinHTTP default that
-    // failed to read, say — would leave the assertion below matching a list this test did
+    // thing measured, and a host that already records a fallback (a WinHTTP default that
+    // failed to read, say) would leave the assertion below matching a list this test did
     // not build.
     assert!(
         unshadowed.source(ProxyConfigSource::GroupPolicy).is_none(),
@@ -167,15 +167,15 @@ fn a_policy_key_that_could_not_be_read_is_named_in_the_answer() {
     drop(shadow);
 
     // The two halves of the distinction, which only exist together. The policy key says
-    // something — `AutoConfigURL` is one of the three values `decides_whether_to_proxy`
-    // asks for — and yet no mode can be built from it, so `sources` cannot carry it...
+    // something (`AutoConfigURL` is one of the three values `decides_whether_to_proxy`
+    // asks for) and yet no mode can be built from it, so `sources` cannot carry it...
     assert!(
         config.source(ProxyConfigSource::GroupPolicy).is_none(),
         "a policy whose value will not parse has no mode to report: {:?}",
         config.sources
     );
     // ...and this list is the only place the caller can learn that the source was consulted
-    // at all rather than simply absent.
+    // at all rather than absent.
     assert_eq!(
         config.fallbacks,
         vec![ProxyConfigSource::GroupPolicy],
@@ -192,10 +192,9 @@ fn a_policy_key_that_could_not_be_read_is_named_in_the_answer() {
 
 /// A watcher whose HKLM notification routes could not be armed says so.
 ///
-/// `Watch::health` hands `construction_degraded` to `merge_runtime_health`, and this test is
-/// the only thing holding that hand-off: replacing the field with an empty `Vec` leaves the
-/// rest of the Windows tree green.
-/// `push_degraded_does_not_duplicate_a_source` holds the pushes and
+/// `Watch::health` hands `construction_degraded` to `merge_runtime_health`, and no other
+/// test checks that hand-off: replacing the field with an empty `Vec` leaves the rest of
+/// the Windows tree green. `push_degraded_does_not_duplicate_a_source` holds the pushes and
 /// `merge_runtime_health_folds_in_new_state_without_disturbing_the_old` holds the merge,
 /// each against a vector it builds itself; between the backend's list and the caller's
 /// `WatchHealth` there is nothing else. Without the hand-off a watcher with two of its
@@ -203,12 +202,12 @@ fn a_policy_key_that_could_not_be_read_is_named_in_the_answer() {
 /// caller that reads it to decide whether to set a `poll_interval` decides not to.
 ///
 /// `tests/windows_watch.rs`'s `health_reports_every_route_live_on_a_normal_machine` says
-/// this cannot be tested without an ACL edit — "none of which this test file can redirect
-/// to a disposable scratch key". That is true of *that* file and false of this one: the
-/// two secondary routes are both under `HKEY_LOCAL_MACHINE`, and an empty shadow makes
-/// both fail with no privilege and nothing written outside `HKEY_CURRENT_USER`. The HKCU
-/// route, which really would need an ACL edit, is left alone — and has to be, because it
-/// is the one route whose loss is fatal rather than degrading.
+/// this cannot be tested without an ACL edit: "none of which this test file can redirect
+/// to a disposable scratch key". That is true of *that* file and false of this one: the two
+/// secondary routes are both under `HKEY_LOCAL_MACHINE`, and an empty shadow makes both
+/// fail with no privilege and nothing written outside `HKEY_CURRENT_USER`. The HKCU route,
+/// which would need an ACL edit, is left alone, and has to be, because it is the one route
+/// whose loss is fatal rather than degrading.
 ///
 /// Ignored for the same reason as the tests above, and undone the same way.
 #[test]
@@ -242,9 +241,9 @@ fn a_watcher_whose_secondary_routes_could_not_be_armed_reports_them_degraded() {
         ],
         "the routes that could not be armed: {health:?}"
     );
-    // Degraded rather than dark, and that distinction is the reason `has_live_notifications`
-    // is not simply `degraded.is_empty()`: HKCU still delivers, so a change to the settings
-    // that actually answer is still announced.
+    // Degraded rather than dark, and that distinction is the reason
+    // `has_live_notifications` is not `degraded.is_empty()`: HKCU still delivers, so a
+    // change to the settings that answer is still announced.
     assert!(
         health.has_live_notifications,
         "the HKCU route is untouched and still delivers: {health:?}"
@@ -266,15 +265,15 @@ enum Value<'a> {
 ///
 /// `Drop` lifts the redirection before deleting the shadow, because deleting it first would
 /// leave `HKEY_LOCAL_MACHINE` pointing at a key that no longer exists for as long as the
-/// gap lasts. It runs on a panic — Rust unwinds through it — but not if the binary is
+/// gap lasts. It runs on a panic (Rust unwinds through it) but not if the binary is
 /// killed outright, in which case the process ends with the redirection still installed;
 /// the redirection dies with the process, and what survives is the `HKEY_CURRENT_USER`
 /// subtree named by [`SHADOW_ROOT`], which affects nothing and can be deleted by hand.
 struct Shadow(HKEY);
 
 impl Shadow {
-    /// An empty `values` leaves the shadow *empty*, policy key and all — creating that key
-    /// would create `Software` along with it, which is the one thing
+    /// An empty `values` leaves the shadow *empty*, policy key and all: creating that key
+    /// would create `Software` along with it, which is the only thing
     /// `arm_group_policy_key`'s ancestor walk needs to succeed.
     fn install(values: &[(&str, Value<'_>)]) -> Self {
         let root = create_key(HKEY_CURRENT_USER, SHADOW_ROOT);

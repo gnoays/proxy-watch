@@ -1,36 +1,36 @@
-//! Gate: every numeral+noun claim in `src/` prose the scanner reaches must have a row
-//! here, and every row is recounted against the tree. It is not every such claim in the
-//! tree, and the difference is deliberate rather
-//! than unmeasured: [`the_scanner_reads_the_shapes_this_tree_uses`] pins each shape the
-//! scanner does and does not read. It declines in four ways, and none is enumerable —
-//! a scanner cannot list the sentences it declines to read.
+//! Gate: every numeral+noun claim in `src/` and `examples/` prose the scanner reaches must
+//! have a row here, and every row is recounted against the tree. It is not every such claim
+//! in the tree, and the difference is known rather than unmeasured:
+//! [`the_scanner_reads_the_shapes_this_tree_uses`] pins each shape the scanner does and
+//! does not read. It declines in four ways, and none is enumerable; a scanner cannot list
+//! the sentences it declines to read.
 //!
-//! By distance: a numeral two words from its noun — `Fourteen PAC host functions` — is out
+//! By distance: a numeral two words from its noun (`Fourteen PAC host functions`) is out
 //! of reach, and a rule loose enough to take it starts attaching numerals to the wrong noun
 //! entirely. Reword the sentence to sit inside what the scanner reads rather than widening
 //! the rule; that is the preferred repair for every silence below.
 //!
 //! By noun: [`NOUNS`] is a closed list, so a numeral quantifying anything outside it is
-//! unread however close its noun sits — "the three switches" (`src/bypass.rs`), "the two
-//! references" (`src/pac/hostfn.rs`, `src/pac/result.rs`, `src/sys/proxy_dict.rs`), "the
-//! same two keys" (`src/debug_masking.rs`). This is the largest of the silences.
-//! Widening [`NOUNS`] buys rows one word at a time, not coverage of a known set, which is why
-//! the list stays at the entities a wrong number would actually mislead a reader about.
+//! unread however close its noun sits: "the two references" (`src/pac/hostfn.rs`,
+//! `src/sys/proxy_dict.rs`), "the same two keys" (`src/debug_masking.rs`). This is the
+//! largest of the silences. Widening [`NOUNS`] adds rows one word at a time, not coverage
+//! of a known set, which is why the list stays at the entities a wrong number would mislead
+//! a reader about.
 //!
-//! By line break: [`scan`] reads one line at a time, so a numeral that ends a line is
-//! never joined to a noun that begins the next. The sibling gates concatenate a comment
-//! block before matching and this one deliberately does not — [`REGISTRY`] rows find their
-//! sentence by `anchor`, a substring of the line the numeral sits on, and joining a block
-//! would let a row match an anchor belonging to a different claim in the same paragraph.
-//! Trading a silent miss for a silent mismatch is not a repair. The shape has no instance
-//! in the tree today: every comment line under `src/` ending in a numeral is followed by a
-//! word outside [`NOUNS`]. Rewrap the sentence if one appears.
+//! By line break: [`scan`] reads one line at a time, so a numeral that ends a line is never
+//! joined to a noun that begins the next. The sibling gates concatenate a comment block
+//! before matching and this one does not; [`REGISTRY`] rows find their sentence by
+//! `anchor`, a substring of the line the numeral sits on, and joining a block would let a
+//! row match an anchor belonging to a different claim in the same paragraph. Trading a
+//! silent miss for a silent mismatch is not a repair. The shape has no instance in the tree
+//! today: every comment line under `src/` ending in a numeral is followed by a word outside
+//! [`NOUNS`]. Rewrap the sentence if one appears.
 //!
 //! By spelling: [`NUMERALS`] holds number words, so a numeral written in digits is not
 //! looked for at all. Widening it to digits closes less than it looks like it closes: what
-//! sits in this silence quantifies units rather than entities this tree can recount — "~11
-//! orders of magnitude" is the shape — so no row here could exist for one anyway, and
-//! widening [`NOUNS`] to units buys back the excuses that list is closed to keep out. No
+//! sits in this silence quantifies units rather than entities this tree can recount ("~11
+//! orders of magnitude" is the shape), so no row here could exist for one anyway, and
+//! widening [`NOUNS`] to units reintroduces the excuses that list is closed to keep out. No
 //! digit stands in front of a [`NOUNS`] word anywhere under `src/` today, so this silence
 //! holds none of the claims the gate is for.
 //!
@@ -43,9 +43,9 @@
 //! would add a scan that is true by construction.
 //!
 //! `tests/` is out of scope too. A claim a test file makes about its own tests is prose
-//! that is not in the `.crate`, is not on docs.rs, and is read by nobody who is not already
-//! editing the file — upkeep with no reader on the other end. What stays in scope is the
-//! surface a consumer can actually read a wrong number off.
+//! that is not in the `.crate`, is not on docs.rs, and is read only by people already
+//! editing the file, upkeep with no reader on the other end. What stays in scope is the
+//! surface a consumer can read a wrong number off.
 //!
 //! This is a check on the development tree, not on the library, so it lives in the `xtask`
 //! package rather than the library's own `tests/`. Do not move it back:
@@ -68,10 +68,10 @@ const NUMERALS: &[(&str, usize)] = &[
     ("eight", 8),
     ("nine", 9),
     ("ten", 10),
-    // Past ten a numeral stops being a number a reader recounts at a glance, which is
-    // exactly when the gate starts earning its keep — and exactly where a table written
-    // for the numbers a reader checks anyway would stop, leaving `src/pac/boa.rs`'s
-    // `the fourteen host functions` unreadable and so unregistered.
+    // Past ten a numeral stops being a number a reader recounts at a glance, which is when
+    // the gate starts earning its keep, and where a table written for the numbers a reader
+    // checks anyway would stop, leaving a claim such as `the fourteen host functions`
+    // unreadable and so unregistered.
     ("eleven", 11),
     ("twelve", 12),
     ("thirteen", 13),
@@ -84,7 +84,7 @@ const NUMERALS: &[(&str, usize)] = &[
     ("twenty", 20),
 ];
 
-// Countable nouns only — vague ones ("ways", "cases") produced excuses, not checks.
+// Countable nouns only: vague ones ("ways", "cases") produced excuses, not checks.
 const NOUNS: &[&str] = &[
     "callers",
     "call sites",
@@ -107,7 +107,7 @@ const NOUNS: &[&str] = &[
 // work.
 
 enum Scope {
-    // `src/**/*.rs`, each file truncated at its `#[cfg(test)]` module.
+    // `src/**/*.rs`, each file truncated at the line that opens its `mod tests`.
     SrcOutsideTests,
     // Whole file (claims about a test file's own tests).
     File(&'static str),
@@ -123,13 +123,13 @@ struct Claim {
     file: &'static str,
     // A substring that picks this line out of the file. Must be unique within the file.
     anchor: &'static str,
-    // Which noun of [`NOUNS`] the numeral quantifies — a line may carry more than one.
+    // Which noun of [`NOUNS`] the numeral quantifies; a line may carry more than one.
     noun: &'static str,
     scope: Scope,
     // `needle` must appear on exactly as many qualifying lines as the numeral says.
     //
     // A qualifying line contains `needle`, is not a comment, and is not the definition
-    // itself (`needle` preceded by `fn ` on the same line) — so "three callers" counts
+    // itself (`needle` preceded by `fn ` on the same line), so "three callers" counts
     // callers and not the function they call, and a doc comment that mentions the name
     // cannot pad the total.
     needle: &'static str,
@@ -137,16 +137,9 @@ struct Claim {
 
 // Every numeral under [`SCANNED`] that quantifies a countable code entity.
 //
-// Ordered by file, the same order the scan produces — `src/` first, then `examples/` — so
+// Ordered by file, the same order the scan produces (`src/` first, then `examples/`), so
 // that a diff to this table reads next to the diff that provoked it.
 const REGISTRY: &[Claim] = &[
-    Claim {
-        file: "src/pac/boa.rs",
-        anchor: "Install the fourteen host functions",
-        noun: "functions",
-        scope: Scope::SrcOutsideTests,
-        needle: "register_global_callable",
-    },
     Claim {
         file: "src/pac/time.rs",
         anchor: "The three time functions",
@@ -196,7 +189,7 @@ const REGISTRY: &[Claim] = &[
 //
 // Text, not syntax, for the same reason `src/debug_masking.rs` scans text: prose is what
 // is being checked, and prose does not survive into the item tree. The shape recognised is
-// a numeral word, then at most one intervening lowercase word, then the noun — "two
+// a numeral word, then at most one intervening lowercase word, then the noun: "two
 // callers", "three real backends", "both call sites". Anything looser matched sentences
 // where the numeral belonged to a different noun.
 fn claims_in_line(line: &str) -> Vec<(usize, &'static str)> {
@@ -215,10 +208,10 @@ fn claims_in_line(line: &str) -> Vec<(usize, &'static str)> {
                 continue;
             }
             // Step over Markdown emphasis as well as the space, because this tree writes it
-            // (`**both** stores`, `src/sys/linux/backend.rs`): a numeral wrapped in `**`
-            // is followed by `*`, not by a space, and stopping at the first one would drop
-            // the claim silently. Backticks are deliberately not skipped here — they are
-            // what [`is_intervening_word`] uses to recognise a backticked identifier.
+            // (`**both** stores`, `src/sys/linux/backend.rs`): a numeral wrapped in `**` is
+            // followed by `*`, not by a space, and stopping at the first one would drop the
+            // claim silently. Backticks are not skipped here: they are what
+            // [`is_intervening_word`] uses to recognise a backticked identifier.
             let mut after = from;
             while matches!(bytes.get(after), Some(b' ' | b'*')) {
                 after += 1;
@@ -240,9 +233,9 @@ fn noun_after(rest: &str) -> Option<&'static str> {
         let tail = if skipped == 0 {
             rest
         } else {
-            // At most one intervening word, and only a plain lowercase one — an adjective
+            // At most one intervening word, and only a plain lowercase one: an adjective
             // ("three real backends") or a backticked identifier ("two `create_store`
-            // tests") — never a second numeral or a punctuated clause.
+            // tests"), never a second numeral or a punctuated clause.
             let end = rest.find(' ')?;
             if !is_intervening_word(&rest[..end]) {
                 return None;
@@ -266,7 +259,7 @@ fn noun_after(rest: &str) -> Option<&'static str> {
 // A bare lowercase word is the adjective case. The backticked case is here because this
 // tree writes a code entity's own name in backticks far more often than it writes a plain
 // adjective, so a scanner that stops at a backtick stops right where the prose it is
-// checking actually goes: `src/sys/mac/mod.rs`'s "The two `create_store` tests below" is a
+// checking goes: `src/sys/mac/mod.rs`'s "The two `create_store` tests below" is a
 // numeral+noun claim that went unregistered for as long as the rule excluded it.
 fn is_intervening_word(word: &str) -> bool {
     let inner = word
@@ -327,9 +320,10 @@ fn manifest_dir() -> PathBuf {
 
 // What the scan walks: the directories `Cargo.toml`'s `include` puts in the `.crate`
 // (`/src/**/*.rs` and `/examples/*.rs`). The registry is sized for the surface a consumer
-// reads, and an example is read by every consumer who opens one — a miscount there is the
-// same defect in the same package. `tests/` is excluded on purpose; see
-// [`the_exclusion_of_tests_still_excludes_something`] for what that exclusion is worth.
+// reads, and an example is read by every consumer who opens one; a miscount there is the
+// same defect in the same package. `tests/` is excluded because it is not a surface a
+// consumer reads; see [`the_exclusion_of_tests_still_excludes_something`] for what that
+// exclusion is worth.
 //
 // Widening this widens what every row of [`REGISTRY`] has to account for, so widen the
 // registry in the same edit.
@@ -396,14 +390,14 @@ fn count(scope: &Scope, needle: &str) -> usize {
     total
 }
 
-// Whether `line` opens the file's test module — where a production-call-site count stops.
+// Whether `line` opens the file's test module, where a production-call-site count stops.
 //
-// The `#[cfg(test)]` attribute itself is deliberately not the marker. It also sits on
-// test-only items that appear *in the middle* of a file — `src/lib.rs`'s
-// `mod debug_masking;` declaration and `src/sys/linux/kde.rs`'s `proxy_settings` helper —
-// and stopping there would hide every production line after them from the count while
-// leaving them visible to `scan()`. A numeral added below such a line would then be
-// reported as "0 actual vs N stated" with nothing in the message to say why.
+// The `#[cfg(test)]` attribute itself is not the marker. It also sits on test-only items
+// that appear *in the middle* of a file (`src/lib.rs`'s `mod debug_masking;` declaration
+// and `src/sys/linux/kde.rs`'s `proxy_settings` helper), and stopping there would hide
+// every production line after them from the count while leaving them visible to `scan()`. A
+// numeral added below such a line would then be reported as "0 actual vs N stated" with
+// nothing in the message to say why.
 fn starts_test_module(line: &str) -> bool {
     line.trim_start().starts_with("mod tests")
 }
@@ -418,10 +412,9 @@ fn matching_rows(hit: &Hit) -> Vec<&'static Claim> {
         .collect()
 }
 
-// The half that makes the other half impossible to forget. A numeral written into the
-// tree without a row here fails; so does a row whose sentence was reworded or deleted,
-// which is what keeps the table from silently becoming a list of claims nobody makes
-// any more.
+// The half that makes the other half impossible to forget. A numeral written into the tree
+// without a row here fails; so does a row whose sentence was reworded or deleted, which is
+// what keeps the table from silently becoming a list of claims absent from the tree.
 #[test]
 fn every_counting_numeral_is_registered() {
     let hits = scan();
@@ -477,9 +470,9 @@ fn every_anchor_identifies_exactly_one_sentence() {
 // recounted, which is what makes a number gone stale a build failure instead of something
 // a reader has to happen to notice.
 //
-// There is no row this loop skips. A verdict that opted out of the recount would be the one
-// place an unchecked number could sit, so the table carries no such verdict: a sentence the
-// tree cannot be recounted for is reworded to name its items instead.
+// There is no row this loop skips. A verdict that opted out of the recount would be the
+// only place an unchecked number could sit, so the table carries no such verdict: a
+// sentence the tree cannot be recounted for is reworded to name its items instead.
 #[test]
 fn every_countable_numeral_matches_the_tree() {
     for hit in scan() {
@@ -496,8 +489,8 @@ fn every_countable_numeral_matches_the_tree() {
     }
 }
 
-// The scanner has to recognise the shapes this tree actually writes. Without this, a
-// pattern that quietly stops matching turns the gate into a table no sentence in the tree
+// The scanner has to recognise the shapes this tree writes. Without this, a pattern that
+// stops matching without a test failure turns the gate into a table no sentence in the tree
 // reaches any more, which passes green and checks nothing.
 #[test]
 fn the_scanner_reads_the_shapes_this_tree_uses() {
@@ -530,21 +523,18 @@ fn the_scanner_reads_the_shapes_this_tree_uses() {
         claims_in_line("//! **both** backends are read; the desktop orders them."),
         [(2, "backends")]
     );
-    // A numeral belonging to a different noun, and a word that merely contains one.
+    // A numeral belonging to a different noun, and a word that contains one.
     assert_eq!(claims_in_line("/// three more time out because"), []);
     assert_eq!(claims_in_line("/// the twofold cost of methods"), []);
     // Two intervening words are still one too many: a numeral held off its noun by
     // `PAC host` goes unread, and the repair is to reword rather than to widen the rule.
     assert_eq!(claims_in_line("//! Fourteen PAC host functions only"), []);
     // The other silence, and the larger one: `NOUNS` is closed, so a numeral whose noun is
-    // outside it goes unread however close the two sit. Both lines below are live sentences
-    // in the tree (`src/bypass.rs`, `src/pac/result.rs`) with counts that happen to
-    // be right; nothing here would notice if they stopped being.
-    assert_eq!(
-        claims_in_line("/// is empty. The three switches apply first"),
-        []
-    );
+    // outside it goes unread however close the two sit. Both lines below are shaped like
+    // live sentences in the tree (`src/pac/hostfn.rs`, `src/debug_masking.rs`) with counts
+    // that happen to be right; nothing here would notice if they stopped being.
     assert_eq!(claims_in_line("// The two references split here"), []);
+    assert_eq!(claims_in_line("// reads the same two keys"), []);
     // The third silence: a numeral that ends its line. Nothing follows it to be a noun, so
     // the claim is not read even though `NOUNS` holds the word on the next line. Whether a
     // sentence is examined then turns on where the wrap fell. `unverified_surface.rs` joins
@@ -561,7 +551,7 @@ fn the_scanner_reads_the_shapes_this_tree_uses() {
 fn no_claim_in_the_tree_is_split_across_a_line_break() {
     // The marker has to come off the second line before the two are joined, or the numeral
     // would be looking at `//` rather than at a word and this test could never fire on
-    // anything — a gate whose population is unreachable by construction.
+    // anything, a gate whose population is unreachable by construction.
     fn body(line: &str) -> &str {
         let t = line.trim();
         t.strip_prefix("//!")
@@ -607,10 +597,10 @@ fn no_claim_in_the_tree_is_split_across_a_line_break() {
     );
 }
 
-// An exclusion nobody can see excluding anything is an unchecked place wearing the clothes
-// of a decision. `tests/` was dropped from the scan because thirteen rows of upkeep bought
-// prose no reader reaches; if the numerals there ever went away by themselves, the right
-// move would be to scan it again rather than to keep a line that does nothing.
+// An exclusion that cannot be shown to exclude anything leaves its scope unchecked without
+// a demonstrated reason. `tests/` was dropped from the scan because thirteen rows of upkeep
+// bought prose no reader reaches; if the numerals there ever went away by themselves, the
+// right move would be to scan it again rather than to keep a line that does nothing.
 #[test]
 fn the_exclusion_of_tests_still_excludes_something() {
     let root = manifest_dir();
@@ -624,4 +614,22 @@ fn the_exclusion_of_tests_still_excludes_something() {
         "no numeral is left under tests/ for the exclusion to exclude — either the scan \
          should cover tests/ again or the exclusion should stop being described as one"
     );
+}
+
+// The recount against a planted file: a call counts, a comment, the definition and a
+// doc mention do not. `every_countable_numeral_matches_the_tree` compares this number with
+// the numeral, so a `count` that answered the numeral back, or nothing, would pass there.
+#[test]
+fn the_recount_counts_calls_and_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("proxy-watch-claim-counts-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("a temporary directory");
+    let file = dir.join("planted.rs");
+    fs::write(
+        &file,
+        "call_a();\n// call_a();\n/// call_a()\nfn call_a() {}\n    let x = call_a();\ncall_a(); call_a();\n",
+    )
+    .expect("the planted file is written");
+    let path: &'static str = Box::leak(file.to_string_lossy().into_owned().into_boxed_str());
+    assert_eq!(count(&Scope::File(path), "call_a("), 3);
+    fs::remove_dir_all(&dir).expect("the temporary directory is removed");
 }

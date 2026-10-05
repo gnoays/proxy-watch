@@ -4,13 +4,13 @@
 //! Like `xtask/tests/citation_landing.rs`, this checks the repository rather than the
 //! library, so it lives in the `xtask` package and reaches no consumer. What it scans does:
 //! the admissions that matter are the ones a consumer reads, and `Cargo.toml`'s `include`
-//! puts `/src/**/*.rs` and `/examples/*.rs` in the `.crate` — so both are walked. The
+//! puts `/src/**/*.rs` and `/examples/*.rs` in the `.crate`, so both are walked. The
 //! delegation target and the reader-visibility check below stay `src/`-rooted, because a
 //! declaration lives in a module and `examples/` generates no module page; a path with no
 //! directory in it is therefore under `src/`.
 //!
 //! An admission is any of [`PHRASES`] appearing in a comment block (a maximal run of
-//! consecutive comment lines, blank `//!` lines included — a module doc is one block).
+//! consecutive comment lines, blank `//!` lines included; a module doc is one block).
 //! Each such block must either
 //!
 //! * **declare**: carry `Unverified:` + `Risk:` + `Symptom:`, each followed by at least
@@ -19,7 +19,7 @@
 //!
 //! Why those three fields and not a free-text warning: "this is untested" tells a reader
 //! nothing they can act on. `Risk` names the failure, `Symptom` names what they would
-//! see — together they turn an admission into something a user can recognise in the
+//! see; together they turn an admission into something a user can recognise in the
 //! field and a maintainer can later write a test against.
 //!
 //! Both checks above ask only whether a declaration is *in* `src/`. The last one asks
@@ -44,6 +44,8 @@ const PHRASES: &[&str] = &[
     "untested",
     "not exercised",
     "never been run",
+    "not been measured",
+    "has not run anywhere",
     "no macos dev machine",
     "no hardware",
 ];
@@ -55,18 +57,18 @@ const FIELDS: [&str; 3] = ["Unverified:", "Risk:", "Symptom:"];
 // does not pass, short enough not to reward padding.
 const MIN_FIELD: usize = 24;
 
-// Files that must still carry a declaration. Each is a surface this crate has admitted
-// it cannot verify; if one is ever genuinely verified, the entry comes out of this list
-// in the same commit as the admission it replaces — never on its own.
+// Files that must still carry a declaration. Each is a surface this crate has admitted it
+// cannot verify; if one is ever verified, the entry comes out of this list in the same
+// commit as the admission it replaces, never on its own.
 //
 // Not every declaring block in the tree: `src/sys/win/ffi.rs`'s `#[cfg(test)] mod tests`
-// declares one too, and is deliberately absent. This list is what
-// `every_declared_surface_reaches_a_page_a_reader_sees` walks, and a `cfg(test)` module
-// is not in any build a reader has — not docs.rs, not `--document-private-items`, not the
-// `.crate` a consumer compiles. Demanding that `docs/` name it would be demanding a
-// warning about something the reader cannot reach, which is the opposite of the rule's
-// purpose. The tree-walking check above still holds it to the three fields, so the
-// admission is not unpoliced — only its arrival is out of scope.
+// declares one too, and is absent. This list is what
+// `every_declared_surface_reaches_a_page_a_reader_sees` walks, and a `cfg(test)` module is
+// not in any build a reader has: not docs.rs, not `--document-private-items`, not the
+// `.crate` a consumer compiles. Demanding that `docs/` name it would be demanding a warning
+// about something the reader cannot reach, which is the opposite of the rule's purpose. The
+// tree-walking check above still holds it to the three fields, so the admission is not
+// unpoliced; only its arrival is out of scope.
 const DECLARED_SURFACES: &[&str] = &[
     "sys/mac/mod.rs",
     "sys/linux/portal.rs",
@@ -93,7 +95,7 @@ fn examples_root() -> PathBuf {
 
 // Line comments only. A block comment, or a `//` that starts partway along a line of code,
 // is not read. The tree writes no block comments, but it does write mid-line ones (`mod
-// debug_masking; // hand-written Debug gate`) — none carrying a phrase today, and one that
+// debug_masking; // hand-written Debug gate`); none carrying a phrase today, and one that
 // did would pass this gate unexamined.
 fn is_comment_line(line: &str) -> bool {
     line.trim_start().starts_with("//")
@@ -110,7 +112,7 @@ fn strip_comment(line: &str) -> &str {
 // Line breaks and Markdown emphasis are removed before matching, the same normalisation
 // [`field_body`] does. These blocks are wrapped to a column, so a two-word phrase lands
 // across a break about as often as not, and matching the text as written let an admission
-// through on nothing but where the wrap happened to fall — `src/sys/win/ffi.rs` carried
+// through on nothing but where the wrap happened to fall; `src/sys/win/ffi.rs` carried
 // "is not / exercised end to end here" past this gate for as long as the gate has existed.
 // Emphasis splits a phrase the same way and for the same reason: this tree writes a bolded
 // word mid-sentence (`**both** stores`, `src/sys/linux/backend.rs`), so "**not** verified"
@@ -222,7 +224,7 @@ fn blocks(text: &str) -> Vec<(usize, String)> {
 // page exists: docs.rs builds `--all-features` (per `[package.metadata.docs.rs]`) but
 // not `--document-private-items`, so a `mod` that is not `pub` takes its whole subtree
 // off the rendered surface. `#[cfg]` above a `pub mod` is ignored here for the same
-// reason — all features are on in the build this models.
+// reason: all features are on in the build this models.
 //
 // Scope: module documentation. An item re-exported out of a private module does get a
 // page of its own, so a `///` on such an item reaches a reader even though this function
@@ -288,7 +290,7 @@ struct Hit {
 // The same silence one level down from [`walk`], and the argument written there applies to
 // it unchanged: a `.rs` file that cannot be read yields no hits, and no hits is this gate's
 // pass state, so the population shrinks and the gate still reports clean. The walk reaches
-// this file either way — it is `read_dir` that lists it and `read_to_string` that fails —
+// this file either way (it is `read_dir` that lists it and `read_to_string` that fails),
 // so nothing downstream can tell a file that held no admission from one that was never
 // looked at. Hardening the directory and not the file leaves the same hole a directory
 // narrower.
@@ -323,7 +325,7 @@ fn scan_file(path: &Path, rel: &str) -> Vec<Hit> {
 // says so where it does.
 //
 // `scanned` is the other half of that control, and the reason it exists here too. An
-// unreadable directory panics, but a *root that is never walked* does not — and with
+// unreadable directory panics, but a *root that is never walked* does not, and with
 // `examples/` added as a second root, "the call was dropped" became a way for the
 // population to shrink while every assertion still passed.
 // [`the_known_unverified_surfaces_still_declare`] cannot see that: it reads its files by
@@ -339,10 +341,10 @@ fn walk(dir: &Path, rel_prefix: &str, out: &mut Vec<Hit>, scanned: &mut Vec<Stri
     let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
-        // `to_string_lossy`, not `to_str().unwrap_or("")`: a name that is not valid
-        // Unicode must still be walked and counted, only spelled with U+FFFD in its
-        // place. Dropping it outright is exactly the one-file-at-a-time population
-        // shrink this function's own doc comment above says must not happen in silence.
+        // `to_string_lossy`, not `to_str().unwrap_or("")`: a name that is not valid Unicode
+        // must still be walked and counted, only spelled with U+FFFD in its place. Dropping
+        // it outright is the one-file-at-a-time population shrink this function's own doc
+        // comment above says must not happen in silence.
         let name = path
             .file_name()
             .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
@@ -361,7 +363,7 @@ fn walk(dir: &Path, rel_prefix: &str, out: &mut Vec<Hit>, scanned: &mut Vec<Stri
             };
             out.extend(scan_file(&path, &rel));
             // After the scan, not before: `scan_file` panics on an unreadable file, so a
-            // path counted here is one that was actually read.
+            // path counted here is one that was read.
             scanned.push(rel);
         }
     }
@@ -401,9 +403,9 @@ fn every_unverified_admission_declares_risk_and_symptom() {
     panic!("{msg}");
 }
 
-// A declaration that has been quietly deleted is indistinguishable, to the gate above,
-// from a surface that was never admitted to be unverified — so the list is checked
-// directly rather than left to the scan.
+// A declaration deleted without failing a check is indistinguishable, to the gate above,
+// from a surface that was never admitted to be unverified, so the list is checked directly
+// rather than left to the scan.
 #[test]
 fn the_known_unverified_surfaces_still_declare() {
     for rel in DECLARED_SURFACES {
@@ -421,7 +423,7 @@ fn the_known_unverified_surfaces_still_declare() {
 
 // Being in `src/` is not being read. Everything checked above is satisfied by a
 // declaration sitting in a module docs.rs never renders a page for, which is where all of
-// [`DECLARED_SURFACES`] sit — so each one has to be named from a page a reader does
+// [`DECLARED_SURFACES`] sit, so each one has to be named from a page a reader does
 // reach, in a block that itself declares. That reverses the direction of `delegates`:
 // there, a visible block borrows a hidden file's declaration; here, a hidden file needs a
 // visible block to carry it.
@@ -456,10 +458,10 @@ fn every_declared_surface_reaches_a_page_a_reader_sees() {
 fn the_reach_walk_follows_pub_mod_only() {
     let visible = reader_visible_files();
     assert!(visible.contains("lib.rs"));
-    // `pub mod pac;` / `pub mod parse;` — reachable, and `pac` resolves through `mod.rs`.
+    // `pub mod pac;` / `pub mod parse;`: reachable, and `pac` resolves through `mod.rs`.
     assert!(visible.contains("pac/mod.rs"), "{visible:?}");
     assert!(visible.contains("parse.rs"), "{visible:?}");
-    // `mod sys;` is private, so nothing under it is rendered — including its own
+    // `mod sys;` is private, so nothing under it is rendered, including its own
     // `pub(crate) mod` children, which are not `pub`.
     assert!(!visible.contains("sys/mod.rs"), "{visible:?}");
     assert!(!visible.contains("sys/mac/mod.rs"), "{visible:?}");
@@ -495,20 +497,18 @@ fn gate_catches_a_bare_admission() {
 
 #[test]
 fn a_phrase_split_across_a_line_break_is_still_an_admission() {
-    // How this gate actually failed: comment blocks are wrapped to a column, so the
-    // phrase falls across the break whenever the words land either side of it, and the
-    // block reads identically to a reader. `src/sys/win/ffi.rs` sat on the wrong side of
-    // that coin flip and went unexamined until an unrelated rewrap moved it.
+    // Comment blocks are wrapped to a column, so the phrase falls across the break
+    // whenever the words land either side of it, and the block reads identically to a
+    // reader.
     let wrapped = "The race it reacts to is not\nexercised end to end here.\n";
     assert_eq!(admits_being_unverified(wrapped), Some("not exercised"));
-    // The same words on one line were caught all along; both must behave alike.
+    // The same words on one line; both must behave alike.
     assert_eq!(
         admits_being_unverified("The race it reacts to is not exercised end to end here.\n"),
         Some("not exercised")
     );
-    // Emphasis splits a phrase the same way a wrap does, and the first repair here fixed
-    // only the wrap: `field_body` had been stripping `*` since before either, so the file
-    // disagreed with itself about whether a bolded word is part of its sentence.
+    // Emphasis splits a phrase the same way a wrap does. `field_body` strips `*` too, so
+    // both readers must agree that a bolded word is part of its sentence.
     assert_eq!(
         admits_being_unverified("The race it reacts to is **not** exercised here.\n"),
         Some("not exercised")
@@ -529,8 +529,8 @@ fn a_delegation_must_name_a_file_that_declares() {
     assert!(!delegates("CI only — see `src/sys/mac/no_such_file.rs`.\n"));
 
     // One declaring file does not vouch for the file named next to it. `src/sys/mod.rs`
-    // exists and carries no declaration, so the second block fails where the first passes
-    // — the difference is the whole point of checking every named path rather than any.
+    // exists and carries no declaration, so the second block fails where the first passes,
+    // which is why every named path is checked rather than any.
     assert!(delegates("CI only — see `src/sys/mac/mod.rs`.\n"));
     assert!(!delegates(
         "CI only — see `src/sys/mac/mod.rs` and `src/sys/mod.rs`.\n"
@@ -540,8 +540,8 @@ fn a_delegation_must_name_a_file_that_declares() {
 #[test]
 fn a_delegation_written_the_way_this_gate_asks_for_it_is_read() {
     // `every_unverified_admission_declares_risk_and_symptom` tells a maintainer to "name
-    // the `src/….rs` that carries them". Left as written — which is what copying the
-    // instruction produces — the scan stepped one byte past a `src/` it could not read a
+    // the `src/….rs` that carries them". Left as written (which is what copying the
+    // instruction produces), the scan stepped one byte past a `src/` it could not read a
     // path from, and one byte is inside `…`.
     assert!(delegations("name the `src/….rs` that carries them").is_empty());
     // Which mattered beyond the panic itself: the step is how the scan reaches the rest

@@ -1,0 +1,217 @@
+# `cargo about` configuration for the third-party license notice each binding artifact
+# ships. `cargo xtask third-party-licenses` renders it with `about.hbs`, one file per
+# binding and target, since what links differs by target (`windows` on Windows, `inotify`
+# on Linux, QuickJS on x86-64 and AArch64 desktops only). The workspace's own crates are
+# left out: an artifact carries `LICENSE-MIT` and `LICENSE-APACHE` for those.
+#
+# Two kinds of linked code are not listed, because neither asks for a notice in a binary:
+# the parts of LLVM's compiler-rt and libunwind that `compiler_builtins`, the zig linker and
+# the NDK add (Apache-2.0 WITH LLVM-exception, which waives sections 4(a), 4(b) and 4(d) for
+# compiled object code), and the `stat64`-family shims zig links for glibc 2.17 (LGPL-2.1+
+# with glibc's exception for linking the compiled file into other programs). The NDK's
+# `crtbegin_so.o`, which every Android library links, does ask for one; `cargo xtask` appends
+# it to the Android notices.
+#
+# Accepted in priority order, so a crate offering `MIT OR Apache-2.0` is listed under MIT
+# and `configparser` (`MIT OR LGPL-3.0-or-later`) under MIT rather than the LGPL.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+]
+# Build scripts and proc-macros run on the build machine and are not in the artifact.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }
+
+# `rquickjs-sys` compiles QuickJS's C sources into the artifact. Its manifest says `MIT`,
+# but it has no license file of its own: the notice is the one QuickJS ships, with its four
+# copyright holders, and the Unicode tables QuickJS generates carry the Unicode License.
+# `quickjs.c` includes `quickjs-c-atomics.h` wherever C11 atomics exist, and that header
+# carries its own MIT notice under a fifth holder.
+#
+# `cargo xtask` runs `cargo about` with `--fail`, so a clarification whose checksum no longer
+# matches, or whose file is gone, stops the rendering, and a changed text is read rather than
+# shipped unseen.
+[rquickjs-sys.clarify]
+license = "MIT AND Unicode-3.0"
+
+[[rquickjs-sys.clarify.files]]
+path = "quickjs/LICENSE"
+license = "MIT"
+checksum = "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
+
+[[rquickjs-sys.clarify.files]]
+path = "quickjs/quickjs-c-atomics.h"
+license = "MIT"
+start = "Copyright (c) 2023 Marcin Kolny"
+end = "THE SOFTWARE."
+checksum = "dc2cc0bcf15fef55075418c48bab40e681ae0cba3864026a0cf871dd089d3854"
+
+[[rquickjs-sys.clarify.files]]
+path = "quickjs/libunicode-table.h"
+license = "Unicode-3.0"
+start = "UNICODE LICENSE V3"
+end = "authorization of the copyright holder."
+checksum = "8fa201617d2c10c64205a88903dfac046417e6b95748e36b492026fbc38c5b94"
+
+# `rquickjs-core` ships no license file. Its `.cargo_vcs_info.json` names the commit
+# `rquickjs` of the same version was published from, and that crate's `LICENSE` is the
+# repository's, so the notice is read from the sibling directory in the registry.
+[rquickjs-core.clarify]
+license = "MIT"
+
+[[rquickjs-core.clarify.files]]
+path = "../rquickjs-0.14.0/LICENSE"
+checksum = "976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70"
+
+# The `windows` crates name their license files `license-mit` and `license-apache-2.0`,
+# which `cargo about`'s scan, matching `LICENSE*` and lower-case `license` or
+# `license.*`, does not find. `windows-implement` and `windows-interface` are
+# proc-macros, left out of the notice whatever their texts.
+[windows.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-collections.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-collections.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-collections.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-core.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-core.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-core.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-future.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-future.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-future.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-link.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-link.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-numerics.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-numerics.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-numerics.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-result.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-result.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-result.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-strings.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-strings.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-strings.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-threading.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-threading.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-threading.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+# `ndk-context` and `cesu8` offer MIT or Apache-2.0 and ship no license file. `ndk-context`
+# names no holder anywhere; `cesu8` names its holders only in the header of `src/lib.rs`. They
+# are taken under Apache-2.0, whose redistribution in object form asks for the license text
+# and a `NOTICE` file, which neither has. The anchor is the manifest's `license` line, so a
+# release that changes it fails the clarification; its `LicenseRef` keeps the line itself out
+# of the Apache-2.0 text.
+[ndk-context.clarify]
+license = "Apache-2.0"
+
+[[ndk-context.clarify.files]]
+path = "Cargo.toml"
+license = "LicenseRef-manifest"
+start = 'license = "MIT OR Apache-2.0"'
+end = 'license = "MIT OR Apache-2.0"'
+checksum = "f2bbaa42e781363795f43c9bd4a73d8c76d0f5ed2ed837ad32318d61c52fb637"
+
+[cesu8.clarify]
+license = "Apache-2.0"
+
+[[cesu8.clarify.files]]
+path = "Cargo.toml"
+license = "LicenseRef-manifest"
+start = 'license = "Apache-2.0/MIT"'
+end = 'license = "Apache-2.0/MIT"'
+checksum = "ce82c13a583d1fe30ff891e9aa8d45f11822690e922cfd88daa9ee99bb8f3d25"

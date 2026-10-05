@@ -1,5 +1,5 @@
 //! Gate: a comment that names an external project must land the reader on a
-//! specific document — a URL, an RFC or CVE number, a path with an extension, or a
+//! specific document: a URL, an RFC or CVE number, a path with an extension, or a
 //! backticked API name.
 //!
 //! This is a check on the repository, not on the library, so it lives in the `xtask`
@@ -18,10 +18,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// Browsers and reference implementations only. The vendors this crate is written against —
-// Microsoft, Apple, GLib — stay out until after the first release: the paragraphs that would
-// fail on them sit under the private `sys` module, which docs.rs does not render, so the scan
-// would guard landings no consumer can reach.
+// Browsers and reference implementations only. The vendors this crate is written
+// against (Microsoft, Apple, GLib) stay out until after the first release: the paragraphs
+// that would fail on them sit under the private `sys` module, which docs.rs does not
+// render, so the scan would guard landings no consumer can reach.
 //
 // An engine belongs here for the same reason its browser does: `src/pac/mod.rs` cites Gecko
 // where it means the Firefox behaviour. `Blink` and `Go` are the exception, because the match
@@ -57,7 +57,7 @@ fn examples_root() -> PathBuf {
 
 // Line comments only, and one test of them: `///` and `//!` already start with `//`, so
 // naming them separately reads as three checks while being one. Block comments are out of
-// reach by construction — this tree writes none, and a `/* Chromium … */` would go unread.
+// reach by construction; this tree writes none, and a `/* Chromium … */` would go unread.
 fn is_comment_line(line: &str) -> bool {
     line.trim_start().starts_with("//")
 }
@@ -91,19 +91,22 @@ fn has_landing(text: &str) -> bool {
     if has_rfc_number(text) {
         return true;
     }
-    // path with a recognisable extension
+    // Path with a recognisable extension. Every occurrence is tried, since the first one can
+    // be a bare `.h` with no name before it while a later one is a real path; and the
+    // extension must end the word, or `.c` lands on `net.cookies` and `.h` on `x.hosts`.
     for ext in [
         ".cc", ".cpp", ".c", ".h", ".hpp", ".rs", ".md", ".html", ".js", ".txt", ".toml",
     ] {
-        if let Some(idx) = text.find(ext) {
-            let before = &text[..idx];
-            if before
+        for (idx, _) in text.match_indices(ext) {
+            let named = text[..idx]
                 .chars()
-                .rev()
-                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
-                .count()
-                > 0
-            {
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'));
+            let ends = !text[idx + ext.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if named && ends {
                 return true;
             }
         }
@@ -114,7 +117,10 @@ fn has_landing(text: &str) -> bool {
         let after = &rest[start + 1..];
         if let Some(end) = after.find('`') {
             let inner = &after[..end];
-            if looks_like_symbol(inner) {
+            // The project's own name in backticks is CamelCase and would otherwise land the
+            // paragraph on the very name it was asked to cite.
+            let is_project = PROJECTS.iter().any(|p| inner.eq_ignore_ascii_case(p));
+            if looks_like_symbol(inner) && !is_project {
                 return true;
             }
             rest = &after[end + 1..];
@@ -129,14 +135,14 @@ fn has_landing(text: &str) -> bool {
 //
 // The number has to be the RFC's own, so only what immediately follows the token counts.
 // Accepting a digit anywhere later in the paragraph instead would let a sentence that says
-// `RFC` without a number land on any unrelated figure that happens to follow it — a year, a
-// section count, a port — and the paragraph would never be asked for a real citation.
+// `RFC` without a number land on any unrelated figure that happens to follow it (a year, a
+// section count, a port) and the paragraph would never be asked for a real citation.
 fn has_rfc_number(text: &str) -> bool {
     // Emphasis is removed rather than turned into a separator, which is the one difference
     // from the sibling gates' normalisation and the reason the one-separator rule below
     // survives it: `**RFC** 6455` becomes `RFC 6455`, not `  RFC   6455`, so a bolded
     // token is exactly as close to its number as an unbolded one. Skipping a single `*`
-    // instead would not have been enough — bold is two of them.
+    // instead would not have been enough; bold is two of them.
     let lower = text.to_ascii_lowercase().replace('*', "");
     let bytes = lower.as_bytes();
     let mut from = 0;
@@ -171,10 +177,10 @@ fn looks_like_symbol(s: &str) -> bool {
     }
     // A run with no letter in it is a value, not a name: `255.255.255.255`, `10.0.0.1` and
     // the abbreviated CIDR `169.254/16` all reach the `contains('.')` rule below and would
-    // land a paragraph on nothing. Comments about address handling are exactly where
-    // external projects get named, so without this the gate passes the paragraphs it exists
-    // to catch. Testing for the *absence* of a letter rather than listing the punctuation a
-    // value may contain is what makes `/` — and the next separator — land here too.
+    // land a paragraph on nothing. Comments about address handling are where external
+    // projects get named, so without this the gate passes the paragraphs it exists to
+    // catch. Testing for the *absence* of a letter rather than listing the punctuation a
+    // value may contain is what makes `/`, and the next separator, land here too.
     if !s.chars().any(|c| c.is_ascii_alphabetic()) {
         return false;
     }
@@ -182,8 +188,11 @@ fn looks_like_symbol(s: &str) -> bool {
         return true;
     }
     let chars: Vec<char> = s.chars().collect();
-    // CamelCase or kConstant
-    if chars.iter().any(|c| c.is_ascii_uppercase()) && chars.iter().any(|c| c.is_ascii_lowercase())
+    // CamelCase or kConstant: an uppercase letter past the first character. A capitalised
+    // plain word (`Windows`, `Direct`) names a platform or a value, not a symbol a reader
+    // can search the cited project for.
+    if chars.iter().skip(1).any(|c| c.is_ascii_uppercase())
+        && chars.iter().any(|c| c.is_ascii_lowercase())
     {
         return true;
     }
@@ -223,12 +232,11 @@ struct Hit {
     excerpt: String,
 }
 
-// Panics rather than returning no hits, because the floor below counts this file as
-// scanned whether or not it could be read: [`walk`] pushes the name after the call, not
-// inside it. Returning an empty `Vec` here therefore satisfies
-// [`the_walk_reaches_the_source_tree`] with a file the gate never looked at, which is
-// exactly the confusion that floor exists to prevent — and it makes "every `.rs` file
-// actually read", written above `walk`, false.
+// Panics rather than returning no hits, because the floor below counts this file as scanned
+// whether or not it could be read: [`walk`] pushes the name after the call, not inside it.
+// Returning an empty `Vec` here therefore satisfies [`the_walk_reaches_the_source_tree`]
+// with a file the gate never looked at, which is the confusion that floor exists to
+// prevent, and it makes "every `.rs` file read", written above `walk`, false.
 fn scan_file(path: &Path, rel: &str) -> Vec<Hit> {
     let text = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("reading {} for the citation walk: {e}", path.display()));
@@ -236,7 +244,9 @@ fn scan_file(path: &Path, rel: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if !is_comment_line(lines[i]) {
+        // A blank `//` line separates paragraphs and opens none, so the line a hit names is
+        // the paragraph's first line of text.
+        if !is_comment_line(lines[i]) || strip_comment(lines[i]).trim().is_empty() {
             i += 1;
             continue;
         }
@@ -272,9 +282,9 @@ fn scan_file(path: &Path, rel: &str) -> Vec<Hit> {
     hits
 }
 
-// `scanned` collects every `.rs` file actually read. Finding no hits is this gate's pass
-// state, so a walk that reaches nothing at all passes it too; the scan list is what tells
-// those apart, and `the_walk_reaches_the_source_tree` holds it to a floor.
+// `scanned` collects every `.rs` file read. Finding no hits is this gate's pass state, so a
+// walk that reaches nothing at all passes it too; the scan list is what tells those apart,
+// and `the_walk_reaches_the_source_tree` holds it to a floor.
 fn walk(dir: &Path, rel_prefix: &str, out: &mut Vec<Hit>, scanned: &mut Vec<String>) {
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading {} for the citation walk: {e}", dir.display()));
@@ -283,7 +293,7 @@ fn walk(dir: &Path, rel_prefix: &str, out: &mut Vec<Hit>, scanned: &mut Vec<Stri
     for path in paths {
         // `to_string_lossy`, not `to_str().unwrap_or("")`: a name that is not valid
         // Unicode must still be walked and counted, only spelled with U+FFFD in its
-        // place — dropping it outright would shrink the scanned population by exactly
+        // place; dropping it outright would shrink the scanned population by exactly
         // one file with nothing to show for it, the same silent loss
         // `the_walk_reaches_the_source_tree`'s floor exists to catch.
         let name = path
@@ -321,8 +331,8 @@ fn all_hits() -> (Vec<Hit>, Vec<String>) {
 // `CARGO_MANIFEST_DIR`: another move that left it pointing somewhere without the crate's
 // sources would disarm the gate in silence. The sibling gates keep the same kind of
 // control: `single_source.rs` and `claim_counts.rs` `expect` on their reads, and
-// `unverified_surface.rs` panics on both reads this walk does — the `read_dir` that lists
-// a file and the `read_to_string` that opens it. Hardening only the first leaves the
+// `unverified_surface.rs` panics on both reads this walk does (the `read_dir` that lists
+// a file and the `read_to_string` that opens it). Hardening only the first leaves the
 // population shrinkable one file at a time instead of one directory at a time.
 #[test]
 fn the_walk_reaches_the_source_tree() {
@@ -337,7 +347,7 @@ fn the_walk_reaches_the_source_tree() {
         scanned.len()
     );
     // The second root gets its own floor rather than riding on the count above, which
-    // `src/` alone already clears — without this, dropping the `examples/` walk would leave
+    // `src/` alone already clears; without this, dropping the `examples/` walk would leave
     // every assertion here still passing.
     assert!(
         scanned.contains(&"examples/watch.rs".to_owned()),
@@ -375,6 +385,20 @@ fn gate_catches_a_bare_chromium_mention() {
     assert!(has_landing(landed));
 }
 
+#[test]
+fn the_project_name_itself_is_not_a_landing_and_every_path_is_tried() {
+    assert!(!has_landing(
+        "`Chromium` treats a trailing dot as a period."
+    ));
+    assert!(!has_landing("`WebKit` does the same."));
+    // An extension that does not end the word names no file.
+    assert!(!has_landing("Chromium stores it in net.cookies instead."));
+    // A bare `.h` first does not hide the real path after it.
+    assert!(has_landing(
+        "Chromium splits .h from net/proxy_config.h here."
+    ));
+}
+
 // The two ways a paragraph would otherwise get past the gate without citing anything:
 // naming the project in a spelling the list does not hold letter for letter, and saying
 // `RFC` with the number belonging to some other figure in the sentence.
@@ -396,7 +420,7 @@ fn a_name_in_another_case_and_a_numberless_rfc_are_not_ways_out() {
     assert!(has_landing("Chromium follows rfc-6455 here."));
     // …and wrapped. [`scan_file`] joins a block's lines with `\n`, so without this a
     // paragraph wide enough to break between the token and its number is told it has no
-    // landing point — a failure earned by where the wrap fell rather than by what was said.
+    // landing point, a failure earned by where the wrap fell rather than by what was said.
     assert!(has_landing("Chromium follows RFC\n6455 here."));
     // The numberless cases stay refused across a break too: a wrap is not a number.
     assert!(!has_landing(
@@ -414,11 +438,13 @@ fn a_name_in_another_case_and_a_numberless_rfc_are_not_ways_out() {
     ));
 }
 
-// Every `docs/` path in `text` that names a file of the tree at `root`. Asking the filesystem
-// rather than matching a prefix keeps an external project's own `docs/` path — Chromium's
-// `docs/proxy.md`, curl's `docs/url-syntax.html` — a landing key while this tree's is not.
-// `root` is a parameter so the control can build its own tree, the way `doc_pages_under`'s is
-// in `single_source.rs`.
+// Every `docs/` path in `text` that points into the tree at `root`: its first component
+// under `docs/` names something this tree's `docs/` holds, file or directory. That keeps an
+// external project's own `docs/` path (Chromium's `docs/proxy.md`, curl's
+// `docs/url-syntax.html`) a landing key while this tree's is not, and it catches a pointer
+// to one of this tree's directories there, or to a file name under one that does not exist,
+// which send the reader somewhere they cannot go just the same. `root` is a parameter so
+// the control can build its own tree, the way `doc_pages_under`'s is in `single_source.rs`.
 fn in_tree_doc_paths(root: &Path, text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut rest = text;
@@ -428,7 +454,8 @@ fn in_tree_doc_paths(root: &Path, text: &str) -> Vec<String> {
             .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')))
             .unwrap_or(tail.len());
         let path = tail[..end].trim_end_matches('.');
-        if root.join(path).is_file() {
+        let first = path["docs/".len()..].split('/').next().unwrap_or("");
+        if !first.is_empty() && root.join("docs").join(first).exists() {
             found.push(path.to_owned());
         }
         rest = &tail[end..];
@@ -437,6 +464,11 @@ fn in_tree_doc_paths(root: &Path, text: &str) -> Vec<String> {
 }
 
 fn collect_rs(dir: &Path, rel_prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+    // An entry may name one file (`build.rs`) rather than a directory.
+    if dir.is_file() {
+        out.push((rel_prefix.to_owned(), dir.to_path_buf()));
+        return;
+    }
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading {} for the landing walk: {e}", dir.display()));
     let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
@@ -454,16 +486,25 @@ fn collect_rs(dir: &Path, rel_prefix: &str, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-// Neither published form carries `docs/`. A comment naming a file there sends the only reader
-// who has the comment somewhere they cannot go, and the decision the pointer stood in for
-// leaves with it; the repair is to say the decision in place, or to name the test that holds
-// it. The walk covers every directory that travels, `xtask/` included — a gate names `docs/`
-// in its code, which this scan does not read, but its comments reach the same reader.
+// Neither published form carries `docs/`. A comment naming a file there sends the only
+// reader who has the comment somewhere they cannot go, and the decision the pointer stood
+// in for leaves with it; the repair is to say the decision in place, or to name the test
+// that holds it. The walk covers every directory that travels, `xtask/` included; a gate
+// names `docs/` in its code, which this scan does not read, but its comments reach the same
+// reader.
 #[test]
 fn no_comment_names_a_document_the_published_tree_leaves_behind() {
     let root = repo_root();
     let mut files = Vec::new();
-    for dir in ["src", "examples", "tests", "xtask"] {
+    for dir in [
+        "src",
+        "examples",
+        "tests",
+        "tests-gnome",
+        "xtask",
+        "bindings",
+        "build.rs",
+    ] {
         collect_rs(&root.join(dir), dir, &mut files);
     }
     // The same floor `the_walk_reaches_the_source_tree` keeps, for the same reason: an empty
@@ -473,7 +514,10 @@ fn no_comment_names_a_document_the_published_tree_leaves_behind() {
         "src/lib.rs",
         "examples/watch.rs",
         "tests/bypass.rs",
+        "tests-gnome/tests/portal_watch.rs",
         "xtask/tests/citation_landing.rs",
+        "bindings/node/src/lib.rs",
+        "build.rs",
     ] {
         assert!(
             files.iter().any(|(rel, _)| rel == expected),
@@ -507,13 +551,19 @@ fn an_external_docs_path_is_still_a_landing() {
     let root = repo_root();
     assert!(in_tree_doc_paths(&root, "Chromium's `docs/proxy.md` describes the flow.").is_empty());
     assert!(in_tree_doc_paths(&root, "curl documents this in `docs/url-syntax.html`.").is_empty());
+    // This tree's own directory, and a file under it that does not exist, are both caught.
+    assert_eq!(
+        in_tree_doc_paths(&root, "see docs/knowledge/ and docs/issues/T999-typo.md"),
+        ["docs/knowledge/", "docs/issues/T999-typo.md"]
+    );
     assert!(has_landing(
         "Chromium's `docs/proxy.md` describes the flow."
     ));
 
-    // The finding arm, against a tree built for it. Naming a real page here would tie the
-    // control to one filename in the directory this whole gate treats as disposable, so a
-    // rename would report the gate broken and say nothing about the gate.
+    // The arm that finds an existing in-tree document path, against a tree built for it.
+    // Naming a real page here would tie the control to one filename in the directory this
+    // whole gate treats as disposable, so a rename would report the gate broken and say
+    // nothing about the gate.
     let fixture = std::env::temp_dir().join(format!("proxy-watch-landing-{}", std::process::id()));
     fs::create_dir_all(fixture.join("docs")).expect("the temporary tree is creatable");
     fs::write(fixture.join("docs").join("NOTE.md"), "x").expect("the note is writable");
@@ -548,7 +598,14 @@ fn a_backticked_address_is_not_a_landing() {
     let para = "`255.255.255.255` is `-1` in Firefox.";
     assert!(has_project_name(para).is_some());
     assert!(!has_landing(para));
-    // A name that merely contains digits and dots still lands.
+    // A name that contains digits and dots still lands.
     assert!(looks_like_symbol("net.IP.Equal"));
     assert!(looks_like_symbol("nsIURI::GetAsciiHost"));
+    // A capitalised plain word names a platform or a value, and lands nowhere; a class name
+    // with a hump past its first letter still lands.
+    assert!(!looks_like_symbol("Windows"));
+    assert!(!looks_like_symbol("Direct"));
+    assert!(!has_landing("Chromium returns `Direct` here."));
+    assert!(looks_like_symbol("ProxyChangeListener"));
+    assert!(looks_like_symbol("kCFProxyTypeNone"));
 }

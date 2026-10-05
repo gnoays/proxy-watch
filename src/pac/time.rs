@@ -29,7 +29,7 @@ pub(crate) fn civil_now(policy: &PacPolicy, gmt: bool) -> Civil {
     let secs = match base.duration_since(UNIX_EPOCH) {
         Ok(delta) => i64::try_from(delta.as_secs()).unwrap_or(i64::MAX),
         // Before 1970: `duration_since` reports the *magnitude* of the negative delta, so
-        // negating `as_secs()` truncates towards zero — away from the instant. The rest of
+        // negating `as_secs()` truncates towards zero, away from the instant. The rest of
         // this module floors (`civil_from_unix`), and mixing the two rounds
         // 1969-12-31T23:59:59.5Z up to 1970-01-01T00:00:00Z, which is a different day, a
         // different weekday and the far side of any `dateRange` drawn at the epoch. Carry
@@ -117,8 +117,8 @@ pub(crate) fn month_index(name: &str) -> Option<i64> {
         .map(|index| index as i64 + 1)
 }
 
-// Peel off a trailing `"GMT"` argument. The three time functions — `weekdayRange`,
-// `dateRange` and `timeRange` — each take it as an optional last parameter, so stripping
+// Peel off a trailing `"GMT"` argument. The three time functions (`weekdayRange`,
+// `dateRange` and `timeRange`) each take it as an optional last parameter, so stripping
 // it lives here rather than in each of them.
 pub(crate) fn split_gmt(args: &[String]) -> (&[String], bool) {
     match args.last() {
@@ -166,26 +166,27 @@ mod tests {
         assert_eq!(civil.weekday, 3);
     }
 
-    // `civil_from_days` is the one piece of arithmetic here that is copied rather than derived,
-    // and two of its terms are reached by no date above. This test is the only thing holding
-    // either of them.
+    // `civil_from_days` is the one piece of arithmetic here that is copied rather than
+    // derived, and two of its terms are reached by no date above. No other test checks
+    // either term.
     //
     // 2000-02-29 is the only day in four hundred years that reaches the last correction in
-    // `yoe`. `doe` runs 0..=146096 and `doe / 146_096` is 1 on that final day of an era alone —
-    // the century leap day the 400-year rule keeps. Without it that date answers 2000-03-01, one
-    // day late, and the row above cannot see it because it pins 2000-03-01 itself and an ordinary
-    // leap day, either side of the only day that moves. The weekday does not move with it, being
-    // counted from the day index rather than from the year, so `dateRange` and `weekdayRange`
-    // start disagreeing about which day it is instead of both being wrong.
+    // `yoe`. `doe` runs 0..=146096 and `doe / 146_096` is 1 on that final day of an era
+    // alone: the century leap day the 400-year rule keeps. Without it that date answers
+    // 2000-03-01, one day late, and the row above cannot see it because it pins 2000-03-01
+    // itself and an ordinary leap day, either side of the only day that moves. The weekday
+    // does not move with it, being counted from the day index rather than from the year, so
+    // `dateRange` and `weekdayRange` start disagreeing about which day it is instead of
+    // both being wrong.
     //
-    // The floor in `era` is the other. Before 0000-03-01 the shift by 146_096 is what keeps that
-    // division flooring, and without it this instant answers year 1, month 2, day **-29** — a
-    // `Civil` with a negative day, which `date_range` then compares numerically. That end is
-    // reachable rather than theoretical: `SystemTime` is not clamped at its platform epoch, and
-    // `UNIX_EPOCH.checked_sub` of sixty-two billion seconds answers `Some` even on Windows, whose
-    // `FILETIME` counts from 1601 — measured, and `with_now` carries the result into `civil_now`
-    // unchanged. The module doc calls the algorithm exact for the whole range this crate can
-    // produce; this is where that range ends.
+    // The floor in `era` is the other. Before 0000-03-01 the shift by 146_096 is what keeps
+    // that division flooring, and without it this instant answers year 1, month 2, day
+    // **-29**, a `Civil` with a negative day, which `date_range` then compares numerically.
+    // That end is reachable rather than theoretical: `SystemTime` is not clamped at its
+    // platform epoch, and `UNIX_EPOCH.checked_sub` of sixty-two billion seconds answers
+    // `Some` even on Windows, whose `FILETIME` counts from 1601 (measured), and `with_now`
+    // carries the result into `civil_now` unchanged. The module doc calls the algorithm
+    // exact for the whole range this crate can produce; this is where that range ends.
     #[test]
     fn the_two_era_corrections_are_each_reached_by_one_date() {
         let civil = civil_from_unix(951_782_400);
@@ -196,7 +197,7 @@ mod tests {
     }
 
     // `civil_from_unix` is what `instants_before_the_epoch_floor_correctly` below pins, and
-    // it floors. This one pins the step *before* it — the `SystemTime` → seconds conversion
+    // it floors. This one pins the step *before* it: the `SystemTime` → seconds conversion
     // in `civil_now`, the only place where the sign is recovered from a magnitude and so
     // the only place the two roundings can disagree. `with_now` is public and documented
     // for "reproducing a routing decision after the fact", which is how a caller reaches a
@@ -227,12 +228,12 @@ mod tests {
 
         // 1969-01-01T00:00:00Z, also a Wednesday, and the row the weekday rounding needs:
         // the day index is `-1` above, where `%` and `rem_euclid` still agree, and every
-        // other pre-epoch instant in this file is inside those four days. This row is the
-        // only thing that would notice the weekday read with `%`, which answers `-4` here —
-        // an index no name in `weekday_index`'s table has, so `weekdayRange("WED")` stops
-        // matching on a Wednesday rather than failing. `PacPolicy::with_now` is public and
-        // documented for replaying a decision after the fact, which is how a script reaches
-        // an instant this old at all.
+        // other pre-epoch instant in this file is inside those four days. No other row
+        // detects the weekday read with `%`, which answers `-4` here, an index no name in
+        // `weekday_index`'s table has, so `weekdayRange("WED")` stops matching on a
+        // Wednesday rather than failing. `PacPolicy::with_now` is public and documented for
+        // replaying a decision after the fact, which is how a script reaches an instant
+        // this old at all.
         let civil = civil_from_unix(-31_536_000);
         assert_eq!((civil.year, civil.month, civil.day), (1969, 1, 1));
         assert_eq!(civil.weekday, 3);
@@ -249,11 +250,11 @@ mod tests {
     }
 
     // Every name, not two of each: `position` hands each entry its index, so one typo
-    // makes that name permanently unmatchable and a transposition shifts two — and either
+    // makes that name permanently unmatchable and a transposition shifts two, and either
     // way the PAC function just answers "no", with nothing for the caller to see. Sampling
     // the first and last entry cannot reach that; the interior is where it hides. The
     // lists here are a second, independently written copy on purpose: editing one table
-    // without the other is exactly what has to go red.
+    // without the other is what has to go red.
     #[test]
     fn name_tables() {
         for (index, name) in ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
@@ -279,7 +280,7 @@ mod tests {
     // `hostfn`'s module doc files the whole vocabulary of these functions under **(d)**:
     // trimmed and case-folded here, exact in the reference. The row above reaches the case
     // half for the names and nothing reaches the padding, and the `"GMT"` argument had
-    // neither — yet it is the one whose loss moves an answer rather than merely refusing it.
+    // neither, yet it is the one whose loss moves an answer rather than merely refusing it.
     // Read strictly, a script that wrote it in lower case still gets a trailing argument,
     // just not this one: `weekdayRange("MON", "gmt")` becomes a range whose far end is not a
     // day at all, and `timeRange` reads the local clock the caller asked to step out of.
@@ -300,7 +301,7 @@ mod tests {
         assert_eq!(month_index("\ndec "), Some(12));
     }
 
-    // JavaScript spells its non-finite numbers `NaN` and `Infinity`, `boa` hands host
+    // JavaScript spells its non-finite numbers `NaN` and `Infinity`, the engine hands host
     // functions the spelling rather than the value, and `f64::from_str` reads both back.
     // Neither is a bound a script can have meant: `as i64` saturates the one to the largest
     // there is and truncates the other to zero, so `dateRange(1/0)` would cover every day

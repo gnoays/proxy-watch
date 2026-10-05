@@ -1,22 +1,22 @@
 //! GNOME watch backend integration tests.
 //!
-//! Unlike the `kioslaverc` tests, these need a **session bus** — dconf writes go over
-//! D-Bus to `ca.desrt.dconf` — and the `org.gnome.system.proxy` schema. Neither is
+//! Unlike the `kioslaverc` tests, these need a **session bus** (dconf writes go over
+//! D-Bus to `ca.desrt.dconf`) and the `org.gnome.system.proxy` schema. Neither is
 //! present on a bare CI container, so every test starts with [`gnome_available`], which
 //! self-skips through `support::skip_or_fail` rather than failing when the environment
 //! is not there.
 //!
-//! These tests are expected to run in CI (the CI workflow provisions a session bus and
-//! the GNOME schemas for the ubuntu job specifically so they can), so
-//! `support::skip_or_fail` is exactly right here: a skip on a developer's machine that
-//! never set up dconf is fine, but the same skip under `CI=1` means the fixture the CI
-//! job was supposed to provide is missing, and that must turn the job red rather than
-//! report `7 passed` for zero seconds of real work — which is precisely the failure this
-//! function exists to catch (see its doc in `tests/support/mod.rs`, and the empirical
-//! finding that motivated it: this file reporting `7 passed` in 0.06s on a CI runner
-//! where every test had silently skipped for want of a session bus).
+//! These tests are expected to run in CI (the CI workflow provisions a session bus and the
+//! GNOME schemas for the ubuntu job specifically so they can), so `support::skip_or_fail`
+//! is right here: a skip on a developer's machine that never set up dconf is fine, but the
+//! same skip under `CI=1` means the fixture the CI job was supposed to provide is missing,
+//! and that must turn the job red rather than report `7 passed` for zero seconds of real
+//! work, which is the failure this function exists to catch (see its doc in
+//! `tests/support/mod.rs`, and the empirical finding that motivated it: this file reporting
+//! `7 passed` in 0.06s on a CI runner where every test had silently skipped for want of a
+//! session bus).
 //!
-//! To actually exercise them:
+//! To exercise them:
 //!
 //! ```text
 //! dbus-run-session -- cargo test --test gsettings_watch -- --test-threads=1 --nocapture
@@ -27,8 +27,8 @@
 //! other's writes. The flag stays in the line above because `--nocapture` is worth having
 //! and one thread is what makes the printed latency readable.
 //!
-//! The fixture writes through the real `gsettings` command line tool — the same path a
-//! user or an administration script takes — into a **private** `XDG_CONFIG_HOME`, so the
+//! The fixture writes through the real `gsettings` command line tool, the same path a
+//! user or an administration script takes, into a **private** `XDG_CONFIG_HOME`, so the
 //! developer's own dconf database is never touched.
 #![cfg(all(target_os = "linux", feature = "linux-gnome"))]
 
@@ -74,7 +74,7 @@ fn a_gsettings_change_is_emitted_exactly_once() {
     // Start from a store the user has already used, i.e. one that is *configured* to go
     // direct. Without this the first `gsettings set` below would flip GSettings from
     // "unconfigured" to "configured, and direct", which changes `sources` and is
-    // therefore a snapshot of its own — a second logical change, not the one
+    // therefore a snapshot of its own, a second logical change, not the one
     // under test.
     fixture.set(SCHEMA, "mode", "none");
 
@@ -116,7 +116,7 @@ fn a_gsettings_change_is_emitted_exactly_once() {
     );
 }
 
-/// A change to a **child** schema alone must be noticed — for every child.
+/// A change to a **child** schema alone must be noticed, for every child.
 ///
 /// This is the regression test for the trap the schema layout sets: the four children of
 /// `org.gnome.system.proxy` live at their own dconf paths, so subscribing to the root
@@ -239,10 +239,9 @@ fn rewriting_an_identical_value_does_not_emit() {
 /// found that is not `Direct`.
 ///
 /// A GNOME session in which the user has deliberately switched the proxy **off**, on a
-/// machine that still carries a `kioslaverc` from a KDE they no longer run. The old rule
-/// — "the first source that is not `Direct`" — reported the stale KDE proxy and sent the
-/// traffic through it. The store the running desktop actually uses must win, `Direct` and
-/// all.
+/// machine that still carries a `kioslaverc` from a KDE they no longer run. The old rule,
+/// "the first source that is not `Direct`", reported the stale KDE proxy and sent the
+/// traffic through it. The store the running desktop uses must win, `Direct` and all.
 #[test]
 #[cfg(feature = "linux-kde")]
 fn an_explicit_gnome_none_is_not_overruled_by_a_stale_kioslaverc() {
@@ -250,8 +249,8 @@ fn an_explicit_gnome_none_is_not_overruled_by_a_stale_kioslaverc() {
         return;
     };
     fixture.reset();
-    // `gsettings set` writes a *user value*, which is exactly what distinguishes "the
-    // user chose Off" from "this machine only ever had the schema default".
+    // `gsettings set` writes a *user value*, which is what distinguishes "the user chose
+    // Off" from "this machine only ever had the schema default".
     fixture.set(SCHEMA, "mode", "none");
     let _stale = StaleKioslaverc::write(&fixture.directory);
 
@@ -342,7 +341,7 @@ fn dropping_watchers_stops_the_glib_thread() {
 
 /// Serialises every test in this file. They all write the *same* keys of the *same*
 /// `org.gnome.system.proxy` tree in the *same* private dconf database, and cargo
-/// serialises test *binaries*, not the tests inside one — so without this lock they run
+/// serialises test *binaries*, not the tests inside one, so without this lock they run
 /// concurrently and read each other's writes. What that costs is not a legible harness
 /// message: the failures accuse the watcher instead, with `a single logical change emitted
 /// more than one snapshot`, or a `WpadAutoDetect` assertion reading back another test's
@@ -368,11 +367,11 @@ impl Fixture {
         );
     }
 
-    /// [`Fixture::set`], reporting failure instead of panicking, and **verifying that
-    /// the write actually landed**.
+    /// [`Fixture::set`], reporting failure instead of panicking, and **verifying that the
+    /// write landed**.
     ///
-    /// `gsettings set` exits 0 even when dconf could not commit — it only prints
-    /// `dconf-WARNING: failed to commit changes to dconf` on stderr — so the exit status
+    /// `gsettings set` exits 0 even when dconf could not commit (it only prints
+    /// `dconf-WARNING: failed to commit changes to dconf` on stderr), so the exit status
     /// alone is not evidence of anything. Reading the value back is.
     fn try_set(&self, schema: &str, key: &str, value: &str) -> bool {
         let set = Command::new("gsettings")
@@ -418,7 +417,7 @@ impl Fixture {
 }
 
 /// A `kioslaverc` left behind by a KDE this machine no longer runs, removed again when
-/// the test that wrote it ends — the other tests in this file rely on the fixture's
+/// the test that wrote it ends; the other tests in this file rely on the fixture's
 /// `XDG_CONFIG_HOME` holding no KDE store at all.
 #[cfg(feature = "linux-kde")]
 struct StaleKioslaverc {
@@ -465,7 +464,7 @@ fn fixture() -> Option<Fixture> {
         // SAFETY: `set_var` is unsound only when another thread is concurrently touching
         // the environment. This runs inside `Once::call_once` at the start of the first
         // test, with [`DCONF_LOCK`] held so no other test is running at all, and before any
-        // `ProxyWatcher` — and hence any backend thread that reads these variables — has
+        // `ProxyWatcher`, and hence any backend thread that reads these variables, has
         // been created.
         unsafe {
             // A private dconf database: `$XDG_CONFIG_HOME/dconf/user`.
@@ -487,7 +486,7 @@ fn fixture() -> Option<Fixture> {
 /// Tell the session bus about the private `XDG_CONFIG_HOME` before anything activates
 /// `ca.desrt.dconf`.
 ///
-/// Writes do not go to the dconf database directly — they go over D-Bus to the
+/// Writes do not go to the dconf database directly; they go over D-Bus to the
 /// `ca.desrt.dconf` service, which the bus **activates with the environment the bus
 /// itself was started with**, not with the caller's. Setting `XDG_CONFIG_HOME` inside
 /// this process therefore splits the two halves apart: the test would read the private
@@ -495,8 +494,8 @@ fn fixture() -> Option<Fixture> {
 /// like it had silently vanished. `UpdateActivationEnvironment` is the documented way to
 /// fix that, and it has to happen before the first write activates the service.
 ///
-/// Failure is not fatal: the write probe in [`gnome_available`] is what actually decides
-/// whether these tests can run.
+/// Failure is not fatal: the write probe in [`gnome_available`] is what decides whether
+/// these tests can run.
 fn publish_config_home_to_the_bus(directory: &std::path::Path) {
     let argument = format!("{{'XDG_CONFIG_HOME': '{}'}}", directory.display());
     let _ = Command::new("gdbus")
@@ -514,10 +513,10 @@ fn publish_config_home_to_the_bus(directory: &std::path::Path) {
         .output();
 }
 
-/// Whether the schema is installed **and** dconf can actually be written to.
+/// Whether the schema is installed **and** dconf can be written to.
 ///
 /// The write probe is the part that matters. `DBUS_SESSION_BUS_ADDRESS` being set proves
-/// nothing — WSL, for one, exports an address whose socket does not exist — and neither
+/// nothing (WSL, for one, exports an address whose socket does not exist) and neither
 /// `gsettings set` nor `g_settings_set_*` fails when the commit does not reach dconf.
 /// Without a real bus these tests would then be testing that unwritable settings never
 /// change, which is worse than not running them.

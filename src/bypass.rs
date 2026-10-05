@@ -2,17 +2,17 @@
 //!
 //! What an entry may look like comes from Go
 //! [`httpproxy`](https://github.com/golang/net/blob/master/http/httpproxy/proxy.go); what one
-//! *matches* follows Chromium wherever the readers disagree, which is what makes an embedded
-//! `*` a glob here. So the `Suffix` dialect is their union rather than a port of either —
+//! *matches* follows Chromium wherever the readers disagree, so an embedded `*` is a glob
+//! here. The `Suffix` dialect is therefore their union rather than a port of either:
 //! [`BypassDialect`] carries the measurement. Windows `<local>` / `<-loopback>` on top.
 //!
 //! One rule is not shared: a bare name covers the subdomains everywhere except in a
-//! Windows list, where it matches that name alone. See
+//! Windows or macOS list, where it matches that name alone. See
 //! [`parse::proxy_override`](crate::parse::proxy_override).
 
 use std::collections::HashSet;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net};
 use url::{Host, Url};
@@ -33,9 +33,9 @@ use crate::util::{glob_match, redact_offending_token, split_host_port, strip_bra
 /// | `<local>` | [`HostPattern::Local`] |
 /// | `<-loopback>` | [`HostPattern::SubtractImplicit`] |
 ///
-/// The bare-name row is the one that depends on where the list came from: a Windows
-/// list reads `example.com` as [`HostPattern::Exact`], because that is what Windows
-/// matches. [`parse::proxy_override`](crate::parse::proxy_override) has the readings.
+/// The bare-name row is the one that depends on where the list came from: a Windows or
+/// macOS list reads `example.com` as [`HostPattern::Exact`], because that is what both
+/// match. [`parse::proxy_override`](crate::parse::proxy_override) has the readings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum HostPattern {
@@ -47,14 +47,13 @@ pub enum HostPattern {
     ///
     /// [`parse`](Self::parse) reaches it only for an address literal, but
     /// [`parse::proxy_override`](crate::parse::proxy_override) reaches it for every bare
-    /// name: a bare entry in a Windows list matches that name and nothing under it.
+    /// name: a bare entry in a Windows or macOS list matches that name and nothing under it.
     ///
-    /// Its [`Display`](std::fmt::Display) is the name alone, which is also how a suffix
-    /// rule for the same domain is written. Reading that text back therefore gives this
-    /// variant through `proxy_override` and a [`Domain`](Self::Domain) covering the
-    /// subdomains through [`parse::no_proxy`](crate::parse::no_proxy) — the same text,
-    /// two rules — so a pattern displayed and re-read through the *other* dialect widens.
-    /// Hold the value instead of its text if that matters.
+    /// Its [`Display`](std::fmt::Display) is the name alone, also used for a suffix rule
+    /// for the same domain. Parsing that text with `proxy_override` returns this variant,
+    /// while [`parse::no_proxy`](crate::parse::no_proxy) returns a [`Domain`](Self::Domain)
+    /// that also covers subdomains. Retaining the value avoids widening the rule by
+    /// displaying it and re-parsing it with the other dialect.
     Exact {
         /// Host to match.
         host: Host,
@@ -83,9 +82,9 @@ pub enum HostPattern {
     /// Matched as text against the destination's canonical spelling, so a glob written
     /// around a non-canonical address (`*192.168.001.001`, which arrives as `192.168.1.1`)
     /// matches nothing. Unlike the other variants, such a glob is not refused during
-    /// parsing and so does not reach [`BypassRules::rejected`]: `*` stands for the empty
-    /// string as well as for text, which leaves `*10.0.0.1` live and every test that
-    /// separates the two cases open to a counterexample.
+    /// parsing and does not reach [`BypassRules::rejected`]: `*` can match an empty string,
+    /// so `*10.0.0.1` remains valid, and tests that distinguish these cases admit
+    /// counterexamples.
     Wildcard {
         /// Glob pattern. [`parse`](Self::parse) lowercases it, and a hand-built one that
         /// is not lowercased matches the same hosts anyway: case is folded at match time.
@@ -93,11 +92,13 @@ pub enum HostPattern {
         /// Optional port restriction.
         port: Option<u16>,
     },
-    /// Windows `<local>` / macOS `ExcludeSimpleHostnames`: any host name without a dot.
+    /// Windows `<local>`: any host name without a dot, and no IP literal. The macOS
+    /// switch is [`BypassRules::exclude_simple_hostnames`], which also takes a dot-less
+    /// IPv6 literal.
     Local,
     /// Windows `<-loopback>`: the one entry that takes a bypass away instead of adding
-    /// one. It subtracts the implicit set — loopback *and* link-local, see
-    /// [`NO_LOOPBACK_TOKEN`] — from every entry written before it, and from none written
+    /// one. It subtracts the implicit set (loopback *and* link-local, see
+    /// [`NO_LOOPBACK_TOKEN`]) from every entry written before it, and from none written
     /// after it, which is why it is an entry in [`BypassRules::patterns`] and not a
     /// switch beside them. [`BypassRules::matches`] has the evaluation order.
     SubtractImplicit,
@@ -105,24 +106,24 @@ pub enum HostPattern {
 
 // Which list an entry came from, for the places the lists disagree about what an entry
 // means. Named after the source rather than after a behaviour, because no two of them
-// differ from `Suffix` on the same set of axes: `Windows` on three, `MacOs` and `Gnome` on
-// four each and not the same four — and `MacOs` shares one of the three `Windows` axes
-// while disagreeing with it everywhere else.
+// differ from `Suffix` on the same set of axes: `Windows` on four, `MacOs` on five, `Gnome`
+// on four and `Kde` on two, no two the same set, and `MacOs` shares two of the `Windows`
+// axes while disagreeing with it everywhere else.
 //
 // `Suffix` reads a bare name as the name and everything under it, and a leading `*.` or `.`
 // as the subdomains alone. That much is Go's `httpproxy` with `no_proxy` and libproxy's with
-// KDE's `NoProxyFor` (`px-manager.c:736,752`, reached from `config-kde.c`), and it is why a
+// KDE's `NoProxyFor` (`ignore_domain` in `px-manager.c`, reached from `config-kde.c`), and it is why a
 // bare name here is not the name alone the way it is under `Windows` and `MacOs`.
 //
 // A `*` anywhere else is a glob, and that half is *not* those two. `config.init` in
 // `http/httpproxy/proxy.go` special-cases a bare `*` and strips one character off a leading
 // `*.`; what is left goes to a `domainMatcher` that compares with `strings.HasSuffix`, so no
 // star past the first is syntax. libproxy's `ignore_domain` (`px-manager.c`) reads four
-// shapes and no more — the bare `*`, an exact name, and the two suffix spellings `.name`
+// shapes and no more: the bare `*`, an exact name, and the two suffix spellings `.name`
 // and `*.name`. Under both, `192.168.*` and `*.*.*.1` are literal text no host carries,
-// so they match nothing. Neither refuses a CIDR entry, though — it leaves the name rules
+// so they match nothing. Neither refuses a CIDR entry, though, it leaves the name rules
 // before it reaches them. `config.init` tries `net.ParseCIDR` first, and libproxy tries
-// `ignore_ip` after `ignore_domain` (`px-manager.c:848`), which masks an entry holding a
+// `ignore_ip` after `ignore_domain` (`px_manager_is_ignore`), which masks an entry holding a
 // `/` with `g_inet_address_mask_new_from_string` against an address literal only.
 //
 // The star is read as a glob because the third reader of these same two lists reads it that
@@ -130,50 +131,54 @@ pub enum HostPattern {
 // `ProxyHostMatchingRules::ParseFromString` (`proxy_config_service_linux.cc:230`), which builds a
 // `SchemeHostPortMatcherHostnamePatternRule` for everything that is not a CIDR or an address
 // literal and evaluates it with `base::MatchPattern`
-// (`scheme_host_port_matcher_rule.cc:99,139`) — a glob, and the source of the leading-dot
+// (`scheme_host_port_matcher_rule.cc:99,139`), a glob, and the source of the leading-dot
 // rewrite the `Wildcard` arm in `parse_in` already quotes.
 //
 // So this dialect is the union of the two readings rather than either one, and the union is
-// the wider answer — the one that reaches `Direct` more often. `*.*.*.1` is met by
+// the wider answer, the one that reaches `Direct` more often. `*.*.*.1` is met by
 // `10.0.0.1` here and by `base::MatchPattern`; the two suffix readers send that request to
 // the proxy. The union is kept because narrowing it would leave a rule someone typed a `*`
 // into matching nothing while still reading back as live, which is the shape `Gnome` below
 // refuses outright rather than store.
 //
-// `Windows` differs in three places. A bare name is the name alone, measured on this
+// `Windows` differs in four places. A bare name is the name alone, measured on this
 // crate's own terms rather than read off a reimplementation, because the two
 // reimplementations disagree and neither is the OS; the readings are the rows of
-// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`. And the two
-// spellings a Windows list has no reading for — an entry holding a `/`, and an entry
-// starting with `.` — are refused rather than stored as rules the machine does not honour.
-// Each has a guard in `parse_in` carrying its readings and the vendor sentence.
+// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`. And the three
+// spellings a Windows list has no reading this crate can follow (an entry holding a `/`,
+// an entry starting with `.`, and an IPv4 address written other than as four decimal
+// octets) are refused rather than stored as rules the machine does not honour. Each has
+// a guard in `parse_in` carrying its readings.
 //
-// `MacOs` is CFNetwork's `ExceptionsList`, measured the same way and by the same argument —
+// `MacOs` is CFNetwork's `ExceptionsList`, measured the same way and by the same argument:
 // `tests/mac_exceptions_list.rs` hands `CFNetworkCopyProxiesForURL` a settings dictionary
 // and reads the verdict off the matcher itself, so Chromium's macOS reader is not consulted:
 // it is a reimplementation and not the OS. It agrees with `Windows` that a bare name is the
-// name alone, and differs from every other dialect here on three more:
+// name alone, and that an IPv4 address written other than as four decimal octets is
+// compared as text (`012.1.2.3` met only a destination written `012.1.2.3`, the same
+// diagonal WinINet gives), so it is refused by the same guard. It differs from every other
+// dialect here on three more:
 //
 //   * a `*` is syntax only as a leading `*.` or a trailing `.*`, and a character everywhere
-//     else — so `*probe*`, `*invalid`, `pw-*.invalid` and a bare `*` match nothing. The
-//     bare `*` is the one that matters: read as `HostPattern::All` it turns the proxy off
-//     for every destination on a Mac that proxies all of them.
+//     else, so `*probe*`, `*invalid`, `pw-*.invalid` and a bare `*` match nothing. Reading
+//     the bare `*` as `HostPattern::All` turns the proxy off for every destination on a Mac
+//     that proxies all of them.
 //   * a `:port` does not constrain an entry, it kills it. `example.com:80` matched no
 //     destination on port 80, and `example.com` matched one that carried a port, so the
 //     port is not part of the comparison at all.
 //   * neither end is trimmed, which is `trim` below rather than an arm here: a space in
 //     front of a name or behind it kills the entry the same way a `*` in the middle does.
 //
-// Two things it does *not* differ on are left alone deliberately. `<local>` and
+// Two things it does *not* differ on are left alone. `<local>` and
 // `<-loopback>` bypass nothing there, but they are recognised here anyway, for the reason
 // `sys/linux/gsettings_map.rs` gives for GLib: the tokens are read before the dialect so
 // every source shares one vocabulary, and no macOS writer types a WinINet token. And
-// `name.*` covers the host plus anything whose leading labels are the host — the mirror of
-// `*.name`, not a suffix rule — which the glob this arm already builds gets right except
+// `name.*` covers the host plus anything whose leading labels are the host (the mirror of
+// `*.name`, not a suffix rule), which the glob this arm already builds gets right except
 // when the star stands for no labels at all (`example.com.*` against `example.com`). That
 // one row is fail-*closed*, so it is recorded rather than answered with a new variant.
 //
-// `Gnome` is GLib's `GSimpleProxyResolver`, which is the code that resolves on GNOME —
+// `Gnome` is GLib's `GSimpleProxyResolver`, which is the code that resolves on GNOME:
 // `gsettings_map.rs` reads the same keys GLib's `GProxyResolverGnome` does. It agrees on
 // the bare name, and on CIDR: `reparse_ignore_hosts` tries
 // `g_inet_address_mask_new_from_string` on the whole entry before it strips anything
@@ -181,21 +186,21 @@ pub enum HostPattern {
 // four more axes, all from the same file:
 //
 //   * `reparse_ignore_hosts` strips a leading `*.` or `.` and stores the rest as a plain
-//     name, which `ignore_host` then matches with `offset == 0` allowed — so `*.example.com`,
-//     `.example.com` and `example.com` are one rule there, covering the domain *and* its
-//     subdomains.
+//     name, which `ignore_host` then matches with `offset == 0` allowed, so
+//     `*.example.com`, `.example.com` and `example.com` are one rule there, covering the
+//     domain *and* its subdomains.
 //   * no other `*` is syntax: what is left is `g_ascii_strcasecmp`d whole, and no
 //     host contains a `*`, so `foo*.example.com` matches nothing at all. A bare `*` is that
-//     rule's worst case and reads the same way — `reparse_ignore_hosts` strips neither a
+//     rule's worst case and reads the same way: `reparse_ignore_hosts` strips neither a
 //     `*.` nor a leading `.` from it, so it is stored whole and `ignore_host` then wants a
 //     destination whose last character is a `*` behind a dot. None arrives. It shares this
 //     with `MacOs`, and shares the reason with nothing else here: on Windows and in
-//     `no_proxy` a bare `*` really does switch the proxy off.
+//     `no_proxy` a bare `*` does switch the proxy off.
 //   * that same parse chomps with `g_strchomp`, trailing whitespace only, so a leading
 //     space survives into the name and kills the rule the same way.
 //   * `g_simple_proxy_resolver_lookup` resolves the destination with `G_URI_FLAGS_NONE`, and
 //     `g_uri_split_internal` fills a scheme's default port only in its scheme-based
-//     normalization, under `G_URI_FLAGS_SCHEME_NORMALIZE` — so a portless
+//     normalization, under `G_URI_FLAGS_SCHEME_NORMALIZE`, so a portless
 //     `http://example.com/` is asked about with port 0, and an `example.com:80` rule does
 //     not fire on it. That last one is not a pattern shape and lives in
 //     [`BypassRules::require_explicit_port`].
@@ -205,38 +210,43 @@ pub(crate) enum BypassDialect {
     Windows,
     MacOs,
     Gnome,
+    // KDE's `NoProxyFor`: `Suffix` in every shape but two. KIO's `revmatch` compares the
+    // text from its end, so an entry's trailing dot is part of the name, where the
+    // environment variable's readers shed it as the DNS root. And an IPv4 address written
+    // other than as four decimal octets is refused, as under `Windows`, because KIO reads
+    // each part as decimal where the URL grammar reads `012` as octal.
+    #[cfg_attr(not(all(target_os = "linux", feature = "linux-kde")), allow(dead_code))]
+    Kde,
 }
 
 impl BypassDialect {
-    // Cut the whitespace the source itself would cut, and no more. `g_strchomp` is the
-    // trailing end only, so a GNOME entry written with a leading space keeps it; CFNetwork
-    // cuts neither end, so a macOS entry keeps both. In each case the space that survives
-    // is part of a name no destination can carry: it meets the whitespace guard in
-    // `HostPattern::parse_in` and the entry is refused, which is the verdict the source
-    // itself reaches (the rule matches nothing) with the entry visible in
-    // `BypassRules::rejected` rather than sitting in the list looking live.
+    // Match each source's trimming: GLib's `g_strchomp` cuts trailing whitespace, while
+    // CFNetwork cuts neither end. Surviving whitespace makes the entry unmatchable, so
+    // `HostPattern::parse_in` records it in `BypassRules::rejected`.
     //
-    // The macOS row is measured, not inherited: ` pw-probe.invalid` and `pw-probe.invalid `
-    // both proxied a destination the unpadded entry bypasses
-    // (`tests/mac_exceptions_list.rs` holds that on a macOS runner). Trimming either would
-    // make it a live rule here, and the crate would answer `ProxyStep::Direct` for traffic
-    // the Mac hands the proxy.
-    //
-    // Called from both ends because both need it and for different reasons — `parse_in` so
-    // the pattern it builds is the trimmed one, `parse::bypass_entries_in` so an entry it
-    // hands to `rejected` is quoted back without the separator's padding.
+    // Trimming a macOS entry would make a dead rule live and bypass traffic CFNetwork
+    // proxies. `parse_in` uses the trimmed pattern; `parse::bypass_entries_in` quotes
+    // rejected entries without separator padding.
     pub(crate) fn trim(self, entry: &str) -> &str {
         match self {
-            BypassDialect::Gnome => entry.trim_end(),
+            // `g_strchomp` cuts ASCII space, tab, LF, FF and CR, but leaves vertical tab
+            // and non-ASCII whitespace; a trailing U+00A0 therefore kills the rule.
+            BypassDialect::Gnome => entry.trim_end_matches(|c: char| c.is_ascii_whitespace()),
             BypassDialect::MacOs => entry,
-            BypassDialect::Suffix | BypassDialect::Windows => entry.trim(),
+            // ASCII only. An edge U+00A0 or U+3000 stays in the name, as it does when WinINet
+            // reads `ProxyOverride` and in WinHTTP and Chromium (`TrimWhitespaceASCII`), so
+            // the rule matches nothing and the entry goes to `rejected`.
+            BypassDialect::Windows => {
+                entry.trim_matches(|c| matches!(c, '\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' '))
+            }
+            BypassDialect::Suffix | BypassDialect::Kde => entry.trim(),
         }
     }
 }
 
 impl HostPattern {
     /// Parse one bypass entry. `Ok(None)` for empty and for anything with no host left to
-    /// match on — `:8080`, `.`, `..`, `*.`.
+    /// match on: `:8080`, `.`, `..`, `*.`.
     ///
     /// ```
     /// # use proxy_watch::HostPattern;
@@ -249,12 +259,12 @@ impl HostPattern {
     /// (`192.168.0.1`), because that is how the [`Host`] the destination carries would parse
     /// the same text.
     ///
-    /// A CIDR entry does not follow that grammar, because it is not a host: `ipnet` reads
-    /// four decimal octets, so `010.0.0.0/8` is `10.0.0.0/8` — the block the writer meant,
-    /// but not the block the same text would denote as a destination — and `192.168.1/24`
-    /// and `0x0a.0.0.0/8` are errors rather than addresses. What is shared is the mapped
-    /// reduction: `::ffff:10.0.0.0/104` is stored as `10.0.0.0/8`, matching what
-    /// destinations `10.0.0.1` and `[::ffff:10.0.0.1]` both become.
+    /// A CIDR entry's IPv4 address follows the same grammar when it has four parts, as
+    /// Chromium's does: `010.0.0.0/8` is `8.0.0.0/8` and `0x0a.0.0.0/8` is `10.0.0.0/8`.
+    /// curl and Go read neither as a block. A short form (`192.168.1/24`) is an error
+    /// rather than an address. A mapped-spelling block
+    /// (`::ffff:10.0.0.0/104`) is stored as written; [`BypassRules::matches`] reads it as
+    /// `10.0.0.0/8` while [`BypassRules::ipv4_mapped_as_ipv4`] is set.
     ///
     /// # Errors
     ///
@@ -275,12 +285,8 @@ impl HostPattern {
         let lowered = entry.to_ascii_lowercase();
 
         match lowered.as_str() {
-            // Not on macOS, and not on GNOME: a lone `*` is compared to the destination as
-            // a name on both, and meets none, so reading it as `All` would report every
-            // destination direct on a machine that proxies every one of them. It falls
-            // through to the star arm below, which refuses it by the same rule that refuses
-            // `*probe*` — dead entries belong in `rejected`, where the writer can see the
-            // rule did nothing, and not in the list looking live.
+            // macOS and GNOME compare a bare `*` as a name, so `All` would bypass traffic
+            // they proxy. The star arm records the dead entry in `rejected`.
             "*" if !matches!(dialect, BypassDialect::MacOs | BypassDialect::Gnome) => {
                 return Ok(Some(HostPattern::All));
             }
@@ -289,17 +295,11 @@ impl HostPattern {
             _ => {}
         }
 
-        // Most of the guards below share one reason, written here rather than at each of
-        // them: an entry this crate cannot read as a host still reaches the `Domain` arm at
-        // the end, where it is stored as a suffix of whatever was written — a rule that
-        // then matches no destination and says so nowhere. Under
-        // `BypassRules::reversed_exceptions` that dead rule sends the traffic it names out
-        // direct, which is fail-open, and refusing instead is affordable only because the
-        // entry survives in `BypassRules::rejected`. Each guard adds the shape it catches
-        // and the dead rule that shape would have become; the two that refuse for a
-        // *different* reason — the `@` and `://` guards — say so themselves.
+        // Invalid host text would reach `Domain` as a dead suffix rule. Under
+        // `BypassRules::reversed_exceptions`, that silently sends traffic direct, so these
+        // guards record it in `BypassRules::rejected`. The `@` and `://` guards differ.
 
-        // `@` marks a pasted proxy URL, not a bypass host — reject before port parse
+        // `@` marks a pasted proxy URL, not a bypass host; reject before port parse
         // would embed the password in the error reason ([`SafeError`] prints it in full).
         if entry.contains('@') {
             return Err(Error::bypass(
@@ -316,21 +316,21 @@ impl HostPattern {
         // Whitespace cannot occur inside a host name any more than a `/` can, so an entry
         // that still holds some is stored as `suffix = ".a.example b.example"`.
         // It reaches here from a list whose separators do not include whitespace at all:
-        // [`parse::no_proxy`](crate::parse::no_proxy), which splits on `,` alone — Go's
+        // [`parse::no_proxy`](crate::parse::no_proxy), which splits on `,` alone (Go's
         // `httpproxy`, its reference, does the same, and `;` was removed from
-        // `LIST_SEPARATORS` for the reason written there — and the GNOME and KDE readers
-        // that go through it with lists `,`-separated already.
+        // `LIST_SEPARATORS` for the reason written there) and the KDE reader, which goes
+        // through it with a list `,`-separated already. GNOME's `ignore-hosts` is an array
+        // and has no separator to split on.
         // [`parse::proxy_override`](crate::parse::proxy_override) does split on whitespace,
         // but only on the ASCII spellings Windows itself writes, so a Windows list still
         // reaches this arm when one entry holds something `char::is_whitespace` calls space
-        // and `WINDOWS_BYPASS_SEPARATORS` does not — `U+00A0` or `U+3000` pasted into the
+        // and `WINDOWS_BYPASS_SEPARATORS` does not: `U+00A0` or `U+3000` pasted into the
         // settings dialog. `src/parse.rs` says the same from the splitting side.
         if entry.chars().any(char::is_whitespace) {
             return Err(Error::bypass(
                 entry,
-                // Not "',' or ';'": `;` separates nothing outside the Windows list, so
-                // advising it told a `no_proxy`, GNOME or KDE writer to reach for the one
-                // character that leaves their two entries a single dead rule.
+                // `;` separates entries only in the Windows list. Advising it for
+                // `no_proxy`, GNOME or KDE leaves two entries as a single dead rule.
                 "entry contains whitespace, so it is not a single host[:port] or CIDR \
                  (separate entries with ',', or on Windows with ';' or a space)",
             ));
@@ -342,7 +342,7 @@ impl HostPattern {
         // reads a `/` as a CIDR mask, so `https://example.com` and `https://10.0.0.0/8` are
         // both rules there. A [`HostPattern`] has nowhere to put the scheme, and dropping
         // the one written would turn an https-only rule into one that bypasses plain HTTP
-        // too — a wider bypass than the entry asks for. Refused instead, and the reason
+        // too: a wider bypass than the entry asks for. Refused instead, and the reason
         // says which grammar was not met rather than the CIDR guard's claim below.
         if lowered.contains("://") {
             return Err(Error::bypass(
@@ -355,8 +355,8 @@ impl HostPattern {
 
         // Not on Windows: an entry holding a `/` invalidates the whole list there, so a
         // `Cidr` rule built from one reports a bypass no reader of that list grants.
-        // Microsoft bounds the damage at the list — "don't enter subwebs or trailing
-        // slashes ... as they are invalidating the whole list otherwise" (KB 4551930) — and
+        // Microsoft bounds the damage at the list ("don't enter subwebs or trailing
+        // slashes ... as they are invalidating the whole list otherwise" (KB 4551930)) and
         // both readers land past that bound: `InternetOpenW` fails with
         // `ERROR_INVALID_PARAMETER`, and a `ProxyOverride` holding one sends every
         // destination direct, which is measured rather than documented. The range Windows
@@ -373,9 +373,9 @@ impl HostPattern {
 
         // Not on Windows: a leading `.` is a spelling no reader of that list grants, so a
         // `Domain` rule built from one sends traffic direct that the machine proxies.
-        // Microsoft documents the wildcard in its place — "Enter a wildcard at the beginning
+        // Microsoft documents the wildcard in its place, "Enter a wildcard at the beginning
         // of an Internet address, IP address, or domain name that has a common ending"
-        // (KB 4551930) — and the three readings agree, asked for `sub.name`: `InternetOpenW`
+        // (KB 4551930), and the three readings agree, asked for `sub.name`: `InternetOpenW`
         // fails with `ERROR_INVALID_NAME` and takes the whole list with it, while WinHTTP and
         // the registry reading keep the list and reach the proxy anyway. `*.name` bypasses on
         // all three. `.` and `..` are left to the arms below, which build no rule from either
@@ -393,18 +393,46 @@ impl HostPattern {
             ));
         }
 
-        if let Ok(net) = lowered.parse::<IpNet>() {
-            return Ok(Some(HostPattern::Cidr(reduce_mapped_net(net))));
+        // A CIDR block whose IPv4 address is four parts but not four decimal octets
+        // (`012.1.2.0/24`, `0xa.1.2.0/24`) has no reading its readers share. Chromium's
+        // `ParseCIDRBlock` folds the address the URL way, so `012.1.2.0/24` is
+        // `10.1.2.0/24` there, and `Suffix` stores that. CFNetwork and KIO's subnet reader
+        // take each part as decimal, `12.1.2.0/24`, while Chromium reading the same macOS
+        // or KDE list folds it, so `MacOs` and `Kde` refuse it. curl and Go reject such an
+        // address outright. A short form (`192.168.1/24`) is left to `ipnet` below, which
+        // refuses it; so is one with a trailing dot (`1.2.3./24`), which splits into four
+        // parts but which the URL way reads as the short form `1.2.3`. A percent escape is
+        // left there too, as the forbidden-character guard refuses it in an address entry.
+        // The rows are `a_non_decimal_cidr_address_is_folded_in_no_proxy` in
+        // `tests/bypass.rs` and `cidr_addresses_are_read_as_decimal` in
+        // `tests/mac_exceptions_list.rs`.
+        if let Some((address, prefix)) = lowered.split_once('/')
+            && address.parse::<IpAddr>().is_err()
+            && address.split('.').count() == 4
+            && address.split('.').all(|part| !part.is_empty())
+            && !address.chars().any(is_forbidden_host_char)
+            && let Ok(Host::Ipv4(v4)) = crate::endpoint::parse_host(address)
+        {
+            if matches!(dialect, BypassDialect::MacOs | BypassDialect::Kde) {
+                return Err(Error::bypass(
+                    entry,
+                    "entry is a CIDR block whose IPv4 address is written other than as four \
+                     decimal octets, which the system reads as decimal and Chromium as a URL \
+                     host (write the four decimal octets, for example 10.1.2.0/24)",
+                ));
+            }
+            if let Ok(net) = format!("{v4}/{prefix}").parse::<IpNet>() {
+                return Ok(Some(HostPattern::Cidr(net)));
+            }
         }
 
-        // With the scheme form taken above, a `/` that survives the CIDR parse cannot be
-        // anything else: host names do not contain one, and neither does the `host[:port]`
-        // form. Without this check `10.0.0/8` falls through to the `Domain` arm and becomes
-        // `suffix = "./10.0.0/8"`. Go is where that dead rule was observed, not where the
-        // guard comes from: `httpproxy`'s `config.init` tries `net.ParseCIDR` on every
-        // entry and, on failure, falls straight through to the domain arm, so `10.0.0/8`
-        // becomes a `domainMatch` on `.10.0.0/8` there too. Erroring instead is this
-        // crate's own choice.
+        if let Ok(net) = lowered.parse::<IpNet>() {
+            return Ok(Some(HostPattern::Cidr(net)));
+        }
+
+        // After scheme and CIDR parsing, a remaining `/` cannot name a host. Go's
+        // `httpproxy` keeps an invalid CIDR such as `10.0.0/8` as a dead domain rule;
+        // this crate rejects it so `reversed_exceptions` cannot bypass traffic silently.
         if lowered.contains('/') {
             return Err(Error::bypass(
                 entry,
@@ -418,11 +446,29 @@ impl HostPattern {
             split_host_port(&lowered).map_err(|reason| Error::bypass(entry, reason))?;
         let host_text = strip_brackets(bracketed_text);
 
-        // CFNetwork does not read a port in an entry as a restriction on the entry; it reads
-        // the entry as not matching. Stored with a port here it would be the narrower rule
-        // the writer appears to have asked for, which is the one shape of divergence this
-        // file never lets stand: on macOS the entry is dead, so the port is what killed it
-        // and `BypassRules::rejected` is where that has to be visible.
+        // These stores' resolvers compare an entry's name as written (KIO's `revmatch` and
+        // Android's string match by their source, WinINet by the fail-closed reading until
+        // measured), so `example.com.` there matches only a destination spelled with the
+        // same dot, and stored as `example.com` it would bypass the destination the store
+        // proxies. GNOME refuses the same shape in `BypassRules::push_gnome_entries`.
+        // CFNetwork is not among them: it sheds the dot on both sides, so a macOS entry
+        // keeps the root-marker reading (`cfnetwork_sheds_a_trailing_dot`). What is left
+        // after `*.`, `.` and the dot is a name; `.` and `*.` alone carry none and fall
+        // through to the arms below.
+        if matches!(dialect, BypassDialect::Windows | BypassDialect::Kde)
+            && host_text.ends_with('.')
+            && !host_text.trim_matches(['*', '.']).is_empty()
+        {
+            return Err(Error::bypass(
+                entry,
+                "entry ends in a '.', which this store compares as written, so it matches \
+                 only a destination spelled with the same trailing dot (write the name \
+                 without it)",
+            ));
+        }
+
+        // CFNetwork matches no entry with a port; storing it as a port-restricted rule
+        // would bypass traffic CFNetwork proxies, so record it in `BypassRules::rejected`.
         if dialect == BypassDialect::MacOs && port.is_some() {
             return Err(Error::bypass(
                 entry,
@@ -432,11 +478,8 @@ impl HostPattern {
             ));
         }
 
-        // Brackets are the address-literal spelling and nothing else, so a bracketed entry
-        // that is not one reaches the `Domain` arm as `suffix = ".2001:db8::zz"` for
-        // `[2001:db8::zz]`. Not a spelling ruling: `parse_host` and not
-        // `IpAddr`, because that is the grammar the destination side reads, and the address
-        // arm at the end of this function accepts the same padded and hex spellings.
+        // An invalid bracketed address would become a dead `Domain` suffix rule. Use
+        // `parse_host` because the destination side accepts the same address grammar.
         if host_text.len() != bracketed_text.len()
             && !matches!(
                 crate::endpoint::parse_host(host_text),
@@ -451,7 +494,7 @@ impl HostPattern {
         }
 
         // The destination side is `Host::parse`, which refuses WHATWG's "forbidden domain
-        // code point" — the C0 controls, DEL, `#`, `%`, `<`, `>`, `?`, `[`, `\`, `]`, `^`
+        // code point": the C0 controls, DEL, `#`, `%`, `<`, `>`, `?`, `[`, `\`, `]`, `^`
         // and `|`. A rule holding one names a host that can never arrive:
         // `a?b.example.com` becomes `suffix = ".a?b.example.com"`. The `@`, whitespace and
         // `/` guards above are this same test spelled one character at a time; they stay
@@ -468,12 +511,12 @@ impl HostPattern {
         }
 
         // Go runs every domain entry through `idnaASCII`, and this crate's destination side
-        // is converted the same way — by `Host::parse` when the host is parsed from text,
-        // and by `host_key` when a caller built the `Host` itself. Without the step here a Unicode
-        // entry is a dead rule: `日本.example` is stored verbatim while the destination arrives
-        // as `xn--wgv71a.example`, so it matches nothing — in *either* spelling, because the
-        // destination is always converted and the pattern never is. Only non-ASCII text
-        // reaches the converter, so no entry that works today changes shape.
+        // is converted the same way: by `Host::parse` when the host is parsed from text,
+        // and by `host_key` when a caller built the `Host` itself. Without the step here a
+        // Unicode entry is a dead rule: `日本.example` is stored verbatim while the
+        // destination arrives as `xn--wgv71a.example`, so it matches nothing, in *either*
+        // spelling, because the destination is always converted and the pattern never is.
+        // Only non-ASCII text reaches the converter, preserving existing ASCII rules.
         let encoded;
         let host_text = if host_text.is_ascii() {
             host_text
@@ -482,7 +525,7 @@ impl HostPattern {
             &encoded
         };
 
-        // RFC 1035 section 2.3.1 gives the empty label one place, the root at the end —
+        // RFC 1035 section 2.3.1 gives the empty label one place, the root at the end:
         // which is the single trailing dot the arms below strip. A second one is not a
         // host name: `example.com..` is stored as `.example.com.` and meets only a
         // destination spelled the same way. Its own `Display` is `example.com.`, which
@@ -506,50 +549,50 @@ impl HostPattern {
         }
 
         // `.example.com` and `*.example.com` say "a subdomain of this", so what follows the
-        // dot has to be something that *has* subdomains — a domain name. An address does
+        // dot has to be something that *has* subdomains: a domain name. An address does
         // not: `.10.0.0.1` waits for an `a.10.0.0.1` that `Host::parse` refuses, in every
         // spelling the address side accepts (`.192.168.001.001`, `.0x0a.0.0.1`) and for an
         // unbracketed IPv6 too. Neither is a name that could never arrive on its own
         // (`.example.123`).
         //
-        // "Could never match" is said of a destination a *special* scheme can carry, which is
-        // what these lists are written about and what `matches_authority` admits — it goes
-        // through `parse_host`, so `a.example.123` is refused there too. `matches_url` is
-        // wider: WHATWG sends a non-special scheme to the opaque-host parser *before* the
-        // "ends in a number" check, so `custom://a.example.123/` parses and its host is
+        // "Could never match" is said of a destination a *special* scheme can carry, which
+        // is what these lists are written about and what `matches_authority` admits: it
+        // goes through `parse_host`, so `a.example.123` is refused there too. `matches_url`
+        // is wider: WHATWG sends a non-special scheme to the opaque-host parser *before*
+        // the "ends in a number" check, so `custom://a.example.123/` parses and its host is
         // `Domain("a.example.123")` while `http://a.example.123/` fails with
-        // `InvalidIpv4Address`. A rule this arm refuses would have met that host. The refusal
-        // stays — it catches the typo the shape almost always is, and dropping the rule sends
-        // the request to the proxy rather than around it — but the reachability it tests is
-        // the special-scheme one, and nothing further down may read it as more than that.
-        // `a_refused_numeric_tail_is_only_unreachable_for_a_special_scheme` in `tests/bypass.rs`
-        // is the measurement.
+        // `InvalidIpv4Address`. A rule this arm refuses would have met that host. The
+        // refusal stays (it catches the typo the shape almost always is, and dropping the
+        // rule sends the request to the proxy rather than around it), but the reachability
+        // it tests is the special-scheme one, and nothing further down may read it as more
+        // than that. `a_refused_numeric_tail_is_only_unreachable_for_a_special_scheme` in
+        // `tests/bypass.rs` is the measurement.
         //
-        // A glob in the body buys the entry a narrow exemption, covering the spellings that
-        // reach here, which keep the dot: `.*.10.0.0.1` becomes `Wildcard("*.*.10.0.0.1")`,
-        // which needs a destination of the form `a.b.10.0.0.1` — a name whose last label
-        // reads as a number, which is the address reading and not a host any URL can carry.
-        // A star standing for the empty string does not widen that: `*10.0.0.1` would meet
-        // `10.0.0.1`, but it opens with neither `.` nor `*.`, so it has no subdomain body and
-        // never reaches this arm.
-        // That holds for a whole address in the tail and does not survive being generalised
-        // to any numeric one: a star is matched against the destination's *text*, where it
-        // stands for the leading octets of an address as readily as for whole labels, so
-        // `Wildcard("*.*.*.1")` is met by `10.0.0.1` itself and `.*.1` is a live rule.
+        // A glob in the body gives the entry a narrow exemption, covering the spellings
+        // that reach here, which keep the dot: `.*.10.0.0.1` becomes
+        // `Wildcard("*.*.10.0.0.1")`, which needs `a.b.10.0.0.1`: its numeric last label
+        // reads as an address, so no URL can carry that name. A star standing for the
+        // empty string does not widen that: `*10.0.0.1` would meet `10.0.0.1`, but it opens
+        // with neither `.` nor `*.`, so it has no subdomain body and never reaches this
+        // arm. That holds for a whole address in the tail and does not survive being
+        // generalised to any numeric one: a star is matched against the destination's
+        // *text*, where it stands for the leading octets of an address as readily as for
+        // whole labels, so `Wildcard("*.*.*.1")` is met by `10.0.0.1` itself and `.*.1` is
+        // a live rule.
         //
         // The destination such a rule meets can only be an address, because reaching this
         // arm at all means the address reading was tried on the body and failed, which the
         // name reading only does for a last label that is all digits. So the entry is dead
         // unless the pattern could be laid over a dotted quad, and two things settle that.
         // Every literal byte has to be one a quad carries: a digit, a dot, or the star
-        // itself — which is what still refuses `.*.0x0a.0.0.1`, `.*.example.123` and the
-        // colon of a broken IPv6. And the literal dots have to fit, counting the one in the
-        // `*.` this entry gets in front of its body: a quad has four labels and so three
-        // dots, which is why `.*.1` and `.*.0.1` live while `.*.0.0.1` and `.*.10.0.0.1` do
-        // not. The test is permissive in the direction that costs nothing — no octet is 999,
-        // so `.*.999` is kept and matches nothing — and strict in the one that costs a rule.
-        // Entries whose body is a name never reach it: `.*.example` and `.a*b.example` parse
-        // as domains and pass here as they always did.
+        // itself, so `.*.0x0a.0.0.1`, `.*.example.123` and the colon of a broken IPv6 are
+        // still refused. And the literal dots have to fit, counting the one in the `*.`
+        // this entry gets in front of its body: a quad has four labels and so three dots,
+        // which is why `.*.1` and `.*.0.1` live while `.*.0.0.1` and `.*.10.0.0.1` do not.
+        // The test is permissive in the direction that costs nothing (no octet is 999, so
+        // `.*.999` is kept and matches nothing) and strict in the one that costs a rule.
+        // Entries whose body is a name never reach it: `.*.example` and `.a*b.example`
+        // parse as domains and pass here as they always did.
         let suffix_body = subdomain_body
             .map(|rest| rest.strip_suffix('.').unwrap_or(rest))
             .filter(|body| !body.is_empty());
@@ -608,7 +651,7 @@ impl HostPattern {
         // A trailing dot on a pattern is the DNS root marker.
         let host_text = host_text.strip_suffix('.').unwrap_or(host_text);
         if host_text.is_empty() {
-            // Go ignores entries with no host part instead of failing — `config.init`
+            // Go ignores entries with no host part instead of failing: `config.init`
             // in `http/httpproxy/proxy.go` answers that shape with `continue`.
             return Ok(None);
         }
@@ -627,7 +670,7 @@ impl HostPattern {
             }
             // The `*.` spelling was taken above, so the only star macOS still reads as
             // syntax is a trailing `.*`, and only when it is the sole one. What is left of
-            // the entry has to be a name a destination could carry — a leading dot is not,
+            // the entry has to be a name a destination could carry: a leading dot is not,
             // and the glob would be as dead as the entry it came from.
             if dialect == BypassDialect::MacOs {
                 let head = host_text.strip_suffix(".*").filter(|head| {
@@ -641,11 +684,11 @@ impl HostPattern {
                     None => Err(Error::bypass(entry, MACOS_LITERAL_STAR)),
                 };
             }
-            // The leading dot is the reference's own rewrite — "we remap `.google.com` -->
-            // `*.google.com`" — and it is applied to every rule that starts with one, glob
-            // or not (`SchemeHostPortMatcherRule::FromUntrimmedRawString`). The `Domain` arm
-            // below is that rewrite spelled as a suffix; this arm needs it written out,
-            // because a pattern is matched literally and no host key begins with a dot —
+            // The leading dot is the reference's own rewrite ("we remap `.google.com` -->
+            // `*.google.com`"), and it is applied to every rule that starts with one, glob
+            // or not (`SchemeHostPortMatcherRule::FromUntrimmedRawString`). The `Domain`
+            // arm below is that rewrite spelled as a suffix; this arm needs it written out,
+            // because a pattern is matched literally and no host key begins with a dot:
             // left alone, `.*.example.com` is the dead rule the guards above refuse.
             let pattern = if host_text.starts_with('.') {
                 format!("*{host_text}")
@@ -672,7 +715,7 @@ impl HostPattern {
         // hex and a short form as filling from the right, so `192.168.001.001` kept verbatim
         // would never meet the `192.168.1.1` that arrives. Reached only once `IpAddr` has
         // said no, so the entry whose meaning this changes is the all-digit name `123`, now
-        // the address `0.0.0.123` — which is what a destination spelled `123` already
+        // the address `0.0.0.123`, which is what a destination spelled `123` already
         // becomes. Hence
         // `idna_ascii` keeps `Host::parse` away from an all-digit *label*, where the address
         // reading is the wrong one.
@@ -681,7 +724,32 @@ impl HostPattern {
             return Err(Error::bypass(entry, UNREACHABLE_NAME));
         };
 
-        // An address is one host under every dialect — there is nothing "under"
+        // `IpAddr` said no above, so an `Ipv4` here is a spelling other than four decimal
+        // octets, and no store behind `Windows`, `MacOs` or `Kde` reads it as the address
+        // folded here. WinINet, WinHTTP, CFNetwork and Android's `ProxySelector` compare it
+        // with the destination as text, so `012.1.2.3` meets only a destination written
+        // `012.1.2.3`. KIO's subnet reader takes each part as decimal, so `012.1.2.3` is
+        // `12.1.2.3` and `10.66051` is no address; libproxy compares text against a host
+        // Qt has already folded. Stored folded, the entry would bypass `10.1.2.3`, which
+        // all of them hand to the proxy; stored as text, it would meet nothing, because
+        // every destination reaches the rules already folded. The rows are
+        // `a_non_decimal_ipv4_entry_is_refused_in_a_windows_list` in `tests/bypass.rs` and
+        // `non_decimal_ipv4_spellings_are_compared_as_text` in `tests/mac_exceptions_list.rs`.
+        if matches!(
+            dialect,
+            BypassDialect::Windows | BypassDialect::MacOs | BypassDialect::Kde
+        ) && matches!(host, Host::Ipv4(_))
+        {
+            return Err(Error::bypass(
+                entry,
+                "entry is an IPv4 address written other than as four decimal octets, which \
+                 this list's reader does not read as the address a URL parser does — Windows, \
+                 macOS and Android compare it as text, KIO reads each part as decimal \
+                 (write the four decimal octets, for example 10.1.2.3)",
+            ));
+        }
+
+        // An address is one host under every dialect: there is nothing "under"
         // `10.0.0.1` for a suffix rule to reach.
         if matches!(host, Host::Ipv4(_))
             || matches!(dialect, BypassDialect::Windows | BypassDialect::MacOs)
@@ -698,31 +766,52 @@ impl HostPattern {
 
     // Test the pattern against a destination.
     //
-    // `host_text` must already be lowercased; `ip` is `Some` when the host is a
-    // literal address. Prefer [`BypassRules::matches`], which also applies the
-    // loopback and simple-hostname rules.
-    fn matches(&self, host_text: &str, ip: Option<IpAddr>, port: Option<u16>) -> bool {
+    // `host_text` must already be lowercased, and has had a trailing dot shed when
+    // [`BypassRules::strip_trailing_dot`] says to; `ip` is `Some` when the host is a
+    // literal address, already reduced by `reduce_mapped` when `reduce` is set, which is
+    // [`BypassRules::ipv4_mapped_as_ipv4`]. Prefer [`BypassRules::matches`], which also
+    // applies the implicit set and the simple-hostname switch.
+    fn matches(
+        &self,
+        host_text: &str,
+        ip: Option<IpAddr>,
+        port: Option<u16>,
+        reduce: bool,
+    ) -> bool {
         match self {
             HostPattern::All => true,
-            HostPattern::Cidr(net) => ip.is_some_and(|ip| net.contains(&ip)),
+            HostPattern::Cidr(net) => {
+                let net = if reduce {
+                    reduce_mapped_net(*net)
+                } else {
+                    *net
+                };
+                ip.is_some_and(|ip| net.contains(&ip))
+            }
             HostPattern::Exact {
                 host,
                 port: rule_port,
             } => {
-                // Addresses compare as addresses, so `10.0.0.1` and `[::ffff:10.0.0.1]`
-                // are the one host they denote — `host_ip` has reduced both sides. This
-                // is Go's `ipMatch`, which compares with `net.IP.Equal`. The references
-                // split here: Chromium's `SchemeHostPortMatcherIPHostRule::Evaluate` is
-                // `base::MatchPattern(url.GetHost(), ip_host_)`, plain text. Go is the
-                // one to follow because the rest of this file already reads the mapped
-                // spelling as the address it maps — the CIDR arm below, `is_loopback`,
-                // `is_link_local` — and a rule that agreed with none of them would be
-                // the asymmetry those exist to avoid. The text fallback carries the
+                // Addresses compare as addresses, so `10.0.0.1` and `[::ffff:10.0.0.1]` are
+                // the one host they denote: `reduce_mapped` reduces both sides. This is
+                // Go's `ipMatch`, which compares with `net.IP.Equal`. The references split
+                // here: Chromium's `SchemeHostPortMatcherIPHostRule::Evaluate` is
+                // `base::MatchPattern(url.GetHost(), ip_host_)`, plain text. Go is the one
+                // to follow because the CIDR arm above reads the mapped spelling under the
+                // same switch, and a rule that agreed with it on one shape and not the
+                // other would make the matching inconsistent. The text fallback carries the
                 // `Exact { host: Host::Domain(_) }` that a Windows list produces for every
                 // bare name, and the hand-built one.
-                let hit = match (host_ip(host), ip) {
+                let rule_ip = host_ip(host).map(|rule_ip| {
+                    if reduce {
+                        reduce_mapped(rule_ip)
+                    } else {
+                        rule_ip
+                    }
+                });
+                let hit = match (rule_ip, ip) {
                     (Some(rule_ip), Some(destination_ip)) => rule_ip == destination_ip,
-                    _ => host_text.strip_suffix('.').unwrap_or(host_text) == host_key(host),
+                    _ => host_text == host_key(host),
                 };
                 hit && port_matches(*rule_port, port)
             }
@@ -731,29 +820,27 @@ impl HostPattern {
                 match_self,
                 port: rule_port,
             } => {
-                // No `ip.is_none()` guard, so `.1` also matches `10.0.0.1` — text matching,
-                // which is what the Windows `ProxyOverride` lists this crate also reads have
-                // always done. (Go excludes addresses here, Chromium does not.)
+                // No `ip.is_none()` guard, so `.1` also matches `10.0.0.1` through text
+                // matching, as in the Windows `ProxyOverride` lists this crate reads. Go
+                // excludes addresses here; Chromium does not.
                 //
                 // The leading dot is `parse`'s convention, not something the type can
                 // enforce: the fields are public and `BypassRules::new` exists to be filled
-                // in by hand. So name the domain rather than slicing a byte off it — a
-                // non-ASCII first character is not a char boundary — and refuse the empty
+                // in by hand. So name the domain rather than slicing a byte off it (a
+                // non-ASCII first character is not a char boundary) and refuse the empty
                 // name outright, which is what the field doc promises matches nothing. It
-                // would not: an empty `bare` strips nothing, so the whole host comes back as
-                // `rest`, and any host still ending in a dot once one is shed then satisfies
-                // the `ends_with('.')` test below. The destination side of that is an
-                // ordinary URL and not a hand-built value — `url` reads `http://example.com../`
-                // as `Host::Domain("example.com..")`. (Not "matches every host": that is what
-                // an `ends_with(bare)` shape would do, and this one strips instead.)
+                // would not: an empty `bare` strips nothing, so the whole host comes back
+                // as `rest`, and any host still ending in a dot once one is shed then
+                // satisfies the `ends_with('.')` test below. The destination side of that
+                // is an ordinary URL and not a hand-built value: `url` reads
+                // `http://example.com../` as `Host::Domain("example.com..")`. (Not "matches
+                // every host": that is what an `ends_with(bare)` shape would do, and
+                // this one strips instead.)
                 //
-                // The case of the suffix is `parse`'s convention for the same reason, and
-                // gets the same treatment: fold it here instead of trusting it. The `Exact`
-                // arm above has always folded — not by design, but because `host_key` is
-                // also what lowercases the destination — and a rule set that answered one
-                // way for `Exact { "FooBar.com" }` and another for `Domain { ".FooBar.com" }`
-                // would be the asymmetry this file keeps saying it avoids.
-                let host_text = host_text.strip_suffix('.').unwrap_or(host_text);
+                // The suffix's case is also a `parse` convention, so fold it here. The
+                // `Exact` arm folds through `host_key`, which also lowercases the
+                // destination. `Exact { "FooBar.com" }` and `Domain { ".FooBar.com" }` must
+                // use the same case-insensitive comparison.
                 let bare = suffix.strip_prefix('.').unwrap_or(suffix);
                 let hit = !bare.is_empty()
                     && strip_suffix_ascii_case(host_text, bare).is_some_and(|rest| {
@@ -765,10 +852,9 @@ impl HostPattern {
                 pattern,
                 port: rule_port,
             } => {
-                let host_text = host_text.strip_suffix('.').unwrap_or(host_text);
                 // Folded on the rule side like `Domain` above, and folded *here* rather
                 // than inside `glob_match`: that helper is shared with `sh_exp_match`, the
-                // PAC `shExpMatch`, where case sensitivity is the reference behaviour —
+                // PAC `shExpMatch`, where case sensitivity is the reference behaviour:
                 // Mozilla's `ascii_pac_utils.js` builds a `RegExp` with no `i` flag. The
                 // allocation is skipped for the shape `parse` produces, which is all of them.
                 let hit = if pattern.bytes().any(|byte| byte.is_ascii_uppercase()) {
@@ -799,14 +885,10 @@ impl fmt::Display for HostPattern {
                 match_self,
                 port,
             } => {
-                // The dot is added rather than passed through, because the field doc says a
-                // hand-built suffix may be written without one and mean the same domain.
-                // That is true of matching and was not true of this: `Domain { suffix:
-                // "example.com", match_self: false }` printed `example.com`, which
-                // [`Self::parse`] reads back as `match_self: true` — a rule for the
-                // subdomains alone, displayed and re-read as one that takes the bare domain
-                // with them. Anyone logging a rule set and feeding it back gets a wider
-                // bypass than the one they built.
+                // Add the dot because a hand-built suffix without one matches the same
+                // domain. Printing a subdomain-only rule as `example.com` makes
+                // [`Self::parse`] read it back with `match_self: true`, widening the bypass
+                // when a logged rule is parsed again.
                 let base = match (*match_self, suffix.strip_prefix('.')) {
                     (true, Some(bare)) => bare.to_owned(),
                     (false, None) => format!(".{suffix}"),
@@ -824,45 +906,100 @@ impl fmt::Display for HostPattern {
 /// The Windows `ProxyOverride` token that bypasses dot-less (intranet) host names.
 pub const LOCAL_TOKEN: &str = "<local>";
 
-/// Windows `<-loopback>`: subtracts the whole implicit bypass set — loopback *and*
-/// link-local — from the entries written before it. Parsed to
+/// Windows `<-loopback>`: subtracts the whole implicit bypass set
+/// ([`BypassRules::implicit`]) from the entries written before it. Parsed to
 /// [`HostPattern::SubtractImplicit`]; see [`BypassRules::bypass_loopback`].
 pub const NO_LOOPBACK_TOKEN: &str = "<-loopback>";
 
-// Given twice by `HostPattern::parse`: once for a bare entry, once for a suffix one.
-//
-// The parenthetical names both shapes that arrive here, because the reason has to hold for
-// every entry `parse_host` refused and not just the one that motivated it. `2001:db8:1`
-// reaches this too — the guards above let a colon through as an attempt at an unbracketed
-// IPv6 — and a colon also makes `Error::bypass` withhold the input, so a message that only
-// described `example.123` would leave the reader with neither the entry nor its reason.
+/// The destinations a resolver sends direct with no list entry naming them: the implicit
+/// bypass set, held in [`BypassRules::implicit`].
+///
+/// Each store's own resolver has its own set, so a rule set read from a store carries that
+/// store's: an implicit bypass the resolver does not have is a destination this crate
+/// reports direct while the machine sends it to the proxy. The `WinInet` and `CfNetwork`
+/// columns are the machine's answer, measured by handing the resolver a proxy and an
+/// otherwise empty list and asking where each destination went; `Empty` is read off
+/// GLib's and KIO's matchers, which consult the list and nothing else.
+///
+/// | Destination | `Broad` | `WinInet` | `CfNetwork` | `Empty` |
+/// |---|---|---|---|---|
+/// | `localhost` (any case) | ✓ | ✓ | ✓ | |
+/// | `loopback` | ✓ | ✓ | | |
+/// | `127.0.0.1`, `[::1]` | ✓ | ✓ | ✓ | |
+/// | the rest of `127.0.0.0/8` | ✓ | | | |
+/// | `*.localhost`, a trailing dot | ✓ | | | |
+/// | `169.254.0.0/16`, `[fe80::]/10` | ✓ | ✓ | | |
+/// | an IPv4-mapped spelling of any of the above | ✓ | | | |
+///
+/// [`HostPattern::SubtractImplicit`] (`<-loopback>`) subtracts whichever set is in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum ImplicitBypass {
+    /// Chromium's implicit rules (`IsLocalhost`, IPv4-mapped loopback, link-local) and
+    /// WinINet's `loopback` name. The default, and what [`parse::no_proxy`] carries: the
+    /// environment variable has no single resolver to measure, and this is the widest set
+    /// any reader of it applies.
+    ///
+    /// [`parse::no_proxy`]: crate::parse::no_proxy
+    #[default]
+    Broad,
+    /// WinINet's, which [`parse::proxy_override`](crate::parse::proxy_override) and the
+    /// Windows store carry: the names `localhost` and `loopback`, the addresses
+    /// `127.0.0.1` and `::1`, and the link-local ranges. The same six Chromium records as
+    /// Windows' own set.
+    WinInet,
+    /// CFNetwork's: the name `localhost` and the addresses `127.0.0.1` and `::1`.
+    /// CFNetwork applies it only while the settings carry a bypass key, so the macOS and
+    /// iOS stores carry this set when the dictionary has an `ExceptionsList` array or
+    /// `ExcludeSimpleHostnames` switched on, and [`Empty`](Self::Empty) otherwise,
+    /// `ExcludeSimpleHostnames` set to 0 included. A Mac configured through System Settings
+    /// always has the array.
+    CfNetwork,
+    /// No implicit bypass: every destination is decided by the entries. GNOME's
+    /// `GSimpleProxyResolver` and KDE's KIO have none.
+    Empty,
+}
+
+impl ImplicitBypass {
+    // Whether the destination is in this set. `ip` is the address as written, before
+    // `reduce_mapped`: only `Broad` reads an IPv4-mapped spelling as the address it maps.
+    fn covers(self, host_text: &str, ip: Option<IpAddr>) -> bool {
+        match self {
+            Self::Broad => {
+                let ip = ip.map(reduce_mapped);
+                is_loopback(host_text, ip) || is_link_local(ip)
+            }
+            Self::WinInet => match ip {
+                Some(ip) => is_loopback_address(ip) || is_link_local(Some(ip)),
+                None => host_text == "localhost" || host_text == "loopback",
+            },
+            Self::CfNetwork => match ip {
+                Some(ip) => is_loopback_address(ip),
+                None => host_text == "localhost",
+            },
+            Self::Empty => false,
+        }
+    }
+}
+
+// Covers bare and suffix entries, including malformed IPv6 such as `2001:db8:1`.
+// `Error::bypass` withholds colon-containing input, so the reason must identify its shape.
 const UNREACHABLE_NAME: &str = "entry is not a name any destination could carry, so no \
                                 destination could ever match it (a last label that reads as \
                                 a number, as in example.123, is taken for an address and \
                                 refused as one; so is an unbracketed IPv6 that is not a \
                                 valid address, as in 2001:db8:1)";
 
-// GNOME's only wildcard is the leading `*.`, and it is stripped rather than matched
-// (`gsimpleproxyresolver.c:227`); anything else holding a `*` is compared whole against a
-// host name, which cannot contain one. Refused rather than stored, because storing it is
-// the dead rule the guards above exist to keep out of the list — and refusing it here is
-// what keeps this crate from reporting a bypass GNOME does not have.
-//
-// The bare `*` is the one that carries the whole arm, the same way it does for macOS below:
-// it is not the leading `*.` the strip looks for, so GLib stores it whole and matches it
-// against nothing, while `HostPattern::All` is every destination on the machine reported
-// direct at once. It reaches this constant through the guard further down rather than the
-// `All` arm at the top of `parse_in`, which is why that arm names this dialect.
+// GNOME strips only leading `*.` (`gsimpleproxyresolver.c:227`); every other `*`, including
+// a bare one, is literal and matches no host. Reject the dead rule so it cannot become a
+// bypass GNOME does not grant; see the `All` guard in `parse_in`.
 const GNOME_LITERAL_STAR: &str = "entry contains a '*' that GNOME does not read as a \
                                   wildcard — only a leading '*.' is one there — so no \
                                   destination could ever match it (write *.example.com for \
                                   a domain, or the host on its own)";
 
-// macOS reads a star at either end of an entry and nowhere in between:
-// `tests/mac_exceptions_list.rs` has `*.pw-probe.invalid` and `pw-probe.invalid.*` matching
-// and `*probe*`, `*invalid`, `pw-*.invalid` and a bare `*` matching nothing. Refused for
-// the reason above it, and the bare `*` is why the refusal is worth the arm: kept as a
-// wildcard it is the whole proxy switched off.
+// macOS reads only leading `*.` and trailing `.*` as wildcards. A bare `*` matches nothing;
+// treating it as `All` would switch off the proxy.
 const MACOS_LITERAL_STAR: &str = "entry contains a '*' that macOS does not read as a \
                                   wildcard — only a leading '*.' or a trailing '.*' is one \
                                   there — so no destination could ever match it (write \
@@ -875,17 +1012,18 @@ const MACOS_LITERAL_STAR: &str = "entry contains a '*' that macOS does not read 
 pub struct BypassRules {
     /// Parsed list entries.
     pub patterns: Vec<HostPattern>,
-    /// Dot-less host bypass, as a switch (macOS `ExcludeSimpleHostnames`). The list
-    /// spelling [`HostPattern::Local`] says the same thing until
-    /// [`reversed_exceptions`](Self::reversed_exceptions) is set, where a switch and a
-    /// list entry mean opposite things — see
-    /// [`excludes_simple_hostnames`](Self::excludes_simple_hostnames).
+    /// Dot-less host bypass, as a switch (macOS `ExcludeSimpleHostnames`). It takes any
+    /// destination without a dot, a dot-less IPv6 literal included, where the list
+    /// spelling [`HostPattern::Local`] takes no IP literal; and under
+    /// [`reversed_exceptions`](Self::reversed_exceptions) the two mean opposite things (see
+    /// [`excludes_simple_hostnames`](Self::excludes_simple_hostnames)).
     pub exclude_simple_hostnames: bool,
-    /// KDE/`config-kde` inclusion list — the implicit set still applies; see [`matches`](Self::matches).
+    /// KDE/`config-kde` inclusion list; the implicit set, where there is one, still
+    /// applies; see [`matches`](Self::matches).
     pub reversed_exceptions: bool,
     /// Redacted unparseable originals; affects verdict under
     /// [`reversed_exceptions`](Self::reversed_exceptions). Not a complete ledger of the
-    /// entries that match nothing — see [`HostPattern::Wildcard`].
+    /// entries that match nothing: see [`HostPattern::Wildcard`].
     pub rejected: Vec<RejectedValue>,
     /// Whether a destination's port counts only when the destination wrote one, so that a
     /// ported entry such as `example.com:80` does not meet a portless `http://example.com/`.
@@ -893,23 +1031,57 @@ pub struct BypassRules {
     /// Set for GNOME `ignore-hosts` and nowhere else. GLib resolves the destination with
     /// `G_URI_FLAGS_NONE` (`gsimpleproxyresolver.c:341`) and fills a scheme's default port
     /// only under `G_URI_FLAGS_SCHEME_NORMALIZE` (`guri.c:1006`), so the port it compares
-    /// against is 0 unless the URL carried one. Windows fills it — a `ProxyOverride` entry
+    /// against is 0 unless the URL carried one. Windows fills it: a `ProxyOverride` entry
     /// of `host:80` was measured bypassing a portless `http://host/`.
     ///
     /// [`matches`](Self::matches) does not read this: it is told a port and answers about
     /// that port. [`matches_url`](Self::matches_url) is where it is read, and is the reason
-    /// to prefer that method whenever the destination is a `Url` — it passes
+    /// to prefer that method whenever the destination is a `Url`: it passes
     /// [`Url::port`](https://docs.rs/url/latest/url/struct.Url.html#method.port) rather than
     /// `port_or_known_default` when this is set. Reading the field by hand is supported, not
     /// recommended.
     ///
-    /// One case is approximate, and in the safe direction. `Url` drops a port equal to the
-    /// scheme's default while parsing, so `http://host:80/` and `http://host/` are the same
-    /// value and `port` answers `None` for both. A rule on that port — `host:80` for
-    /// `http`, `host:443` for `https` — therefore stops firing entirely here, where GLib
-    /// still fires it on the spelling that wrote the port out. The destination goes to the
-    /// proxy instead of direct; the distinction was gone before this crate saw the URL.
+    /// `Url` drops a port equal to the scheme's default while parsing, so `http://host:80/`
+    /// and `http://host/` become the same value and `port` returns `None` for both. A rule
+    /// on that port (`host:80` for `http`, `host:443` for `https`) therefore never matches
+    /// here, while GLib still matches the spelling with an explicit port. The error is in
+    /// the safe direction: the destination uses the proxy instead of connecting directly.
+    /// URL parsing removes the distinction before this crate receives the URL.
     pub require_explicit_port: bool,
+    /// The destinations bypassed with no entry naming them. [`ImplicitBypass::Broad`]
+    /// unless the source says otherwise; each store sets its own resolver's set.
+    pub implicit: ImplicitBypass,
+    /// Whether an IPv4-mapped IPv6 destination (`[::ffff:10.0.0.1]`) meets the entries as
+    /// the IPv4 address it maps. Set by default and for
+    /// [`parse::no_proxy`](crate::parse::no_proxy), which is Chromium's and Go's reading.
+    ///
+    /// Cleared for every store's list. Android's selector compares the host string, and
+    /// WinINet and CFNetwork are unmeasured for an explicit entry and take the reading that
+    /// cannot send a proxied destination direct. GNOME `ignore-hosts` and KDE `NoProxyFor`
+    /// are read off their resolvers, which compare the address in the family it was
+    /// written in: GLib's `g_inet_address_mask_matches`
+    /// and Qt's `QHostAddress::isInSubnet`, which KIO calls, both answer no across
+    /// families, so `10.0.0.0/8` does not bypass `[::ffff:10.0.0.1]` there.
+    /// [`implicit`](Self::implicit) does not read this; which spellings an implicit set
+    /// covers is part of the set.
+    pub ipv4_mapped_as_ipv4: bool,
+    /// Whether a destination's trailing dot is shed before it meets the entries, so that
+    /// `example.com` and `*.example.com` also match `example.com.` and `www.example.com.`.
+    /// Set by default and for [`parse::no_proxy`](crate::parse::no_proxy), which read the
+    /// dot as the DNS root it denotes.
+    ///
+    /// Set for macOS and iOS too: CFNetwork was measured shedding the dot on the
+    /// destination and on the entry (`cfnetwork_sheds_a_trailing_dot` in
+    /// `tests/mac_exceptions_list.rs`).
+    ///
+    /// Cleared for every other store, because each of those resolvers compares the name as
+    /// written (and a store entry that itself ends in a dot is refused into
+    /// [`rejected`](Self::rejected) there for the same reason): WinINet sent `localhost.`
+    /// to the proxy under a `ProxyOverride` naming `localhost`, GLib's `ignore_host` and
+    /// KIO's `revmatch` compare text, and Android's `ProxySelector` compares strings. The
+    /// implicit set and the simple-hostname switch do not read this; each set says which
+    /// spellings it covers, and a trailing dot is a dot.
+    pub strip_trailing_dot: bool,
 }
 
 impl Default for BypassRules {
@@ -919,7 +1091,8 @@ impl Default for BypassRules {
 }
 
 impl BypassRules {
-    /// An empty rule set with the default loopback behaviour (loopback is bypassed).
+    /// An empty rule set with the [`ImplicitBypass::Broad`] implicit set, so loopback and
+    /// link-local destinations are bypassed.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -928,12 +1101,16 @@ impl BypassRules {
             reversed_exceptions: false,
             rejected: Vec::new(),
             require_explicit_port: false,
+            implicit: ImplicitBypass::Broad,
+            ipv4_mapped_as_ipv4: true,
+            strip_trailing_dot: true,
         }
     }
 
-    /// Whether the implicit bypass set — loopback *and* link-local — is still in force,
-    /// which it is unless the list carries [`HostPattern::SubtractImplicit`]
-    /// (`<-loopback>`).
+    /// Whether the list leaves the implicit bypass set ([`implicit`](Self::implicit)) in
+    /// force, which it does unless it carries [`HostPattern::SubtractImplicit`]
+    /// (`<-loopback>`). Under [`ImplicitBypass::Empty`] there is no set to leave in force,
+    /// and the answer is about the list alone.
     ///
     /// A rough answer, and the reason it is not a field: `<-loopback>` subtracts the
     /// implicit set only from the entries written before it, so a list that carries the
@@ -944,7 +1121,7 @@ impl BypassRules {
     /// # use proxy_watch::parse;
     /// assert!(parse::no_proxy("localhost").bypass_loopback());
     /// assert!(!parse::proxy_override("<-loopback>").bypass_loopback());
-    /// // The token is in the list, so this is `false` — but `localhost` is written
+    /// // The token is in the list, so this is `false`, but `localhost` is written
     /// // after it and wins on the destination it names.
     /// let readded = parse::proxy_override("<-loopback>;localhost");
     /// assert!(!readded.bypass_loopback());
@@ -959,31 +1136,15 @@ impl BypassRules {
             .any(|p| matches!(p, HostPattern::SubtractImplicit))
     }
 
-    // Add `pattern` to [`BypassRules::patterns`]. Repeats are collapsed by
-    // [`dedup_patterns`](Self::dedup_patterns) once the list is complete, not here.
+    // Repeats are collapsed by [`dedup_patterns`](Self::dedup_patterns) after parsing.
     pub(crate) fn push_pattern(&mut self, pattern: HostPattern) {
         self.patterns.push(pattern);
     }
 
-    // Collapse repeats in [`BypassRules::patterns`], keeping the first of each.
-    //
-    // Do not move this into `push_pattern` as one `Vec::contains` per entry: the vector it
-    // would scan is the one being built, so a list of distinct entries costs time in the
-    // square of its length — 16,000 entries take 41.4 s in a debug build
-    // (`a_long_list_of_distinct_entries_does_not_stall_the_parse`). No source of a bypass
-    // list caps it, and all five are open-ended — `no_proxy` is an environment variable,
-    // `ProxyOverride` a registry value group policy writes, `ExceptionsList` a `configd`
-    // array, `ignore-hosts` a GSettings `as`, `NoProxyFor` one line of a text file.
-    //
-    // Moving it here rather than handing every caller a set keeps the rule in one place at
-    // the cost of a transiently duplicated vector, which nothing reads: every loop that
-    // fills a list from one of those sources ends with this call, and there are no others
-    // (`parse::bypass_entries_in`, `sys::proxy_dict::bypass_from_dict`).
-    //
-    // The rule is per run, not per list, because [`HostPattern::SubtractImplicit`] changes
-    // what a repeat means: in `localhost, <-loopback>, localhost` the second spelling is
-    // the one that decides, so dropping it as a duplicate of the first would hand the
-    // verdict to the token between them.
+    // Collapse repeats once the list is complete; a `Vec::contains` per push is quadratic
+    // on a long list. A repeat is dropped only within a run between `<-loopback>` tokens,
+    // because [`HostPattern::SubtractImplicit`] changes what a repeat means: in
+    // `localhost, <-loopback>, localhost` the second `localhost` is the one that decides.
     pub(crate) fn dedup_patterns(&mut self) {
         let mut seen = HashSet::with_capacity(self.patterns.len());
         self.patterns.retain(|pattern| {
@@ -995,10 +1156,101 @@ impl BypassRules {
         });
     }
 
-    // Parse one bypass list entry and fold the result into `self` — the fail-soft
-    // boundary this crate settled on.
+    // GNOME's `ignore-hosts`, sorted the way GLib's `reparse_ignore_hosts`
+    // (`gsimpleproxyresolver.c`) sorts it before anything is matched. An entry GLib reads
+    // as an address or a mask is a `Cidr` here, unreduced, because `GInetAddressMask`
+    // compares addresses of one family only. Everything else is a name, and a name GLib
+    // either refuses or can never match is refused here rather than handed to `parse_in`,
+    // which would normalise it into a live rule: a bracketed address with no port, a mask
+    // GLib rejects (bits past the prefix, a leading zero), `<local>` and `<-loopback>`,
+    // non-ASCII text, a trailing dot, and an IPv4 spelling `inet_pton` does not read.
+    // GLib's matcher also stops at the
+    // first name of length zero (`for (...; priv->ignore_domains[i].length; ...)`), so
+    // `["", "example.com"]` bypasses nothing there; every name after such an entry is
+    // refused for that reason.
     #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+    pub(crate) fn push_gnome_entries<'a>(&mut self, entries: impl Iterator<Item = &'a str>) {
+        let mut names_ended = false;
+        for entry in entries {
+            let entry = BypassDialect::Gnome.trim(entry);
+            if let Some(net) = glib_mask(entry) {
+                self.push_pattern(HostPattern::Cidr(net));
+                continue;
+            }
+            let refusal = match glib_name(entry) {
+                Err(reason) => Some(reason),
+                Ok("") => {
+                    names_ended = true;
+                    None
+                }
+                Ok(_) if names_ended => Some(
+                    "entry follows one that leaves no name (empty, '.', '*.' or a bare \
+                     port), and GLib stops reading names there, so it never matches",
+                ),
+                Ok(name)
+                    if name.eq_ignore_ascii_case(LOCAL_TOKEN)
+                        || name.eq_ignore_ascii_case(NO_LOOPBACK_TOKEN) =>
+                {
+                    Some(
+                        "entry is a WinINet token, which GLib does not read: it compares the \
+                         entry to a host so named, and no host is",
+                    )
+                }
+                Ok(name) if !name.is_ascii() => Some(
+                    "entry is not ASCII, and GLib compares it unconverted with the ASCII \
+                     form of the destination, so it never matches (write the xn-- form)",
+                ),
+                Ok(name) if name.ends_with('.') => Some(
+                    "entry ends in a '.', which GLib compares as written, so it matches \
+                     only a destination spelled with the same trailing dot",
+                ),
+                Ok(name) if name.contains('/') => Some(
+                    "entry is not a mask GLib accepts (an address with bits set past the \
+                     prefix, or with a leading zero), so GLib reads it as a name that \
+                     matches nothing",
+                ),
+                Ok(name)
+                    if name.parse::<IpAddr>().is_err()
+                        && matches!(crate::endpoint::parse_host(name), Ok(Host::Ipv4(_))) =>
+                {
+                    Some(
+                        "entry is an IPv4 spelling inet_pton does not read (short, octal or \
+                         hex), so GLib compares it as text and it never matches",
+                    )
+                }
+                Ok(_) => None,
+            };
+            match refusal {
+                Some(reason) => {
+                    crate::trace::warning!(
+                        error = %crate::trace::SafeError(&Error::bypass(entry, reason)),
+                        "skipping an ignore-hosts entry GLib would not match"
+                    );
+                    self.rejected.push(RejectedValue::new(
+                        RejectionKind::InvalidBypassPattern,
+                        RejectionSource::BypassList,
+                        entry,
+                    ));
+                }
+                None if names_ended && entry.is_empty() => {}
+                None => self.push_entry_in(entry, BypassDialect::Gnome),
+            }
+        }
+    }
+
     pub(crate) fn push_entry_in(&mut self, entry: &str, dialect: BypassDialect) {
+        self.push_entry_from(entry, dialect, RejectionSource::BypassList);
+    }
+
+    // [`Self::push_entry_in`] for a source that records its own refusals under a name of
+    // its own, so a refused entry carries one source whichever check refused it.
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+    pub(crate) fn push_entry_from(
+        &mut self,
+        entry: &str,
+        dialect: BypassDialect,
+        source: RejectionSource,
+    ) {
         match HostPattern::parse_in(entry, dialect) {
             Ok(Some(pattern)) => self.push_pattern(pattern),
             Ok(None) => {}
@@ -1009,26 +1261,24 @@ impl BypassRules {
                 );
                 self.rejected.push(RejectedValue::new(
                     RejectionKind::InvalidBypassPattern,
-                    RejectionSource::BypassList,
+                    source,
                     entry,
                 ));
             }
         }
     }
 
-    /// Whether either representation of the dot-less host rule is present — the
+    /// Whether either representation of the dot-less host rule is present: the
     /// [`exclude_simple_hostnames`](Self::exclude_simple_hostnames) switch or a
     /// [`HostPattern::Local`] entry.
     ///
-    /// Present, not equivalent. Under
-    /// [`reversed_exceptions`](Self::reversed_exceptions) the two part company, because
-    /// one is a switch and the other is a list entry: the switch bypasses dot-less hosts
-    /// before the list is consulted at all, the way the implicit set does, while a
-    /// `Local` *entry* is inside the inclusion list and so means the opposite — dot-less
-    /// hosts are exactly the ones that keep using the proxy. So this answering `true`
-    /// does not by itself tell you [`matches`](Self::matches) will bypass a dot-less
-    /// host; ask `matches`. Folding one representation into the other silently flips
-    /// that verdict.
+    /// The switch also bypasses dot-less IPv6 literals, which a `Local` entry does not.
+    /// Under [`reversed_exceptions`](Self::reversed_exceptions), the switch bypasses
+    /// dot-less hosts before the list is consulted, as the implicit set does. A `Local`
+    /// entry is part of the inclusion list, so it keeps dot-less hosts using the proxy. A
+    /// `true` result therefore does not guarantee that [`matches`](Self::matches) bypasses
+    /// a dot-less host; use `matches` to check a destination. Converting between these
+    /// representations silently reverses that verdict.
     #[must_use]
     pub fn excludes_simple_hostnames(&self) -> bool {
         self.exclude_simple_hostnames
@@ -1038,11 +1288,17 @@ impl BypassRules {
                 .any(|p| matches!(p, HostPattern::Local))
     }
 
-    /// Empty patterns and default flags ([`BypassRules::new`]). `<-loopback>` is an entry
-    /// in [`patterns`](Self::patterns), so a list holding only that is not empty — it
+    /// No entries and neither switch: [`patterns`](Self::patterns) empty,
+    /// [`exclude_simple_hostnames`](Self::exclude_simple_hostnames) and
+    /// [`reversed_exceptions`](Self::reversed_exceptions) off. `<-loopback>` is an entry
+    /// in [`patterns`](Self::patterns), so a list holding only that is not empty; it
     /// carries an instruction, and reporting it empty would invite a caller to drop it and
     /// put the implicit bypass back. Omits [`rejected`](Self::rejected) (only matters under
     /// [`reversed_exceptions`](Self::reversed_exceptions), which already answers `false`).
+    ///
+    /// Omits [`implicit`](Self::implicit) too: an empty list is "no entries", not "bypasses
+    /// nothing". Under [`ImplicitBypass::WinInet`] it still sends WinINet's six destinations
+    /// direct, and only under [`ImplicitBypass::Empty`] does it send nothing direct.
     ///
     /// ```
     /// # use proxy_watch::{parse, BypassRules};
@@ -1055,51 +1311,49 @@ impl BypassRules {
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty()
             && !self.exclude_simple_hostnames
-            // Reversed empty list bypasses everything — not trivial.
+            // Reversed empty list bypasses everything, not trivial.
             && !self.reversed_exceptions
     }
 
     /// Whether `host` bypasses the proxy.
     ///
-    /// A host with no text answers `false` before any of the below, in both modes. Nothing
-    /// in this crate asks — a URL with no host is Direct long before the bypass list is
-    /// reached — so that answer is for a caller who assembled the `Host` itself. Such a
-    /// caller owns the other end of this too: a `Host::Domain` is taken as text and never
-    /// re-read as an address, so `Domain("0177.0.0.1")` misses the loopback switch that
-    /// [`matches_authority`](Self::matches_authority) hits for the same characters. Neither
-    /// `Url::host` nor `url::Host::parse` can hand over that value — both fold every numeric
-    /// spelling to `Host::Ipv4` — and re-parsing here would cost every call for a shape only
-    /// a literal `Host::Domain(_)` can make.
+    /// An empty host returns `false` in either mode before any other checks. The crate's
+    /// routing functions handle hostless URLs as Direct before consulting the bypass list,
+    /// so this applies to caller-constructed `Host` values. A `Host::Domain` is treated as
+    /// text without re-parsing it as an address: `Domain("0177.0.0.1")` misses the loopback
+    /// switch that [`matches_authority`](Self::matches_authority) matches for the same
+    /// text. `Url::host` and `url::Host::parse` normalize numeric spellings to `Host::Ipv4`
+    /// and cannot produce this domain value. Re-parsing here would add work to every call
+    /// for a value that requires explicit construction with `Host::Domain(_)`.
     ///
-    /// No name is resolved here, ever. A host that `/etc/hosts` or DNS points at
-    /// `127.0.0.1` is still read as the characters it was written with, so it misses the
-    /// implicit set and goes through the proxy unless an entry names it. Chromium reads the
-    /// same way — `ProxyHostMatchingRules::Matches` takes a `GURL` and every rule under it
-    /// asks `url.host()` — and a lookup inside a predicate that runs per request would put
-    /// its latency and its failures there too.
+    /// No name resolution is performed. A host that `/etc/hosts` or DNS maps to `127.0.0.1`
+    /// is matched as text, so it misses the implicit set and uses the proxy unless an entry
+    /// matches it. Chromium matches the same way:`ProxyHostMatchingRules::Matches` takes
+    /// a `GURL` and its rules check `url.host()`. Resolving names in this per-request
+    /// predicate would add lookup latency and failures to each request.
     ///
     /// Ported `:port` rules never match `port = None` (Go). Under
     /// [`reversed_exceptions`](Self::reversed_exceptions), patterns are inclusion-only
     /// while [`rejected`](Self::rejected) is empty.
     ///
-    /// Entries are read **back to front**, and the first one that has something to say
-    /// answers: "Later rules override earlier rules … when mixing positive and negative
-    /// rules, evaluation order makes a difference"
-    /// (Chromium, `net/base/scheme_host_port_matcher.cc`; the expectation "comes from
-    /// WinInet (which is where `<-loopback>` comes from)",
-    /// `proxy_host_matching_rules_unittest.cc`). Order only ever matters because of
-    /// [`HostPattern::SubtractImplicit`], the one entry that takes a bypass away — so
-    /// `127.0.0.1;<-loopback>` proxies `127.0.0.1` and `<-loopback>;127.0.0.1` sends it
-    /// direct. With no entry deciding, the implicit set does: loopback and link-local
-    /// alike, and not inverted by `reversed_exceptions`, because an inclusion list that
-    /// never named loopback has not asked for loopback to be proxied.
+    /// Entries are evaluated **back to front**, and the first matching rule determines the
+    /// result: "Later rules override earlier rules … when mixing positive and negative
+    /// rules, evaluation order makes a difference" (Chromium,
+    /// `net/base/scheme_host_port_matcher.cc`; the expectation "comes from WinInet (which
+    /// is where `<-loopback>` comes from)", `proxy_host_matching_rules_unittest.cc`). Order
+    /// matters only with [`HostPattern::SubtractImplicit`], which removes a bypass:
+    /// `127.0.0.1;<-loopback>` proxies `127.0.0.1`, while `<-loopback>;127.0.0.1` sends it
+    /// direct. If no entry matches, the implicit set ([`implicit`](Self::implicit))
+    /// determines the result. It is not inverted by `reversed_exceptions`, because an
+    /// inclusion list that does not name loopback does not request proxying for loopback.
     ///
     /// [`exclude_simple_hostnames`](Self::exclude_simple_hostnames) is a switch and not an
-    /// entry, so it is not inverted either — unlike a [`HostPattern::Local`] entry, which
+    /// entry, so it is not inverted either, unlike a [`HostPattern::Local`] entry, which
     /// is; see [`excludes_simple_hostnames`](Self::excludes_simple_hostnames) for why that
-    /// changes the answer here. An IPv4-mapped IPv6 destination
-    /// (`::ffff:a.b.c.d`) is compared as the IPv4 address it maps, against CIDR and exact
-    /// patterns alike, and against the loopback/link-local switches.
+    /// changes the answer here. An IPv4-mapped IPv6 destination (`::ffff:a.b.c.d`) is
+    /// compared with the entries as the IPv4 address it maps while
+    /// [`ipv4_mapped_as_ipv4`](Self::ipv4_mapped_as_ipv4) is set, against CIDR and exact
+    /// patterns alike.
     ///
     /// ```
     /// # use proxy_watch::parse;
@@ -1110,6 +1364,9 @@ impl BypassRules {
     /// // Link-local destinations bypass even though the list above never mentions them.
     /// assert!(rules.matches_authority("169.254.1.1"));
     /// assert!(rules.matches_authority("[fe80::1]"));
+    /// // A Windows list carries WinINet's implicit set, which stops at `127.0.0.1`.
+    /// assert!(parse::proxy_override("").matches_authority("127.0.0.1"));
+    /// assert!(!parse::proxy_override("").matches_authority("127.0.0.2"));
     /// ```
     #[must_use]
     pub fn matches(&self, host: &Host, port: Option<u16>) -> bool {
@@ -1117,8 +1374,19 @@ impl BypassRules {
         if text.is_empty() {
             return false;
         }
-        let ip = host_ip(host);
-        let implicit = is_loopback(&text, ip) || is_link_local(ip);
+        let written = host_ip(host);
+        let reduce = self.ipv4_mapped_as_ipv4;
+        let ip = if reduce {
+            written.map(reduce_mapped)
+        } else {
+            written
+        };
+        let implicit = self.implicit.covers(&text, written);
+        let entry_text = if self.strip_trailing_dot {
+            text.strip_suffix('.').unwrap_or(&text)
+        } else {
+            &text
+        };
         // What a destination no entry names answers under `reversed_exceptions`: the list
         // is then the set that *uses* the proxy, so being absent from it is the bypass. A
         // rejected entry makes that set incomplete, and an incomplete inclusion list may
@@ -1127,7 +1395,7 @@ impl BypassRules {
 
         // Before the entries, and so before `reversed_exceptions` can invert it: this is a
         // switch, not a list entry. macOS is where it comes from and macOS has no reversed
-        // mode, so the combination has no reference to copy — but the shape does, and the
+        // mode, so the combination has no reference to copy, but the shape does, and the
         // list spelling `<local>` is a `HostPattern::Local` among the entries, is inverted,
         // and therefore answers the opposite. Both readings are right for what they are;
         // what would be wrong is treating them as one flag.
@@ -1135,11 +1403,16 @@ impl BypassRules {
         // The one entry that still overrides it is `<-loopback>`, because Chromium models
         // this switch as a rule *prepended* to the list
         // (`PrependRuleToBypassSimpleHostnames`, `proxy_config_service_mac.cc`) and so puts
-        // every entry after it. Only a dot-less name that is also in the implicit set —
-        // `localhost`, `loopback` — is reachable both ways; the rest of what the switch
+        // every entry after it. Only a dot-less host that is also in the implicit set
+        // (`localhost`, `[::1]`) is reachable both ways; the rest of what the switch
         // covers no negative entry can name.
+        //
+        // The test is the dot alone, so an IPv6 literal is simple here and an IPv4 one is
+        // not: CFNetwork was measured to bypass `[fe80::1]` and `[fec0::1]` under this
+        // switch and to proxy them under `<local>`, which keeps Chromium's rule of no IP
+        // literals at all.
         if self.exclude_simple_hostnames
-            && is_simple_host_name(&text, ip)
+            && !text.contains('.')
             && (self.bypass_loopback() || !implicit)
         {
             return true;
@@ -1150,7 +1423,17 @@ impl BypassRules {
                 if implicit {
                     return unnamed;
                 }
-            } else if pattern.matches(&text, ip, port) {
+            } else if pattern.matches(
+                // `<local>` asks whether the name has a dot, and a trailing one counts.
+                if matches!(pattern, HostPattern::Local) {
+                    &text
+                } else {
+                    entry_text
+                },
+                ip,
+                port,
+                reduce,
+            ) {
                 return !self.reversed_exceptions;
             }
         }
@@ -1161,11 +1444,11 @@ impl BypassRules {
     ///
     /// Prefer this over [`matches`](Self::matches) whenever the destination is a `Url`: it is
     /// the only entry point that reads [`require_explicit_port`](Self::require_explicit_port),
-    /// and getting that wrong by hand is silent — a GNOME `ignore-hosts` of `example.com:80`
+    /// and getting that wrong by hand is silent: a GNOME `ignore-hosts` of `example.com:80`
     /// asked about with `port_or_known_default` reports a bypass GNOME does not have. This
     /// crate's own `resolve` goes through here.
     ///
-    /// A URL with no host to compare — `data:`, `mailto:`, or one whose host was emptied —
+    /// A URL with no host to compare (`data:`, `mailto:`, or one whose host was emptied)
     /// is reported as "does not bypass", the same reading as an unparseable authority in
     /// [`matches_authority`](Self::matches_authority). It is not a statement that such a URL
     /// needs a proxy; a caller that routes hostless URLs direct should say so before asking.
@@ -1183,8 +1466,8 @@ impl BypassRules {
         let Some(host) = crate::endpoint::request_host(url) else {
             return false;
         };
-        // The one place the flag is read. `port_or_known_default` is the majority reading —
-        // a rule written `example.com:80` is meant for the HTTP port whether or not the URL
+        // The flag is read only here. `port_or_known_default` is the majority reading: a
+        // rule written `example.com:80` is meant for the HTTP port whether or not the URL
         // spelled it out, and Windows was measured agreeing: a `ProxyOverride` of `host:80`
         // bypasses a portless `http://host/`.
         let port = if self.require_explicit_port {
@@ -1223,13 +1506,8 @@ impl BypassRules {
 // brackets are treated as an IPv6 literal attempt, not rejected here. `*` is not
 // forbidden, which is what leaves room for the glob spelling.
 //
-// One widening, deliberate rather than overlooked: `char::is_control` is Unicode's `Cc`,
-// so it also refuses U+0080..=U+009F, which that list does not name. What it buys is the
-// reason and not the verdict: `is_ascii_control` here leaves `a\u{86}b.example`
-// to the punycode step below, which refuses it too, as text "that is not a valid
-// internationalised domain name". Naming the character instead is the difference between a
-// writer who can find the byte they pasted and one who cannot. (U+0085 and U+00A0 reach
-// neither test: `char::is_whitespace` counts them, and the whitespace guard is first.)
+// `char::is_control` also catches U+0080..=U+009F. These inputs fail punycode anyway, but
+// naming the control character in the error helps identify it. Whitespace is checked first.
 fn is_forbidden_host_char(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -1258,9 +1536,7 @@ fn idna_ascii(host_text: &str) -> Result<String, String> {
             out.push_str(label);
             continue;
         }
-        // Punycode would swallow the `*` into the encoded label and the glob would stop
-        // being one. A rule that quietly stops meaning what it says is the thing this
-        // conversion exists to prevent, so say so instead.
+        // Reject `*` here because punycode would encode it and change the glob's meaning.
         if label.contains('*') {
             return Err(
                 "entry mixes a '*' glob with non-ASCII text in one label, which has no \
@@ -1268,11 +1544,8 @@ fn idna_ascii(host_text: &str) -> Result<String, String> {
                     .to_owned(),
             );
         }
-        // Without the loan `１２３` normalises to `123` and comes back `Ipv4`, and the entry
-        // dies — while the destination side reads `１２３.example` as the name it is, because
-        // there the digits are not the last label. Converting is not judging: whether the
-        // ASCII text denotes a name or an address is settled afterwards by `parse_host`,
-        // over the whole host part, where the address reading is the right one.
+        // The loan keeps `１２３` a label rather than the IPv4 address `123`; `parse_host`
+        // decides afterwards, over the whole host, whether it is a name or an address.
         match Host::parse(&format!("{label}{LOAN}")) {
             // The loan is ASCII and lowercase, so it survives the round trip unchanged.
             Ok(Host::Domain(ascii)) if ascii.ends_with(LOAN) => {
@@ -1297,10 +1570,62 @@ fn port_matches(rule_port: Option<u16>, port: Option<u16>) -> bool {
     }
 }
 
+// `g_inet_address_mask_new_from_string`: an address `inet_pton` reads, optionally `/` and
+// a decimal prefix no longer than the family's, with no bit set past the prefix.
+fn glib_mask(entry: &str) -> Option<IpNet> {
+    let (address, prefix) = match entry.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix)),
+        None => (entry, None),
+    };
+    let address: IpAddr = address.parse().ok()?;
+    let full = if address.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix {
+        Some(text) if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+            text.parse::<u8>().ok()?
+        }
+        Some(_) => return None,
+        None => full,
+    };
+    let net = IpNet::new(address, prefix).ok()?;
+    (net.trunc().addr() == address).then_some(net)
+}
+
+// The name `reparse_ignore_hosts` stores for an entry that is not a mask: a bracketed
+// address needs a port after it, a single `:` splits off a decimal port, and a leading `*.`
+// or `.` comes off unless the rest is an address.
+fn glib_name(entry: &str) -> Result<&str, &'static str> {
+    let (name, port) = if let Some(inner) = entry.strip_prefix('[') {
+        let (address, rest) = inner
+            .split_once(']')
+            .ok_or("entry opens a bracket it does not close")?;
+        let port = rest.strip_prefix(':').ok_or(
+            "entry is a bracketed address with no port, which GLib refuses (write it \
+             without brackets, or as [address]:port)",
+        )?;
+        (address, Some(port))
+    } else {
+        match entry.split_once(':') {
+            Some((name, port)) if !port.contains(':') => (name, Some(port)),
+            _ => (entry, None),
+        }
+    };
+    if port.is_some_and(|port| !port.bytes().all(|b| b.is_ascii_digit())) {
+        return Err("entry's port is not a number");
+    }
+    if name.parse::<IpAddr>().is_ok() {
+        return Ok(name);
+    }
+    Ok(name
+        .strip_prefix("*.")
+        .or_else(|| name.strip_prefix('.'))
+        .unwrap_or(name))
+}
+
+// The loopback half of `ImplicitBypass::Broad`; the other sets name their members outright.
 fn is_loopback(host_text: &str, ip: Option<IpAddr>) -> bool {
     if let Some(ip) = ip {
-        // `127.0.0.0/8` and `::1`. `::ffff:127.0.0.1` arrives as `127.0.0.1` because
-        // `host_ip` reduced it — see there for why every numeric rule gets it that way.
+        // `127.0.0.0/8` and `::1`. `::ffff:127.0.0.1` arrives as `127.0.0.1`, reduced by
+        // `ImplicitBypass::covers`.
         return ip.is_loopback();
     }
     // WinINet bypasses `localhost` and `loopback` by name; Go bypasses `localhost`.
@@ -1308,30 +1633,29 @@ fn is_loopback(host_text: &str, ip: Option<IpAddr>) -> bool {
     // dot as local (`net/base/url_util.cc`, `IsLocalHostname`); a trailing dot
     // is stripped before comparing so `localhost.` and `app.localhost.` match too, the
     // same way DNS treats a trailing dot as denoting the root and not a distinct name.
+    // Neither WinINet nor CFNetwork does either, which is why their sets are their own.
     let name = host_text.strip_suffix('.').unwrap_or(host_text);
     name == "localhost" || name == "loopback" || name.ends_with(".localhost")
 }
 
 // Whether `ip` is link-local: IPv4 `169.254.0.0/16` (APIPA) or IPv6 `fe80::/10`.
-// `::ffff:169.254.0.0/112` is the first of those, already reduced by `host_ip`.
+// `::ffff:169.254.0.0/112` is the first of those only once `reduce_mapped` has run, which
+// `ImplicitBypass::Broad` does and `ImplicitBypass::WinInet` does not.
 //
-// Read as one implicit set together with [`is_loopback`], so
+// Read as one implicit set together with the loopback members, so
 // [`NO_LOOPBACK_TOKEN`] clears both at once. That is what the token means upstream:
 // Chromium's `MatchesImplicitRules` is `IsLocalhost || IsIPv4MappedLoopback ||
 // IsLinkLocalIP` in one expression, and `<-loopback>` is the rule that subtracts the whole
-// of it — "The name <-loopback> is not a very precise name (as the implicit rules cover
+// of it: "The name <-loopback> is not a very precise name (as the implicit rules cover
 // more than strictly loopback addresses), however this is the name that is used on Windows
 // so re-used here" (`net/proxy_resolution/proxy_host_matching_rules.cc`, the file
 // `proxy_bypass_rules.cc` became). The same file records Windows' own implicit set as
-// "localhost, loopback, 127.0.0.1, [::1], 169.254/16, [FE80::]/10". The flag here is named
-// for the token that clears it, not for half of what the token covers.
+// "localhost, loopback, 127.0.0.1, [::1], 169.254/16, [FE80::]/10", which is
+// `ImplicitBypass::WinInet` member for member, measured against WinINet itself. The flag
+// here is named for the token that clears it, not for half of what the token covers.
 //
-// Holding the two apart, and calling that a deliberate divergence, is the tempting reading:
-// a proxy cannot reach an address that exists only on the client's own link. `169.254.169.254`
-// refutes it: the cloud instance-metadata endpoint is link-local, a proxy on the same host
-// reaches it, and routing it through an inspecting proxy is one of the reasons `<-loopback>`
-// gets set at all. Answering Direct for it is fail-open on the one destination the setting
-// most often exists to catch.
+// A proxy on the same host can reach link-local `169.254.169.254`; ignoring `<-loopback>`
+// for link-local addresses can send instance-metadata traffic direct.
 fn is_link_local(ip: Option<IpAddr>) -> bool {
     match ip {
         Some(IpAddr::V4(v4)) => v4.is_link_local(),
@@ -1342,12 +1666,10 @@ fn is_link_local(ip: Option<IpAddr>) -> bool {
 
 // Chromium's `BypassSimpleHostnamesRule` (`proxy_host_matching_rules.cc:80`): a name with no
 // period, and never an IP literal. A trailing dot counts as "has a period", so it is not stripped
-// first — unlike the `Domain` arm, which strips one from the same `host_text`.
+// first, unlike the `Domain` arm, which strips one from the same `host_text`.
 //
-// One function for the two spellings of the rule, the `exclude_simple_hostnames` switch
-// and a `HostPattern::Local` list entry, because they answer the same question about a
-// host even though `matches` consults them at different points and under different
-// inversion. Written twice they could only drift.
+// This is `HostPattern::Local`'s test. The `exclude_simple_hostnames` switch tests the dot
+// alone, because CFNetwork counts a dot-less IPv6 literal as simple; see `matches`.
 fn is_simple_host_name(host_text: &str, ip: Option<IpAddr>) -> bool {
     ip.is_none() && !host_text.contains('.')
 }
@@ -1357,14 +1679,9 @@ fn is_simple_host_name(host_text: &str, ip: Option<IpAddr>) -> bool {
 // before `net.ParseIP` so `ipMatch` compares an unbracketed address.
 fn host_key(host: &Host) -> String {
     match host {
-        // `Host::parse` punycodes a Unicode name, and every `Host` this crate builds itself
-        // came from it — but `matches` is public and takes the `Host`, so a caller can hand
-        // over a `Host::Domain` that never went through it. Converting here rather than
-        // trusting the caller is what keeps `matches` and `matches_authority` answering
-        // alike; the rule side is converted at parse time by `idna_ascii`, so an unconverted
-        // destination would silently match nothing. A name with no punycode spelling keeps
-        // its own text and matches nothing, which is `matches_authority`'s own direction for
-        // input it cannot make sense of.
+        // Public `matches` accepts caller-built `Host::Domain` values. Convert them like
+        // `matches_authority` does so Unicode names meet punycoded rules; an unconvertible
+        // name retains its text and matches nothing.
         Host::Domain(domain) if !domain.is_ascii() => idna_ascii(domain)
             .unwrap_or_else(|_| domain.clone())
             .to_ascii_lowercase(),
@@ -1376,11 +1693,8 @@ fn host_key(host: &Host) -> String {
 
 // `str::strip_suffix`, comparing ASCII case-insensitively.
 //
-// Allocation-free, which is the reason it exists rather than a `to_ascii_lowercase` on
-// either side: this runs once per rule per destination. The boundary check is what keeps
-// the slicing sound — a split point inside a multi-byte character would panic, and `false`
-// is the right answer there anyway, because a `str`'s first byte is never a continuation
-// byte and so no suffix can start there.
+// Allocation-free because it runs once per rule per destination. A split inside a
+// multi-byte character would panic, so the boundary check returns `false` before slicing.
 fn strip_suffix_ascii_case<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
     let split = text.len().checked_sub(suffix.len())?;
     if !text.is_char_boundary(split) {
@@ -1398,32 +1712,44 @@ fn host_display(host: &Host) -> String {
     }
 }
 
-// The address a host denotes, with `::ffff:a.b.c.d` reduced to the IPv4 address it maps.
-//
-// Every numeric comparison in this file goes through here, so the reduction happens once
-// instead of at each of them — including `is_loopback` and `is_link_local`, which is why
-// neither needs a mapped-spelling arm of its own. Both references reduce too, in their own
-// idiom.
+// The address a host denotes, in the family it was written in.
 fn host_ip(host: &Host) -> Option<IpAddr> {
     match host {
         Host::Domain(_) => None,
         Host::Ipv4(ip) => Some(IpAddr::V4(*ip)),
-        Host::Ipv6(ip) => Some(ip.to_ipv4_mapped().map_or(IpAddr::V6(*ip), IpAddr::V4)),
+        Host::Ipv6(ip) => Some(IpAddr::V6(*ip)),
     }
 }
 
-// The rule-side half of [`host_ip`]: `::ffff:10.0.0.0/104` is the IPv4 block `10.0.0.0/8`.
+// `::ffff:a.b.c.d` reduced to the IPv4 address it maps; every other address unchanged.
 //
-// Without this the rule is dead and says so nowhere. Every destination reaches
-// [`HostPattern::matches`] already reduced by [`host_ip`], so it arrives as an
-// `IpAddr::V4`, and `IpNet`'s `contains` is false across families — `10.0.0.1` and
-// `[::ffff:10.0.0.1]` both miss a mapped-spelling rule that names exactly them. Nothing
-// records the miss, because the entry parsed; under
-// [`BypassRules::reversed_exceptions`] that is the fail-open direction this file rejects
-// for `10.0.0/8` and `[2001:db8::zz]` a few lines apart.
+// Applied once in `BypassRules::matches` rather than at each comparison, so `is_loopback`
+// and `is_link_local` need no mapped-spelling arm of their own. Chromium and Go both
+// reduce, in their own idiom; GLib and Qt do not, which is what
+// `BypassRules::ipv4_mapped_as_ipv4` switches.
+fn reduce_mapped(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
+}
+
+// `127.0.0.1` or `::1` as written: the two loopback addresses WinINet and CFNetwork bypass,
+// where `Ipv4Addr::is_loopback` would take the whole `127.0.0.0/8`.
+fn is_loopback_address(ip: IpAddr) -> bool {
+    ip == IpAddr::V4(Ipv4Addr::LOCALHOST) || ip == IpAddr::V6(Ipv6Addr::LOCALHOST)
+}
+
+// The rule-side half of [`reduce_mapped`]: `::ffff:10.0.0.0/104` is the IPv4 block
+// `10.0.0.0/8`. Applied at match time under the same switch, so a source whose resolver
+// compares one family only keeps the block it wrote.
+//
+// With the switch set, destinations reach `contains` as IPv4; a mapped rule must also be
+// reduced or it matches neither spelling. Under `reversed_exceptions`, this silent miss
+// sends traffic direct around the proxy.
 //
 // Only a net that lies wholly inside `::ffff:0:0/96` converts. A shorter prefix covers
-// unmapped IPv6 as well, so it is an IPv6 rule about IPv6 destinations — and mapped
+// unmapped IPv6 as well, so it is an IPv6 rule about IPv6 destinations, and mapped
 // destinations are not those, by the same reduction.
 fn reduce_mapped_net(net: IpNet) -> IpNet {
     let IpNet::V6(v6) = net else {

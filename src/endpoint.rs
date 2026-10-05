@@ -81,22 +81,23 @@ impl fmt::Display for Scheme {
 /// Only ever a *hint*: most operating system sources (the Windows registry in
 /// particular) store a bare `host:port` and leave the protocol implicit.
 ///
-/// Where a source names SOCKS without a version — GNOME's `socks` child, KDE's `socksProxy`
-/// and macOS's `SOCKSProxy` — this crate reports [`ProxyScheme::Socks5`]. That is a
+/// Where a source names SOCKS without a version (GNOME's `socks` child, KDE's `socksProxy`
+/// and macOS's `SOCKSProxy`) this crate reports [`ProxyScheme::Socks5`]. That is a
 /// compatibility choice and not something read out of the setting: Chromium makes the same
 /// one and calls it a "policy decision" where it makes it, in
-/// `proxy_config_service_linux.cc`. GIO chose otherwise, treating such a setting as standing
-/// for SOCKS5, SOCKS4a and SOCKS4 alike, so a proxy that speaks only SOCKS4 is reachable from
-/// a GIO application and not from a caller that takes this hint literally.
+/// `proxy_config_service_linux.cc`. GIO chose otherwise, treating such a setting as
+/// standing for SOCKS5, SOCKS4a and SOCKS4 alike, so a proxy that speaks only SOCKS4 is
+/// reachable from a GIO application and not from a caller that takes this hint literally.
 ///
 /// A version written into the value is kept: `socks4://proxy.example.com` in GNOME's `host`
-/// child or KDE's `socksProxy` reads as [`Socks4`](ProxyScheme::Socks4), because both readers
-/// here apply their default only where the value named nothing. Chromium reads it the same way
-/// — "we default to socks 5, but if the user specifically set it to `socks4://`, then use
-/// that", in `FixupProxyHostScheme`. The native stacks do not: glib-networking formats
-/// `socks://%s:%u` out of the host key verbatim, and KF5-era KIO re-glues a bare `socks://`
-/// over whatever scheme it finds. So the spelling is an escape hatch out of *this crate's*
-/// default, not out of the setting — the platform's own resolver still sees SOCKS5, or nonsense.
+/// child or KDE's `socksProxy` reads as [`Socks4`](ProxyScheme::Socks4), because the
+/// readers apply their default only when the value specifies no version. Chromium reads it
+/// the same way: "we default to socks 5, but if the user specifically set it to
+/// `socks4://`, then use that", in `FixupProxyHostScheme`. The native stacks do not:
+/// glib-networking formats `socks://%s:%u` from the host key verbatim, and KF5-era KIO
+/// replaces whatever scheme it finds with a bare `socks://`. This spelling is an escape
+/// hatch from this crate's default; the platform's own resolver still sees SOCKS5 or an
+/// invalid value.
 ///
 /// The same word can mean different versions in different sources: a `socks://` URI is SOCKS5,
 /// while the Windows registry's `socks=host:port` is read as SOCKS4. Microsoft gives that token
@@ -170,7 +171,7 @@ impl FromStr for ProxyScheme {
             "socks" | "socks5" => Ok(ProxyScheme::Socks5),
             "socks4a" => Ok(ProxyScheme::Socks4a),
             "socks5h" => Ok(ProxyScheme::Socks5h),
-            // Redact: `ProxyEndpoint::parse` can hand `alice:pass@http` here — or
+            // Redact: `ProxyEndpoint::parse` can hand `alice:pass@http` here, or
             // `bob:pw`, from `bob:pw://host`, where no `@` marks the userinfo.
             other => Err(Error::UnsupportedProxyScheme(
                 crate::util::redact_offending_token(other),
@@ -180,7 +181,7 @@ impl FromStr for ProxyScheme {
 }
 
 /// Concrete proxy address. IPv6 brackets resolved at parse; use [`authority`](Self::authority).
-/// `#[non_exhaustive]` — construct via [`new`](Self::new) / [`parse`](Self::parse).
+/// `#[non_exhaustive]`: construct via [`new`](Self::new) / [`parse`](Self::parse).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ProxyEndpoint {
@@ -228,8 +229,10 @@ impl ProxyEndpoint {
     /// `scheme://` one does. The *last* `@` is the delimiter, as in WHATWG's authority
     /// state, so `user@corp.example:pw@proxy:8080` keeps an email address as the user name.
     /// Port: explicit, else scheme default, else `default_port`.
-    /// A path, query or fragment is accepted and dropped, so `http://proxy:8080/` and
+    /// A path, query or fragment is dropped, so `http://proxy:8080/` and
     /// `http://proxy:8080` are the same endpoint; nothing after the authority survives.
+    /// One holding an `@` is refused with [`Error::InvalidProxyServer`]: the host in front
+    /// of it is then the start of a password that held a `/`, `?` or `#`.
     ///
     /// ```
     /// # use proxy_watch::{ProxyEndpoint, ProxyScheme};
@@ -246,7 +249,7 @@ impl ProxyEndpoint {
     /// model. Never [`Error::InvalidProxyUrl`]: that one belongs to the callers that
     /// parse an `AutoConfigURL`-style value, not to an address.
     ///
-    /// U+FFFD anywhere in the authority — credentials included — is one of the
+    /// U+FFFD anywhere in the authority (credentials included) is one of the
     /// unusable addresses. It is what a lossy byte-to-text conversion leaves behind, and
     /// this crate's platform readers convert that way so that a value they could not decode
     /// is refused here instead of reading as unset. A path or query is dropped before the
@@ -261,25 +264,44 @@ impl ProxyEndpoint {
             Some((scheme, rest)) => (Some(scheme.parse::<ProxyScheme>()?), rest),
             None => (None, trimmed),
         };
-        // Cut the path, query and fragment — and do it *before* the userinfo split below,
-        // not after. `@` is an ordinary path character, so `http://bob:pw/x@proxy.corp:8080`
-        // would otherwise `rsplit_once` into userinfo `bob:pw/x` and a host taken from the
-        // path: a destination the writer never named, reached because a `/` came first.
+        // Cut the path, query and fragment, and do it *before* the userinfo split below,
+        // not after. `@` is an ordinary path character, so
+        // `http://bob:pw/x@proxy.corp:8080` would otherwise `rsplit_once` into userinfo
+        // `bob:pw/x` and a host taken from the path: a destination the writer never named,
+        // reached because a `/` came first.
         // `trace::tests::safe_error_does_not_leak_credentials_from_real_parsers` is what
         // fails if these two lines change places.
-        let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        //
+        // An `@` in what the cut drops is refused rather than dropped with it. The writer
+        // who puts one there almost always meant a password holding the cut character, and
+        // the authority left in front of it is then the user name and the start of the
+        // password: `http://bob:123/x@proxy.corp:8080` is host `bob`, port 123, a machine
+        // not configured as the proxy. A password whose start is not a port fails
+        // anyway; one that is all digits, or no password at all
+        // (`http://bob/x@proxy.corp`), parsed.
+        let (rest, dropped) = match rest.find(['/', '?', '#']) {
+            Some(cut) => rest.split_at(cut),
+            None => (rest, ""),
+        };
+        if dropped.contains('@') {
+            return Err(Error::proxy_server(
+                input,
+                "an '@' follows a '/', '?' or '#', so the host before it is the start of a \
+                 user name or password rather than the proxy (percent-encode the character \
+                 in the credentials: %2F, %3F, %23)",
+            ));
+        }
 
-        // Four readers convert their bytes the *lossy* way on purpose — `env::readable_var`,
-        // `sys::linux::desktop::text_if_set`, `kioslaverc`'s `ProxyType = 4` lookup and
-        // `sys::win::ffi::string_value` — and every one of them says the same thing about why:
-        // `into_string().ok()` cannot tell "unset" from "set to bytes that are not text", so
-        // the value is kept, mangled, and refused *here* instead of vanishing. Only the host
-        // half ever made that true. `parse_host` does refuse U+FFFD, but `parse_userinfo`
-        // cannot fail, so a `0xFF` in a password parsed clean: the crate then offered the proxy
-        // a secret nobody set, an authentication failure with no `rejected` entry anywhere to
-        // name the value that changed, and one `ProxyAuth`'s `Debug` masks out of the snapshot
-        // that might have shown it. `util::percent_decode` refuses to manufacture the same
-        // character for the same reason, and this is the other end of that rule.
+        // Readers of proxy values convert bytes lossily: `env::readable_var`,
+        // `kioslaverc`'s `ProxyType = 4` lookup and `sys::win::ffi::string_value` use this
+        // because `into_string().ok()` cannot distinguish unset values from non-text bytes.
+        // The mangled value is retained and refused here. Checking only `parse_host` is
+        // insufficient: it refuses U+FFFD, but `parse_userinfo` cannot fail. A `0xFF` in a
+        // password would otherwise produce a secret the administrator did not set, causing
+        // authentication failure without a `rejected` entry identifying the changed value,
+        // and `ProxyAuth`'s `Debug` masks it out of the snapshot that could show it.
+        // `util::percent_decode` refuses to manufacture the same character for the same
+        // reason.
         //
         // On the authority, not on `input`: a path, query or fragment is dropped whole, so
         // mangling there costs nothing the answer is built from.
@@ -338,8 +360,8 @@ impl ProxyEndpoint {
 impl fmt::Display for ProxyEndpoint {
     // Renders `host:port`, and prefixes `scheme://` only when a hint was parsed out. The
     // prefix is the exception, not the shape: most sources store a bare authority, which
-    // is why [`ProxyScheme`] is a hint in the first place. Never the credentials — see
-    // [`ProxyAuth`]'s own documentation for why.
+    // is why [`ProxyScheme`] is a hint in the first place. Never the credentials (see
+    // [`ProxyAuth`]'s own documentation for why).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(scheme) = self.scheme_hint {
             write!(f, "{scheme}://")?;
@@ -350,37 +372,34 @@ impl fmt::Display for ProxyEndpoint {
 
 /// Whether a given [`Scheme`] uses a proxy at all.
 ///
-/// Three answers, not two. `Disabled` exists so that "this scheme explicitly does *not*
-/// use a proxy" can be distinguished from "this scheme was not configured" — the former
-/// suppresses the [`Scheme::All`] fallback, the latter does not. [`Unusable`](Self::Unusable)
-/// is the third: the scheme *was* configured, and what it was configured with could not be
-/// read. Absence therefore means only "the platform said nothing about this scheme".
+/// `Disabled` distinguishes a scheme explicitly configured without a proxy from an
+/// unconfigured scheme: it suppresses the [`Scheme::All`] fallback, while an unconfigured
+/// scheme allows it. [`Unusable`](Self::Unusable) records a configured scheme whose proxy
+/// could not be read. Absence means the platform has no setting for the scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProxyEntry {
     /// Route this scheme through the given proxy.
     Use(ProxyEndpoint),
-    /// The platform named this scheme and gave it no proxy — an off switch, or a slot
+    /// The platform named this scheme and gave it no proxy: an off switch, or a slot
     /// left blank.
     Disabled,
     /// The platform named this scheme and gave it a proxy that could not be read.
     ///
-    /// This is the record of the drop, not an answer: routing the request would need an
-    /// endpoint there is none of, and answering [`Disabled`](Self::Disabled) would claim the
-    /// platform wanted a direct connection when it wanted a proxy nobody can now name. Under
-    /// the `resolve` feature it becomes
+    /// Routing requires an endpoint, which is unavailable here. Returning
+    /// [`Disabled`](Self::Disabled) would incorrectly treat an unreadable proxy setting as
+    /// a request for a direct connection. Under the `resolve` feature this becomes
     /// [`Error::ProxyEntryUnusable`](crate::Error::ProxyEntryUnusable).
     ///
-    /// Every lookup treats it as the last resort — see
-    /// [`ProxyMode::entry_for`](crate::ProxyMode::entry_for). A live [`Scheme::All`] is an
-    /// answer the platform did configure, so it still wins; only when nothing else covers
-    /// the scheme does the record answer.
+    /// Every lookup uses it only when no other entry covers the scheme; see
+    /// [`ProxyMode::entry_for`](crate::ProxyMode::entry_for). A usable [`Scheme::All`]
+    /// takes precedence because it supplies a usable configured fallback.
     Unusable(crate::diagnostic::RejectedValue),
 }
 
 impl ProxyEntry {
     /// The endpoint, or `None` for [`Disabled`](Self::Disabled) and
-    /// [`Unusable`](Self::Unusable) alike — neither has one, which is why a caller that
+    /// [`Unusable`](Self::Unusable) alike; neither has one, which is why a caller that
     /// needs to tell "go direct" from "the setting was lost" asks
     /// [`rejected`](Self::rejected) rather than this.
     #[must_use]
@@ -411,7 +430,7 @@ impl ProxyEntry {
 // Parse a URL host, accepting bracketed and bare IPv6 literals.
 //
 // Both failure messages go into an [`Error`] `reason`, which `crate::trace::SafeError`
-// prints in full, so neither echoes `text` unconditionally — see
+// prints in full, so neither echoes `text` unconditionally; see
 // [`quote_if_not_credential_shaped`] for what arrives here that is not a host at all.
 pub(crate) fn parse_host(text: &str) -> Result<Host, String> {
     let text = text.trim();
@@ -434,10 +453,10 @@ pub(crate) fn parse_host(text: &str) -> Result<Host, String> {
 }
 
 // The host a request URL names, or `None` if it names none. Every "does this URL have a
-// host?" question in the crate comes through here rather than to [`Url::host`], which answers
-// `Some(Host::Domain(""))` for a URL whose host was emptied — `set_host(None)` on a
-// non-special scheme produces exactly that (url 2.5.8; special schemes refuse it with
-// `EmptyHost`). Such a URL has nothing to connect to, so it is hostless here.
+// host?" question in the crate comes through here rather than to [`Url::host`], which
+// answers `Some(Host::Domain(""))` for a URL whose host was emptied: `set_host(None)` on a
+// non-special scheme produces that (url 2.5.8; special schemes refuse it with `EmptyHost`).
+// Such a URL has nothing to connect to, so it is hostless here.
 //
 // Lives here rather than beside its first caller in `resolve` because `BypassRules` asks it
 // too, and `resolve` is behind a feature while `BypassRules` is not.
@@ -466,11 +485,12 @@ pub(crate) fn request_host(url: &Url) -> Option<Host> {
 
 fn parse_userinfo(userinfo: &str) -> ProxyAuth {
     // A literal `:` and nothing else. Percent-encoding a reserved character is how RFC 3986
-    // section 2.2 spells "this is data, not the delimiter", so `alice%3Ahunter2` is one user
-    // name that happens to contain a colon — `url` (this crate's own dependency) and Python's
-    // `urllib` both read it that way. Splitting it here handed the caller a user name that was
-    // never one and a password that never existed. The colon then surviving into `username` is
-    // masked by [`ProxyAuth`]'s `Debug`, which is what keeps it out of a snapshot.
+    // section 2.2 spells "this is data, not the delimiter", so `alice%3Ahunter2` is one
+    // user name that happens to contain a colon; `url` (this crate's own dependency) and
+    // Python's `urllib` both read it that way. Splitting it here would give the caller an
+    // unintended user name and a password absent from the input. The colon then surviving
+    // into `username` is masked by [`ProxyAuth`]'s `Debug`, and that keeps it out of a
+    // snapshot.
     match userinfo.split_once(':') {
         Some((user, password)) => {
             ProxyAuth::new(percent_decode(user), Some(percent_decode(password)))

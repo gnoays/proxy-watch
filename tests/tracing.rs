@@ -1,14 +1,13 @@
 //! The `tracing` feature seen from outside the crate.
 //!
-//! The renderers and the secrecy invariant are unit tested in
-//! `src/trace.rs`, where a snapshot can be *constructed* with a password in it. What can
-//! only be checked from here is the wiring: that a real [`ProxyWatcher`] on this machine
-//! actually produces the events, and that the ones written **from the watcher thread**
-//! reach a subscriber too — which needs the global default rather than the thread-local
-//! one, and is therefore easy to get wrong.
+//! The renderers and the secrecy invariant are unit tested in `src/trace.rs`, where a
+//! snapshot can be *constructed* with a password in it. What can only be checked from here
+//! is the wiring: that a real [`ProxyWatcher`] on this machine produces the events, and
+//! that the ones written **from the watcher thread** reach a subscriber too, which needs
+//! the global default rather than the thread-local one, and is therefore easy to get wrong.
 //!
 //! `tracing::subscriber::set_global_default` can only succeed once per process, so this
-//! file deliberately contains a single test.
+//! file contains a single test.
 
 #![cfg(feature = "tracing")]
 
@@ -89,14 +88,14 @@ fn a_real_watcher_reports_its_lifecycle_and_its_first_snapshot() {
         text.contains("watching the system proxy configuration"),
         "{text}"
     );
-    // Written from inside the watcher thread — the point of the global subscriber.
+    // Written from inside the watcher thread, which is why the subscriber is global.
     assert!(text.contains("the watcher thread finished"), "{text}");
 
     // Whatever this machine is configured with, a rendered summary is one of the five
     // shapes `ModeSummary` produces (`direct` / `manual(` / `pac(` / `pac-inline(` /
     // `wpad`) and never a `ProxyConfig` debug dump. The trailing `(` is what keeps the
-    // two PAC shapes apart — `current=pac(` is not a substring of `current=pac-inline(`
-    // — so the order of the list below does not matter.
+    // two PAC shapes apart: `current=pac(` is not a substring of `current=pac-inline(`,
+    // so the order of the list below does not matter.
     assert!(!text.contains("ProxyConfig {"), "{text}");
     assert!(!text.contains("ProxyAuth {"), "{text}");
     assert!(

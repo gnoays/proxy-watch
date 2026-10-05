@@ -8,9 +8,9 @@
 //! | `WARN` | recoverable failures the caller is not already handling |
 //! | `ERROR` | watch cannot continue; the backend thread panicked |
 //!
-//! Configurations are only logged via the secret-free summary renderers below — never
+//! Configurations are only logged via the secret-free summary renderers below: never
 //! `{:?}`. Documented recoveries (e.g. WinHTTP IE → plain registry) use `DEBUG`, not
-//! `WARN`. Passwords: `MaskedUrl` / PacInline len+hash / `SafeError` — never `{:?}` a
+//! `WARN`. Passwords: `MaskedUrl` / PacInline len+hash / `SafeError`: never `{:?}` a
 //! whole [`ProxyConfig`].
 
 #![allow(unused_macros)]
@@ -71,10 +71,11 @@ use crate::config::ProxyConfig;
 
 // The `INFO` line for a transition [`Shared::emit`](crate::watch::Shared::emit) publishes.
 //
-// Do not split this into two steps — render under the queue mutex, log after releasing it.
-// The split buys nothing that `info!` does not already do — `%` formats lazily and the
-// macro asks the subscriber itself — and it puts the level filter, which is consumer code,
-// under the lock. Both halves run after the unlock, so there is nothing to carry across it.
+// Do not split this into two steps: render under the queue mutex, log after releasing it.
+// The split adds no behavior beyond what `info!` already provides (`%` formats lazily and
+// the macro asks the subscriber itself), and it puts the level filter, which is consumer
+// code, under the lock. Both halves run after the unlock, so there is nothing to carry
+// across it.
 #[cfg(feature = "tracing")]
 pub(crate) fn changed(previous: &ProxyConfig, current: &ProxyConfig) {
     ::tracing::info!(
@@ -128,7 +129,7 @@ pub(crate) fn pac_alert(_message: &str) {}
 
 // ---------------------------------------------------------------------------
 // The renderers. None of them is compiled without the feature, so a build without it
-// cannot keep a formatting cost — or a leak — around by accident.
+// cannot keep a formatting cost (or a leak) around by accident.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "tracing")]
@@ -143,6 +144,9 @@ mod render {
     use crate::mode::ProxyMode;
     use crate::util::MASK;
 
+    // A URL with its password masked. The query prints as it is: nothing about a query
+    // parameter's shape says it is a secret, and the PAC URL is what tells two
+    // configurations apart.
     pub(crate) struct MaskedUrl<'a>(pub(crate) &'a Url);
 
     impl fmt::Display for MaskedUrl<'_> {
@@ -150,20 +154,34 @@ mod render {
             let url = self.0;
             // Asking first whether there is a host, because `Url::password` slices from the
             // userinfo delimiter to the host and an empty host puts those two the wrong way
-            // round. `socks5://:8080/p` — a shape `Url::parse` refuses but
+            // round. `socks5://:8080/p` (a shape `Url::parse` refuses but
             // `set_host(Some(""))` builds on a non-special scheme, and `ProxyMode::Pac`
-            // carries whatever `Url` a caller hands it — panics inside that method, in
+            // carries whatever `Url` a caller hands it) panics inside that method, in
             // release as much as in debug. The rebuild below has nothing to do for those
             // anyway: it writes an authority out of parts that are not there.
             if url.host_str().is_none_or(str::is_empty) || url.password().is_none() {
                 // Not `url.as_str()`: `password()` is `None` for a percent-encoded
                 // delimiter (`alice%3Ahunter2@`), because WHATWG only splits userinfo on
-                // a literal `:` — so printing verbatim here would log the secret
+                // a literal `:`, so printing verbatim here would log the secret
                 // (`a_percent_encoded_password_is_still_masked`).
                 // `redact_userinfo` borrows unchanged when there is nothing shaped like
                 // credentials in the string at all, which is the overwhelmingly common
                 // case, so the normal path still allocates nothing.
-                return f.write_str(&crate::util::redact_userinfo(url.as_str()));
+                //
+                // Only the part in front of the path is scanned when there is an authority:
+                // the scan reads `:8443/...?x=http://bob:pw@` as one userinfo run and would
+                // swallow the host's port and everything up to that later `@`.
+                let text = url.as_str();
+                let head = if url.has_authority() {
+                    let tail = url.path().len()
+                        + url.query().map_or(0, |query| query.len() + 1)
+                        + url.fragment().map_or(0, |fragment| fragment.len() + 1);
+                    text.len() - tail
+                } else {
+                    text.len()
+                };
+                f.write_str(&crate::util::redact_userinfo(&text[..head]))?;
+                return f.write_str(&text[head..]);
             }
             // Rebuilt rather than run through `Url::set_password`: that needs an owned
             // clone and *fails* on a cannot-be-a-base URL, and a failure here would mean
@@ -219,11 +237,10 @@ mod render {
                         };
                         match entry {
                             // `ProxyEndpoint`'s `Display` prints host and port, and a
-                            // `scheme://` prefix only when the source carried one — so
-                            // the key written here is what names the scheme for the
-                            // bare authorities most sources store, not a duplicate of
-                            // it. Credentials never print; that they *exist* is still
-                            // worth knowing, hence the flag.
+                            // `scheme://` prefix only when the source carried one, so the
+                            // key written here is what names the scheme for the bare
+                            // authorities most sources store, not a duplicate of it.
+                            // Credentials never print; the flag records that they *exist*.
                             ProxyEntry::Use(endpoint) => {
                                 write!(f, "{scheme}={endpoint}")?;
                                 if endpoint.auth.is_some() {
@@ -244,8 +261,8 @@ mod render {
                 }
                 ProxyMode::Pac { url, .. } => write!(f, "pac({})", MaskedUrl(url)),
                 // The body is never logged: it is large, it is internal, and on macOS it
-                // comes from `ProxyAutoConfigJavaScript`, which an MDM profile writes.
-                // The hash still makes "the script changed" visible, which is the point.
+                // comes from `ProxyAutoConfigJavaScript`, which an MDM profile writes. The
+                // hash still makes "the script changed" visible.
                 ProxyMode::PacInline { script, .. } => write!(
                     f,
                     "pac-inline(len={} fnv1a={:016x})",
@@ -293,7 +310,7 @@ mod render {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self.0 {
                 // `reason` is this crate's own words around a quotation of the offending
-                // text — `parse_host` builds `invalid host {…:?}: {e}` — and the source
+                // text: `parse_host` builds `invalid host {…:?}: {e}`, and the source
                 // decides how long that text is. The `{:?}` already escapes the line
                 // breaks, so only the bound is missing, and `Sanitized` is where the bound
                 // lives.
@@ -304,8 +321,10 @@ mod render {
                         Sanitized(reason)
                     )
                 }
+                // The same payload as above, and the `@` guard quotes the entry without
+                // `{:?}`, so a line break in it reaches here raw.
                 Error::InvalidBypassPattern { reason, .. } => {
-                    write!(f, "invalid bypass pattern: {reason}")
+                    write!(f, "invalid bypass pattern: {}", Sanitized(reason))
                 }
                 Error::InvalidProxyUrl { source, .. } => write!(f, "invalid proxy URL: {source}"),
                 Error::UnsupportedProxyScheme(scheme) => {
@@ -314,7 +333,16 @@ mod render {
                 Error::CgiHttpProxy { variable } => {
                     write!(f, "refusing to use {variable} in a CGI environment")
                 }
-                Error::Io { context, source } => write!(f, "{context}: {source}"),
+                // Both halves are untrusted: `context` can embed a path built from
+                // `XDG_CONFIG_HOME` (the KDE backend's "reading {path}"), and `source` is
+                // whatever the OS or the Java framework said, a thrown exception's
+                // `toString()` included.
+                Error::Io { context, source } => write!(
+                    f,
+                    "{}: {}",
+                    Sanitized(context),
+                    Sanitized(&source.to_string())
+                ),
                 Error::Sandboxed { sandbox, reason } => {
                     write!(f, "running inside a {sandbox} sandbox: {reason}")
                 }
@@ -325,8 +353,8 @@ mod render {
                 // takes out credentials and touches nothing else, so a newline in the
                 // configured value is still a newline and its length is still whatever the
                 // source wrote. This is the only place a `RejectedValue`'s text is rendered
-                // into a log line — every other reader gets it through a derived `Debug`,
-                // which escapes — so `http_proxy` or a bypass list holding a line break
+                // into a log line: every other reader gets it through a derived `Debug`,
+                // which escapes, so `http_proxy` or a bypass list holding a line break
                 // forged log lines here, which is the half of the rule
                 // `untrusted_error_payloads_are_sanitized` states that a mask cannot cover.
                 Error::ProxyEntryUnusable { scheme, rejected } => write!(
@@ -345,6 +373,10 @@ mod render {
                 Error::PacTimeout { timeout } => {
                     write!(f, "PAC evaluation exceeded its {timeout:?} budget")
                 }
+                Error::PacSaturated { timeout, limit } => write!(
+                    f,
+                    "no PAC evaluation slot came free within {timeout:?} ({limit} still running)"
+                ),
                 Error::PacInvalidResult { result } => {
                     write!(f, "PAC returned no usable candidate: {}", Sanitized(result))
                 }
@@ -485,14 +517,13 @@ mod tests {
             SourceSummary(&config.sources)
         );
         assert!(!rendered.contains(SECRET), "{rendered}");
-        // The user name is deliberately kept — it is not the secret, and "which account
-        // is this proxy configured for" is exactly the kind of thing this crate's logging
-        // is designed to surface —
-        // but it must never be followed by anything except the mask.
+        // The user name is kept (it is not the secret, and "which account is this proxy
+        // configured for" is the kind of thing this crate's logging is designed to
+        // surface), but it must never be followed by anything except the mask.
         assert!(rendered.contains("alice:***@"), "{rendered}");
 
         // …and the redaction is not vacuous: everything that is *not* a secret is still
-        // there, which is what makes the log worth writing in the first place.
+        // there, so the line still shows the configuration.
         assert!(
             rendered.contains("http://proxy.corp:8080+auth"),
             "{rendered}"
@@ -506,9 +537,9 @@ mod tests {
 
         // The two things a list of sources is besides its contents: where each entry starts
         // and where the list does. Every `contains` above passes just as well with the
-        // separator gone and the three sources run together, or with a stray one in front of
-        // the first — and a summary a reader cannot split back into sources is the one thing
-        // this renderer exists to avoid.
+        // separator gone and the three sources run together, or with a stray one in front
+        // of the first, and this renderer must keep the sources distinguishable in the
+        // summary.
         let sources = SourceSummary(&config.sources).to_string();
         assert!(sources.starts_with("[GroupPolicy=manual"), "{sources}");
         assert!(sources.contains(" Registry=pac("), "{sources}");
@@ -533,10 +564,10 @@ mod tests {
     }
 
     // The summary walks `Scheme::ALL` rather than the map it is summarising, so the same
-    // configuration always renders as the same line — which is what makes two of them
-    // comparable at all. Every other test here asks whether some fragment is present, and a
-    // fragment cannot tell one ordering from another, nor notice a field going missing; this
-    // one owns the whole line.
+    // configuration always renders as the same line and two of them can be compared.
+    // Every other test here asks whether some fragment is present, and a fragment cannot
+    // tell one ordering from another, nor notice a field going missing; this one owns the
+    // whole line.
     #[test]
     fn a_manual_summary_names_its_schemes_in_the_order_scheme_fixes() {
         fn at(host: &str, port: u16) -> ProxyEntry {
@@ -549,7 +580,7 @@ mod tests {
         // The third state, and the one a fragment test would never have reached: a scheme
         // whose configured value could not be read is not the same as one turned off, and
         // the difference is the whole of what a reader is looking for when a scheme stops
-        // working. Its `RejectedValue` is deliberately not rendered — the marker is.
+        // working. Its `RejectedValue` is deliberately not rendered: the marker is.
         per_scheme.insert(
             Scheme::All,
             ProxyEntry::Unusable(crate::diagnostic::RejectedValue::new(
@@ -578,9 +609,8 @@ mod tests {
             let shared = Shared::new(ProxyConfig::direct());
             initial(&shared.current());
             shared.emit(config.clone());
-            // The same value again: the equality check that skips a duplicate
-            // notification has to stay just as quiet about
-            // the secrets it has just compared.
+            // The same value again: the equality check that skips a duplicate notification
+            // must also avoid logging the secrets it has just compared.
             shared.emit(config.clone());
             shared.fail(Error::InvalidProxyUrl {
                 input: format!("http://alice:{SECRET}@proxy.corp:8080"),
@@ -594,7 +624,7 @@ mod tests {
                 url: Url::parse(&format!("https://alice:{SECRET}@wpad.corp/x.pac")).unwrap(),
             });
             // A PAC `alert()` carries the script's own words, not a system secret, so it
-            // is logged verbatim (after sanitising) — see the dedicated test below.
+            // is logged verbatim (after sanitising): see the dedicated test below.
             pac_alert("routing decision taken");
             shared.close();
         });
@@ -604,7 +634,7 @@ mod tests {
             !text.contains("hunter2"),
             "a secret reached the log:\n{text}"
         );
-        // Not vacuous: those events really were emitted.
+        // Not vacuous: those events were emitted.
         assert!(
             text.contains("the system proxy configuration changed"),
             "{text}"
@@ -673,7 +703,21 @@ mod tests {
         }
     }
 
-    // `Url::password()` is `None` here — WHATWG only splits on a literal `:` —
+    // Only the outer authority is scanned for credentials. A `:...@` further on, in a URL
+    // the query names, is printed as it is, as it is when the outer URL has a password.
+    #[test]
+    fn the_masking_stays_inside_the_authority() {
+        for input in [
+            "http://alice@wpad.corp:8443/proxy.pac?backup=http://bob:second@other.example/pac",
+            "http://wpad.corp:8443/proxy.pac#http://bob:second@other.example/",
+            "http://wpad.corp/a:b@c/proxy.pac",
+        ] {
+            let url = Url::parse(input).unwrap();
+            assert_eq!(MaskedUrl(&url).to_string(), url.as_str());
+        }
+    }
+
+    // `Url::password()` is `None` here: WHATWG only splits on a literal `:`,
     // so a `password().is_none() => print verbatim` shortcut hands the secret
     // straight to the log.
     #[test]
@@ -780,8 +824,8 @@ mod tests {
     // `tracing` `WARN` line ever prints an `Error` through (every `warning!` that
     // carries one routes it this way; see e.g. `src/env.rs`,
     // `src/sys/linux/gsettings_map.rs`, `src/sys/proxy_dict.rs`), and it renders
-    // `reason` verbatim on the assumption that `reason` is already safe — dropping only
-    // `input`. That assumption used to be false for several real parser entry points;
+    // `reason` verbatim on the assumption that `reason` is already safe, dropping only
+    // `input`. Several real parser entry points have leaked credentials through `reason`;
     // each row here is a distinct leak vector through the real parsers, end to end
     // through `SafeError`, not through a hand-built `Error`.
     #[test]
@@ -798,6 +842,11 @@ mod tests {
                     80,
                 )
                 .expect_err("a '/' in the password must strand the '@' and fail to parse"),
+                must_contain: "'@' follows",
+            },
+            Case {
+                error: crate::endpoint::ProxyEndpoint::parse(&format!("http://bob:{SECRET}"), 80)
+                    .expect_err("a password read as a port must fail to parse"),
                 must_contain: "invalid port",
             },
             Case {
@@ -807,7 +856,7 @@ mod tests {
             },
             Case {
                 error: crate::endpoint::ProxyEndpoint::parse(
-                    &format!("http://bob:sec:{SECRET}/x@proxy.corp:8080"),
+                    &format!("http://bob:sec:{SECRET}/x"),
                     80,
                 )
                 .expect_err("a stranded user:password fragment must not parse as a host"),
@@ -836,9 +885,9 @@ mod tests {
         }
     }
 
-    // The other half of that trade, so the fix cannot quietly degenerate into "never
-    // name a host": an ordinary bad host with no `:` anywhere — nothing the crate's own
-    // userinfo test could mistake for a credential — is still reported in full.
+    // The other half of that trade, so a change to "never name a host" fails the test: an
+    // ordinary bad host with no `:` anywhere (nothing the crate's own userinfo test could
+    // mistake for a credential) is still reported in full.
     #[test]
     fn an_ordinary_invalid_host_is_still_named() {
         let error = crate::endpoint::ProxyEndpoint::parse("http://pro\\xy", 80)
@@ -885,12 +934,48 @@ mod tests {
         assert!(rendered.len() < 512, "{}", rendered.len());
         assert!(rendered.contains("invalid host"), "{rendered}");
 
-        // Where the cut actually falls. The bound above is satisfied by anything near the
-        // limit, so it holds the shape and not the boundary; these rows are the only thing
-        // that would notice `Sanitized` taking one character more. The ellipsis is
-        // the reason the last row is not longer than the one before it — it stands in for
-        // everything dropped, however much that is, so a script cannot make a log line
-        // grow by writing a longer `alert()`.
+        // A bypass entry is the third: `NO_PROXY` can carry a line break, and the `@` guard
+        // quotes the entry as it came.
+        let error = crate::bypass::HostPattern::parse_in(
+            &format!("a@b\nWARN forged{}", "y".repeat(4096)),
+            crate::bypass::BypassDialect::Suffix,
+        )
+        .expect_err("an `@` is refused");
+        let rendered = SafeError(&error).to_string();
+        assert!(!rendered.contains('\n'), "{rendered}");
+        assert!(rendered.len() < 512, "{}", rendered.len());
+        assert!(rendered.contains("invalid bypass pattern"), "{rendered}");
+
+        // And an I/O failure's source, which carries what the OS or the Java framework said.
+        let error = Error::io(
+            "reading the settings",
+            std::io::Error::other(format!("thrown\nWARN forged{}", "y".repeat(4096))),
+        );
+        let rendered = SafeError(&error).to_string();
+        assert!(!rendered.contains('\n'), "{rendered}");
+        assert!(rendered.len() < 512, "{}", rendered.len());
+        assert!(
+            rendered.starts_with("reading the settings: thrown"),
+            "{rendered}"
+        );
+        // And its context, which can carry a path taken from the environment.
+        let error = Error::io(
+            format!(
+                "reading /home/u\nWARN forged{}/kioslaverc",
+                "z".repeat(4096)
+            ),
+            std::io::Error::other("denied"),
+        );
+        let rendered = SafeError(&error).to_string();
+        assert!(!rendered.contains('\n'), "{rendered}");
+        assert!(rendered.len() < 1024, "{}", rendered.len());
+        assert!(rendered.ends_with(": denied"), "{rendered}");
+
+        // Where the cut falls. The bound above is satisfied by anything near the limit, so
+        // it holds the shape and not the boundary; no other rows detect `Sanitized` taking
+        // one character more. The ellipsis is the reason the last row is not longer than
+        // the one before it: it stands in for everything dropped, however much that is, so
+        // a script cannot make a log line grow by writing a longer `alert()`.
         //
         // Rendered together and compared once, so a failure names every length that moved.
         use crate::util::MAX_UNTRUSTED;
@@ -921,7 +1006,7 @@ mod tests {
     //
     // Built through a real backend rather than by hand, because what makes this reachable
     // is that `RejectedValue` is handed the *variable's own text*: `env.rs` trims it and
-    // passes it whole. No `:` anywhere in the value, so it is named rather than withheld —
+    // passes it whole. No `:` anywhere in the value, so it is named rather than withheld:
     // withholding would answer the question by accident and the test would hold nothing.
     #[test]
     fn a_dropped_value_cannot_forge_a_log_line_or_run_past_the_bound() {
@@ -929,7 +1014,7 @@ mod tests {
         let env = crate::env::ProxyEnv::from_vars([("http_proxy", forged)])
             .expect("a malformed value is a rejected entry, not a snapshot failure");
         let rejected = env.rejected()[0].clone();
-        // The premise: the record really is holding the break and the length.
+        // The premise: the record is holding the break and the length.
         assert!(rejected.redacted_input().contains('\n'), "{rejected:?}");
         assert!(rejected.redacted_input().len() > 4096, "{rejected:?}");
 

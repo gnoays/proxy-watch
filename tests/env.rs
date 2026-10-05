@@ -69,11 +69,11 @@ fn empty_value_disables_the_scheme_and_suppresses_the_fallback() {
     );
 }
 
-/// A value that is nothing but whitespace is the same off switch, and the emptiness test has
-/// to be the trimmed one for it to be: read untrimmed, a shell that exported a stray space
-/// turns an off switch into a drop, and a drop is [`ProxyEntry::Unusable`] once the mode is
-/// built — the scheme answers an error where the writer asked for no proxy at all. Nothing
-/// lands in `rejected` either, because there is no value here to report.
+/// A value that is nothing but whitespace is the same off switch, and the emptiness test
+/// has to be the trimmed one for it to be: read untrimmed, a shell that exported a stray
+/// space turns an off switch into a drop, and a drop is [`ProxyEntry::Unusable`] once the
+/// mode is built; the scheme answers an error where the writer asked for no proxy at all.
+/// Nothing lands in `rejected` either, because there is no value here to report.
 #[test]
 fn a_value_that_is_only_whitespace_is_the_same_off_switch() {
     let e = env(&[("http_proxy", " \t "), ("all_proxy", "fallback:2")]);
@@ -95,14 +95,14 @@ fn scheme_and_credentials_are_extracted() {
 }
 
 /// The last tier of the port rule `ProxyEnv::from_vars` publishes: explicit port, else the
-/// `scheme://` default, else 80. The middle tier is the test above — `socks5h://[::1]` is
+/// `scheme://` default, else 80. The middle tier is the test above: `socks5h://[::1]` is
 /// 1080 with no port written anywhere. This is the tier below it, where the value names
 /// neither, and 80 is the number the environment reader passes
 /// [`ProxyEndpoint::parse`](proxy_watch::ProxyEndpoint::parse) for every scheme alike: an
-/// `https_proxy` with a bare host is 80 and not 443, because the port being defaulted is the
-/// *proxy's*, not the one the request would have used without it. Nothing else in the tree
-/// held the number — the literal could be changed to any other port and every test still
-/// passed.
+/// `https_proxy` with a bare host is 80 and not 443, because the port being defaulted is
+/// the *proxy's*, not the one the request would have used without it. Nothing else in the
+/// tree held the number: the literal could be changed to any other port and every test
+/// still passed.
 #[test]
 fn a_bare_host_takes_port_80_whatever_the_scheme() {
     let e = env(&[("http_proxy", "plain.corp"), ("https_proxy", "secure.corp")]);
@@ -126,11 +126,11 @@ fn no_proxy_is_parsed() {
     }
 }
 
-/// `;` separates entries in the Windows `ProxyOverride` list and nowhere else. Every
-/// list above splits the same way under either separator set, so this test is the only thing
+/// `;` separates entries in the Windows `ProxyOverride` list and nowhere else. Every list
+/// above splits the same way under either separator set, so this test is the only thing
 /// pinning which one `no_proxy` is wired to: routing it through
 /// [`proxy_watch::parse::proxy_override`] leaves every other test in this file green while
-/// turning one dead rule into two live ones — a bypass the user never wrote.
+/// turning one dead rule into two live ones, a bypass the user never wrote.
 ///
 /// The reference splits on `,` alone (`config.init` in Go's `http/httpproxy/proxy.go`),
 /// so the semicolon is an ordinary host character here: `a.example;b.example` is a
@@ -143,10 +143,9 @@ fn a_semicolon_does_not_separate_a_no_proxy_list() {
     assert!(!e.bypass().matches_authority("b.example"));
 }
 
-/// A `no_proxy` value used to make [`ProxyEnv::from_vars`] fail
-/// outright the moment one entry was malformed, which meant the *other* `*_proxy`
-/// variables became unreadable too — a config-wide outage caused by a single typo in
-/// an exclusion list. The bad entry is now dropped and recorded instead.
+/// One malformed `no_proxy` entry does not make [`ProxyEnv::from_vars`] fail: that would
+/// make the *other* `*_proxy` variables unreadable too, a config-wide outage caused by a
+/// single typo in an exclusion list. The bad entry is dropped and recorded instead.
 #[test]
 fn a_malformed_no_proxy_entry_does_not_break_from_vars() {
     let e = ProxyEnv::from_vars([
@@ -161,21 +160,21 @@ fn a_malformed_no_proxy_entry_does_not_break_from_vars() {
     // The valid entries are still active ...
     assert!(e.bypass().matches_authority("good.example"));
     assert!(e.bypass().matches_authority("also-good.example"));
-    // ... and the bad one is recorded rather than silently dropped (the "logs alone are
-    // invisible without the tracing feature" lesson).
+    // ... and the bad one is recorded rather than silently dropped: a log alone is
+    // invisible without the tracing feature.
     assert_eq!(
         rejected_texts(&e.bypass().rejected),
         ["https://bad.example"]
     );
 
-    // Other settings remain readable — this is the actual bug being fixed.
+    // Other settings remain readable.
     assert_eq!(e.endpoint_for(Scheme::Http).unwrap().authority(), "h:1");
 }
 
 /// The two `rejected` lists are not one list, and this test is the only thing pinning that.
 /// A dropped exclusion never reaches [`ProxyEnv::rejected`], so a caller that checks only
-/// that one reads "nothing was dropped" off a snapshot that dropped something — the
-/// fail-open read of a record `parse`'s module doc keeps fail-closed on purpose.
+/// that one reads "nothing was dropped" off a snapshot that dropped something, the
+/// fail-open read of a record `parse`'s module doc keeps fail-closed.
 #[test]
 fn a_dropped_exclusion_and_a_dropped_endpoint_are_recorded_in_different_places() {
     let bad_exclusion_only = env(&[("http_proxy", "h:1"), ("no_proxy", "https://bad")]);
@@ -203,10 +202,9 @@ fn a_dropped_exclusion_and_a_dropped_endpoint_are_recorded_in_different_places()
     );
 }
 
-/// The scheme-endpoint twin of the
-/// `no_proxy` fix above. A malformed `http_proxy` used to fail `ProxyEnv::from_vars`
-/// outright via `?`, which took `https_proxy` and `no_proxy` down with it even though
-/// neither was at fault.
+/// The scheme-endpoint twin of the `no_proxy` test above. A malformed `http_proxy` does not
+/// fail `ProxyEnv::from_vars`, which would take `https_proxy` and `no_proxy` down with it
+/// even though neither is at fault.
 #[test]
 fn a_malformed_http_proxy_does_not_break_from_vars() {
     let e = ProxyEnv::from_vars([
@@ -234,9 +232,9 @@ fn a_malformed_http_proxy_does_not_break_from_vars() {
     );
 }
 
-/// The bad value can legitimately carry credentials (`http://user:pass@host`); they
-/// must be masked wherever the raw text is retained, exactly like
-/// `BypassRules::rejected` and `ProxyMode::Manual::rejected` already do.
+/// The bad value can legitimately carry credentials (`http://user:pass@host`); they must be
+/// masked wherever the raw text is retained, like `BypassRules::rejected` and
+/// `ProxyMode::Manual::rejected` already do.
 #[test]
 fn a_malformed_scheme_value_is_masked_in_rejected() {
     let e = ProxyEnv::from_vars([("http_proxy", "http://alice:hunter2@bad host:8080")])
@@ -288,15 +286,15 @@ fn empty_environment_is_direct() {
 }
 
 /// `to_config()`'s whole content is the label it attaches, and `src/env.rs` promises in
-/// prose that the label is [`ProxyConfigSource::Env`]. This test is the only thing holding
-/// it: spelling it `Registry` instead leaves every other test in this tree green, because
-/// the other call — `empty_environment_is_direct` above — reads `.effective` and never
-/// looks at `.sources`.
+/// prose that the label is [`ProxyConfigSource::Env`]. No other test checks that label:
+/// spelling it `Registry` instead leaves every other test in this tree green, because the
+/// other call, `empty_environment_is_direct` above, reads `.effective` and never looks at
+/// `.sources`.
 ///
 /// Provenance is the only question `ProxyConfig::source` answers, so the wrong label is
 /// not cosmetic. A caller asking what the environment contributed gets `None`, and a
 /// caller asking what the registry contributed gets a process-local `*_proxy` value
-/// presented as a machine-wide setting — the direction that overstates the authority of
+/// presented as a machine-wide setting, the direction that overstates the authority of
 /// what it found.
 #[test]
 fn a_snapshot_converted_to_a_config_is_attributed_to_the_environment() {
@@ -317,7 +315,7 @@ fn a_snapshot_converted_to_a_config_is_attributed_to_the_environment() {
 
 /// Converting is not a second reading. `ProxyConfig::from_source` stamps now, so a snapshot
 /// taken once and converted on every request would otherwise hand back a config claiming to
-/// be fresh each time — the direction that overstates how current the data is, the same one
+/// be fresh each time, the direction that overstates how current the data is, the same one
 /// the wrong source label would take above.
 ///
 /// The sleep is the control: without it the two instants can be equal by accident, and the
@@ -355,7 +353,7 @@ fn cgi_environment_still_allows_https_and_no_proxy() {
     assert!(e.bypass().matches_authority("api.internal"));
 }
 
-/// An *empty* `http_proxy` is refused too, unlike in Go — where `parseProxy("")`
+/// An *empty* `http_proxy` is refused too, unlike in Go, where `parseProxy("")`
 /// is `nil` and the CGI branch never fires. Here an empty value is `ProxyEntry::Disabled`,
 /// and `Disabled` suppresses the `all_proxy` fallback, so honouring it would let a
 /// bare `Proxy:` request header switch off the operator's HTTP proxy for that request.
@@ -375,8 +373,8 @@ fn cgi_environment_refuses_an_empty_http_proxy_too() {
 /// An *empty* `REQUEST_METHOD` is not a CGI environment. Go tests the same variable with
 /// `os.Getenv("REQUEST_METHOD") != ""`, and RFC 3875 §4.1.12 gives it no empty production
 /// (`method = "GET" | "POST" | "HEAD" | extension-method`), so no conforming CGI server
-/// sets it empty. Deciding on the variable's mere presence refused the whole snapshot —
-/// `no_proxy` and `https_proxy` included — for a process that is not a CGI script at all.
+/// sets it empty. Deciding on the variable's mere presence refused the whole snapshot,
+/// `no_proxy` and `https_proxy` included, for a process that is not a CGI script at all.
 #[test]
 fn an_empty_request_method_is_not_a_cgi_environment() {
     let e = env(&[("REQUEST_METHOD", ""), ("http_proxy", "http://corp:8080")]);
@@ -386,11 +384,11 @@ fn an_empty_request_method_is_not_a_cgi_environment() {
     );
 }
 
-/// Windows environment variable names are case-insensitive — `set Http_Proxy=…`
-/// sets the same variable `HTTP_PROXY` names — but `std::env::vars` reports the key in
-/// whatever case it was set, so an exact-match lookup silently ignored it. Everywhere
-/// else the two really are different variables and the curl convention (lowercase, then
-/// uppercase, and nothing more) is the whole rule.
+/// Windows environment variable names are case-insensitive (`set Http_Proxy=…` sets the
+/// same variable `HTTP_PROXY` names) but `std::env::vars` reports the key in whatever case
+/// it was set, so an exact-match lookup silently ignored it. Everywhere else the two are
+/// different variables and the curl convention (lowercase, then uppercase, and nothing
+/// more) is the whole rule.
 #[test]
 fn a_mixed_case_scheme_variable_is_read_on_windows_only() {
     let e = env(&[("Http_Proxy", "http://mixed:8080")]);
@@ -428,14 +426,14 @@ fn the_conventional_spellings_still_come_first() {
 
 /// The Windows fold picks a *representative* when more than one spelling is present and
 /// none of them is one of the two conventional ones, and that choice must not come out of
-/// `HashMap` iteration order — the same input has to resolve to the same proxy every run.
-/// `the_refused_variable_name_is_deterministic` says this for the CGI refusal, which reaches
-/// its own tie-break; this is the other one, and this test is the only thing holding it:
-/// replacing the `min` with a `max` changes which proxy the process talks to, and nothing
-/// else notices.
+/// `HashMap` iteration order: the same input has to resolve to the same proxy every run.
+/// `the_refused_variable_name_is_deterministic` says this for the CGI refusal, which
+/// reaches its own tie-break; this is the other one, and no other test checks it: replacing
+/// the `min` with a `max` changes which proxy the process talks to, and nothing else
+/// notices.
 ///
-/// A real Windows process cannot hold two spellings at once — the OS keeps one name per
-/// variable — so the case only arises through `from_vars`, which is public and takes
+/// A real Windows process cannot hold two spellings at once (the OS keeps one name per
+/// variable) so the case only arises through `from_vars`, which is public and takes
 /// whatever map the caller assembled.
 #[test]
 fn the_spelling_that_wins_the_windows_fold_is_deterministic() {
@@ -455,7 +453,7 @@ fn the_spelling_that_wins_the_windows_fold_is_deterministic() {
 }
 
 /// With two spellings present, the reported variable name must not depend on `HashMap`
-/// iteration order — the same input has to produce the same error every run.
+/// iteration order: the same input has to produce the same error every run.
 #[test]
 fn the_refused_variable_name_is_deterministic() {
     for _ in 0..8 {
@@ -480,6 +478,21 @@ fn without_the_cgi_marker_http_proxy_is_used() {
     );
 }
 
+// As `getenv` answers (and `std::env::var_os`, curl, Python and Node with it), so a
+// duplicated `environ` gives this crate the proxy every other HTTP stack in the process
+// uses.
+#[test]
+fn a_name_given_twice_keeps_its_first_value() {
+    let env = env(&[
+        ("http_proxy", "http://first.example:1"),
+        ("http_proxy", "http://second.example:2"),
+    ]);
+    assert_eq!(
+        env.endpoint_for(Scheme::Http).unwrap().host.to_string(),
+        "first.example"
+    );
+}
+
 #[test]
 fn equality_ignores_the_timestamp() {
     let a = env(&[("http_proxy", "h:1")]);
@@ -487,14 +500,25 @@ fn equality_ignores_the_timestamp() {
     let b = env(&[("http_proxy", "h:1")]);
     assert_ne!(a.captured_at(), b.captured_at());
     assert_eq!(a, b);
+    // And each compared field on its own: equality is how a caller re-reading the
+    // environment learns that it changed.
+    assert_ne!(env(&[("http_proxy", "h:1")]), env(&[("http_proxy", "h:2")]));
+    assert_ne!(
+        env(&[("no_proxy", "a.example")]),
+        env(&[("no_proxy", "b.example")])
+    );
+    assert_ne!(
+        env(&[("http_proxy", "h:1")]),
+        env(&[("http_proxy", "h:1"), ("https_proxy", "http://[bad")])
+    );
 }
 
 /// The other half of the same promise: two snapshots that compare equal must also *read*
-/// the same. `ProxyEnv`'s `Debug` is hand-written so `per_scheme` prints in `Scheme`
-/// order; a derive would print it in `HashMap` order, and a diff between two logged
-/// snapshots would report changes nobody made. `ProxyMode`'s twin is pinned in
-/// `src/mode.rs`; this is the other public map. Repeated because a derive would come out
-/// sorted by chance one time in twenty-four.
+/// the same. `ProxyEnv`'s `Debug` is hand-written so `per_scheme` prints in `Scheme` order;
+/// a derive would print it in `HashMap` order, and a diff between two logged snapshots
+/// would report changes that did not occur. `ProxyMode`'s twin is pinned in `src/mode.rs`;
+/// this is the other public map. Repeated because a derive would come out sorted by chance
+/// one time in twenty-four.
 #[test]
 fn debug_prints_the_schemes_in_a_fixed_order() {
     for _ in 0..8 {
@@ -523,12 +547,13 @@ fn debug_prints_the_schemes_in_a_fixed_order() {
 }
 
 /// Serialises the only two tests in this file that touch the process environment: the one
-/// below, which *reads* all of it, and `from_env_survives_a_variable_that_is_not_valid_unicode`,
-/// which *writes* to it. Every other test here builds its input with `ProxyEnv::from_vars`
-/// and is unaffected. Cargo serialises test *binaries*, not the tests inside one, so
-/// without this the write and the read overlap — which is unsound, not merely flaky, and
-/// therefore produces no failing test to notice it by. Same five lines of `std`, and for
-/// the same reason, as `REGISTRY_LOCK` in `tests/windows_watch.rs`.
+/// below, which *reads* all of it, and
+/// `from_env_survives_a_variable_that_is_not_valid_unicode`, which *writes* to it. Every
+/// other test here builds its input with `ProxyEnv::from_vars` and is unaffected. Cargo
+/// serialises test *binaries*, not the tests inside one, so without this the write and the
+/// read overlap, which is unsound, not merely flaky, and therefore produces no failing test
+/// to notice it by. Same five lines of `std`, and for the same reason, as `REGISTRY_LOCK`
+/// in `tests/windows_watch.rs`.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A poisoned lock means the writing test panicked between its `set_var` and its
@@ -562,15 +587,15 @@ fn from_env_survives_a_variable_that_is_not_valid_unicode() {
     const BROKEN_VAR: &str = "PROXY_WATCH_TEST_INVALID_UNICODE";
 
     // Held across the write, the read, and the restore below. See `ENV_LOCK`: what makes
-    // the `unsafe` blocks sound is this lock, not `--test-threads=1` — a flag the default
+    // the `unsafe` blocks sound is this lock, not `--test-threads=1`; a flag the default
     // `cargo test` does not pass is not an invariant.
     let _lock = env_lock();
 
     // SAFETY: mutating the process environment is only sound while no other thread is
     // concurrently reading or writing it. `ENV_LOCK` is held for the rest of this test and
     // the only other test in this binary that reads the environment takes it too; no
-    // watcher — and hence no backend thread of this crate's that reads process env on
-    // Linux — is constructed here at all. `BROKEN_VAR` is a name unique to this test.
+    // watcher (and hence no backend thread of this crate's that reads process env on
+    // Linux) is constructed here at all. `BROKEN_VAR` is a name unique to this test.
     unsafe {
         #[cfg(windows)]
         {

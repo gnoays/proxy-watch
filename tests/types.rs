@@ -6,8 +6,26 @@ use std::time::{Duration, SystemTime};
 
 use proxy_watch::{
     BypassRules, Host, ProxyAuth, ProxyConfig, ProxyConfigSource, ProxyEndpoint, ProxyEntry,
-    ProxyMode, Scheme, parse,
+    ProxyMode, ProxyScheme, Scheme, parse,
 };
+
+// A portless proxy URL takes its scheme's port, not the caller's fallback: 7 here, so a row
+// that fell back would not pass by coinciding with 80.
+#[test]
+fn a_portless_proxy_url_takes_its_schemes_default_port() {
+    for (scheme, port) in [
+        (ProxyScheme::Http, 80),
+        (ProxyScheme::Https, 443),
+        (ProxyScheme::Socks4, 1080),
+        (ProxyScheme::Socks4a, 1080),
+        (ProxyScheme::Socks5, 1080),
+        (ProxyScheme::Socks5h, 1080),
+    ] {
+        assert_eq!(scheme.default_port(), port, "{scheme:?}");
+        let endpoint = ProxyEndpoint::parse(&format!("{}://h", scheme.as_str()), 7).unwrap();
+        assert_eq!(endpoint.port, port, "{scheme:?}");
+    }
+}
 
 const PASSWORD: &str = "sup3r-s3cret-p4ssw0rd";
 
@@ -37,11 +55,11 @@ fn debug_output_never_contains_the_password() {
         assert!(rendered.contains("***"), "mask missing from: {rendered}");
     }
 
-    // The user name is not a secret, and the password is still reachable on purpose.
+    // The user name is not a secret, and the password is still reachable via `password()`.
     assert!(format!("{auth:?}").contains("alice"));
     assert_eq!(auth.password(), Some(PASSWORD));
     assert_eq!(endpoint.auth.as_ref().unwrap().password(), Some(PASSWORD));
-    // The presence question — the accessor a caller reaches for when it wants that answer
+    // The presence question: the accessor a caller reaches for when it wants that answer
     // without holding the secret to get it. Every other assertion the crate makes about it
     // is a negative one, read off a store that had no password in it, so a body that
     // answered `false` unconditionally keeps the whole tree green while telling every such
@@ -50,7 +68,7 @@ fn debug_output_never_contains_the_password() {
 }
 
 // Percent-encoding a reserved character is how RFC 3986 section 2.2 says "this is data,
-// not the delimiter", so `alice%3Ahunter2` is one user name that contains a colon — not a
+// not the delimiter", so `alice%3Ahunter2` is one user name that contains a colon, not a
 // user and a password. Pinned against `url`, which this crate already depends on, so the
 // rule is anchored to a reference implementation rather than to a reading of the spec.
 #[test]
@@ -75,16 +93,15 @@ fn a_percent_encoded_colon_in_userinfo_is_not_the_credential_delimiter() {
 
 // The other delimiter, and the same question asked of it: with two `@` in the authority,
 // which one separates the userinfo from the host? `ProxyEndpoint::parse` takes the *last*,
-// and this test is the only thing holding that — taking the first leaves the rest of the
-// tree green.
+// and no other test checks that; taking the first leaves the rest of the tree green.
 //
 // It is not an exotic input. `user@domain.com:password@proxy:8080` is how a corporate proxy
 // spells a user name that is an email address, and taking the first `@` reads that as user
-// `user` with a host of `domain.com:password@proxy:8080` — which then fails to parse, so the
-// setting is dropped and the machine goes direct with a `rejected` record naming a value the
-// writer wrote correctly. Pinned against `url` for the same reason as the test above: the
-// rule is WHATWG's authority state, not a reading of RFC 3986, which forbids a raw `@` in
-// userinfo and so has no opinion on the second one.
+// `user` with a host of `domain.com:password@proxy:8080`, which then fails to parse, so the
+// setting is dropped and the machine goes direct with a `rejected` record naming a value
+// the writer wrote correctly. Pinned against `url` for the same reason as the test above:
+// the rule is WHATWG's authority state, not a reading of RFC 3986, which forbids a raw `@`
+// in userinfo and so has no opinion on the second one.
 #[test]
 fn the_last_at_sign_is_the_userinfo_delimiter_so_an_email_user_name_survives() {
     let address = format!("http://alice@corp.example:{PASSWORD}@proxy:8080");
@@ -126,7 +143,7 @@ fn proxy_config_equality_ignores_captured_at() {
     c.captured_at = a.captured_at + Duration::from_secs(3600);
     assert_eq!(a, c);
 
-    // A real difference is still detected — this is what drives the watcher's
+    // A real difference is still detected; this is what drives the watcher's
     // duplicate suppression.
     let other = ProxyConfig::from_source(ProxyConfigSource::Registry, ProxyMode::Direct);
     assert_ne!(a, other);
@@ -227,13 +244,13 @@ fn config_sources_are_queryable() {
 }
 
 /// Every scheme name this crate writes is one it reads back as the same scheme. Two pairs
-/// carry that promise, and this test is the only thing holding either: [`Scheme::as_str`] / [`Scheme::from_name`]
-/// (the `http=`/`socks=` bucket keys of the Windows `ProxyServer` grammar), and
-/// `ProxyScheme::as_str` / its `FromStr` (the URL scheme [`ProxyEndpoint`]'s `Display`
-/// writes and [`ProxyEndpoint::parse`] reads).
+/// carry that promise, and no other test checks either: [`Scheme::as_str`] /
+/// [`Scheme::from_name`] (the `http=`/`socks=` bucket keys of the Windows `ProxyServer`
+/// grammar), and `ProxyScheme::as_str` / its `FromStr` (the URL scheme [`ProxyEndpoint`]'s
+/// `Display` writes and [`ProxyEndpoint::parse`] reads).
 ///
-/// Neither gap is assumed. Spelling `Scheme::Socks` as `"socks5"` — a
-/// name `from_name` rejects — leaves the whole tree green, and so does spelling
+/// Neither gap is assumed. Spelling `Scheme::Socks` as `"socks5"` (a
+/// name `from_name` rejects) leaves the whole tree green, and so does spelling
 /// `ProxyScheme::Socks4` as `"socks-4"`, which makes `ProxyEndpoint`'s `Display` emit a
 /// string its own `parse` refuses. The nearest existing test,
 /// `proxy_server.rs::display_prefixes_a_scheme_only_when_the_input_named_one`, pins
@@ -258,13 +275,13 @@ fn every_scheme_name_reads_back_as_the_scheme_that_wrote_it() {
         );
         bucket_keys.push(name);
     }
-    // Coverage on purpose rather than by accident: a variant added to `Scheme::ALL` without
-    // a name would otherwise widen this test in silence.
+    // Coverage is checked rather than assumed: a variant added to `Scheme::ALL` without a
+    // name would otherwise widen this test in silence.
     assert_eq!(bucket_keys, ["http", "https", "ftp", "socks", "all"]);
 
     // `ProxyScheme` has no `ALL`, so the list is written out and checked for completeness
-    // below. `socks` is deliberately absent: `FromStr` accepts it, but no `as_str` writes
-    // it, and this test walks the writing direction.
+    // below. `socks` is absent: `FromStr` accepts it, but no `as_str` writes it, and this
+    // test walks the writing direction.
     const URL_SCHEMES: &[&str] = &["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
     let mut kinds = Vec::new();
     for name in URL_SCHEMES {

@@ -1,25 +1,25 @@
 //! Sandbox detection before GSettings (Flatpak without `ca.desrt.dconf` talk → keyfile
 //! backend silently reports Direct). Mirrors GLib's dconf-access check via
 //! `/.flatpak-info`. Snap via `$SNAP/meta/snap.yaml` ([`snap_confinement`]), *not* the
-//! bare `SNAP` variable — GLib's `is_snap` excludes `confinement: classic`. No-dconf →
+//! bare `SNAP` variable: GLib's `is_snap` excludes `confinement: classic`. No-dconf →
 //! [`super::portal`] else [`Error::Sandboxed`](crate::Error::Sandboxed).
 //!
 //! Under strict confinement GLib asks `snapctl is-connected gsettings`
 //! (`glib_has_dconf_access_in_sandbox`, `gio/gportalsupport.c`) rather than refusing
 //! outright; this crate assumes no access instead. Spawning `snapctl` is not something a
-//! library should do from a read — GLib itself guards that call with a setuid check — and
+//! library should do from a read (GLib itself guards that call with a setuid check), and
 //! the assumption errs towards the portal, never towards a silent `Direct`.
 //!
 //! <div class="warning">
 //!
-//! **Unverified:** no real Flatpak or Snap runtime has ever run this detection — the
+//! **Unverified:** no real Flatpak or Snap runtime has ever run this detection; the
 //! tests build a synthetic `/.flatpak-info` and `snap.yaml` instead.
-//! **Risk:** the paths are not the exposure — GLib hardcodes the same `/.flatpak-info`
+//! **Risk:** the paths are not the exposure; GLib hardcodes the same `/.flatpak-info`
 //! (`read_flatpak_info`, `gio/gportalsupport.c`) and the same `$SNAP/meta/snap.yaml`, so a
 //! runtime that spelled either differently would take GLib's own check with it. What can
 //! still diverge is the reading: parse the metadata more leniently than GKeyFile and
-//! GSettings is trusted after all, which is precisely the case this module exists to
-//! prevent — the keyfile backend answers `Direct` there instead of failing.
+//! GSettings is trusted after all, which this module exists to prevent; the keyfile
+//! backend answers `Direct` there instead of failing.
 //! **Symptom:** inside the sandbox the crate reports no proxy while the host has one,
 //! and [`Error::Sandboxed`](crate::Error::Sandboxed) is never returned.
 //!
@@ -44,7 +44,7 @@ const DCONF_POLICY_TALK: &str = "talk";
 // The environment variable snapd sets to the snap's install directory. The only one
 // consulted, because it is the only one that leads anywhere: GLib's `is_snap`
 // (`gio/gsandbox.c`) reads `$SNAP/meta/snap.yaml` and needs the path, and a `SNAP_NAME`
-// with no `SNAP` alongside it — a snapcraft build shell, a snap hook — names no manifest
+// with no `SNAP` alongside it (a snapcraft build shell, a snap hook) names no manifest
 // to check.
 const SNAP_DIR: &str = "SNAP";
 
@@ -57,23 +57,23 @@ const CONFINEMENT_PREFIX: &str = "confinement:";
 
 // The one confinement level that is not a sandbox. GLib's own comment in
 // `get_snap_confinement` (`gio/gsandbox.c`): "Classic snaps are de-facto no sandboxed
-// apps, so we can ignore them" — they run with full system access, so GSettings reaches
+// apps, so we can ignore them"; they run with full system access, so GSettings reaches
 // dconf exactly as it would outside a snap.
 const CONFINEMENT_CLASSIC: &str = "classic";
 
-// What kind of sandbox — if any — the process is running in.
+// What kind of sandbox, if any, the process is running in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sandbox {
     // Not sandboxed: GSettings talks to dconf and can be trusted.
     None,
     // Flatpak, with the outcome of the `ca.desrt.dconf` policy check.
     Flatpak {
-        // `true` when the manifest grants exactly `talk` on `ca.desrt.dconf` — `own`
+        // `true` when the manifest grants exactly `talk` on `ca.desrt.dconf`: `own`
         // does not count, for the reason [`has_dconf_access`] gives.
         dconf_access: bool,
     },
-    // A snap under any confinement GLib's `is_snap` still calls a sandbox — that is,
-    // anything but `classic`. Treated as "sandboxed, dconf access unknown" — see the
+    // A snap under any confinement GLib's `is_snap` still calls a sandbox: that is,
+    // anything but `classic`. Treated as "sandboxed, dconf access unknown": see the
     // module docs.
     Snap,
 }
@@ -81,7 +81,7 @@ pub(crate) enum Sandbox {
 impl Sandbox {
     // Whether GSettings can be believed.
     //
-    // `false` is exactly the case where GSettings would answer `mode = 'none'` without
+    // `false` is the case where GSettings would answer `mode = 'none'` without
     // erroring, so the answer has to come from the portal instead.
     pub(crate) fn gsettings_is_trustworthy(self) -> bool {
         match self {
@@ -102,13 +102,13 @@ impl Sandbox {
 }
 
 // Detect the sandbox of the current process.
-pub(crate) fn detect() -> Sandbox {
-    sandbox_from_flatpak_read(std::fs::read_to_string(FLATPAK_INFO), is_snap)
+pub(crate) fn detect(env: &super::Env) -> Sandbox {
+    sandbox_from_flatpak_read(std::fs::read_to_string(FLATPAK_INFO), || is_snap(env))
 }
 
 // The decision half of [`detect`], taking the read result rather than doing the read
 // itself: the real path is a hardcoded absolute filesystem path, so this is the piece a
-// test can actually drive.
+// test can drive.
 fn sandbox_from_flatpak_read(
     read: std::io::Result<String>,
     is_snap: impl FnOnce() -> bool,
@@ -117,9 +117,9 @@ fn sandbox_from_flatpak_read(
         Ok(text) => Sandbox::Flatpak {
             dconf_access: has_dconf_access(&text),
         },
-        // A `/.flatpak-info` present but unreadable — non-UTF-8 content
+        // A `/.flatpak-info` present but unreadable (non-UTF-8 content
         // (`read_to_string`'s `InvalidData`), denied permissions, or any other I/O
-        // error — still means the sandbox is real; it is *absence* that means it is
+        // error) still means the sandbox is real; it is *absence* that means it is
         // not. GLib's own load fails the same way on a file it cannot parse
         // (`has_dconf_access`'s doc above: "a file GKeyFile refuses denies access") and
         // answers `dconf_access: false` rather than pretending the file was never
@@ -134,13 +134,13 @@ fn sandbox_from_flatpak_read(
     }
 }
 
-// Whether this process is inside a snap that actually confines it.
+// Whether this process is inside a snap that confines it.
 //
 // GLib's `is_snap` (`gio/gsandbox.c`) in full: `$SNAP` must be set, `$SNAP/meta/snap.yaml`
-// must be *readable* — an unreadable manifest sets its `GError` and makes the answer
-// `FALSE`, not `TRUE` — and the confinement it declares must not be `classic`.
-fn is_snap() -> bool {
-    let Some(snap_dir) = std::env::var_os(SNAP_DIR) else {
+// must be *readable* (an unreadable manifest sets its `GError` and makes the answer
+// `FALSE`, not `TRUE`), and the confinement it declares must not be `classic`.
+fn is_snap(env: &super::Env) -> bool {
+    let Some(snap_dir) = env.var_os(SNAP_DIR) else {
         return false;
     };
     let manifest = std::path::Path::new(&snap_dir).join(SNAP_YAML);
@@ -150,14 +150,14 @@ fn is_snap() -> bool {
     snap_is_confined(&yaml)
 }
 
-// The decision half of [`is_snap`], taking the manifest text rather than reading it — the
+// The decision half of [`is_snap`], taking the manifest text rather than reading it: the
 // same split, and for the same reason, as [`sandbox_from_flatpak_read`] above: the path
 // comes from the environment, so this is the piece a test can drive.
 //
 // A manifest with no `confinement:` line at all still counts as confined: GLib compares with
-// `g_strcmp0`, for which a missing value is simply "not classic". Read the other way round —
-// only a manifest that names a level is believed — a snap whose manifest this crate could
-// not find a level in would be trusted, and that is the silent `mode = 'none'` the module
+// `g_strcmp0`, for which a missing value is "not classic". Read the other way round (only
+// a manifest that names a level is believed), a snap whose manifest this crate could not
+// find a level in would be trusted, and that is the silent `mode = 'none'` the module
 // exists to prevent.
 fn snap_is_confined(yaml: &str) -> bool {
     snap_confinement(yaml) != Some(CONFINEMENT_CLASSIC)
@@ -181,8 +181,8 @@ fn snap_confinement(yaml: &str) -> Option<&str> {
 // `gio/gportalsupport.c`). That call is the sole guard on a `dconf_access` initialised to
 // `FALSE`, so **a file GKeyFile refuses denies access**. Hence the `return false`s below:
 // skipping a line GKeyFile would reject is the dangerous reading, because it grants a
-// GSettings read that GLib — having rejected the same file — serves from the keyfile
-// backend as `mode = 'none'`, the silent `Direct` this module exists to prevent.
+// GSettings read that GLib, having rejected the same file, serves from the keyfile
+// backend as `mode = 'none'`, the silent `Direct` this detection prevents.
 pub(crate) fn has_dconf_access(flatpak_info: &str) -> bool {
     let mut in_section = false;
     let mut in_group = false;
@@ -192,7 +192,7 @@ pub(crate) fn has_dconf_access(flatpak_info: &str) -> bool {
         // then sorts what is left into exactly three shapes. A line that is none of them
         // is `G_KEY_FILE_ERROR_PARSE`, which fails the load.
         let line = line.trim_ascii_start();
-        // `g_key_file_line_is_comment` is `#` and the empty line — and nothing else. A
+        // `g_key_file_line_is_comment` is `#` and the empty line, and nothing else. A
         // `;` opens a *key* here, not a comment.
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -210,7 +210,7 @@ pub(crate) fn has_dconf_access(flatpak_info: &str) -> bool {
         let Some((key, value)) = line.split_once('=') else {
             return false;
         };
-        // "Key file does not start with a group" — a parse error like any other.
+        // "Key file does not start with a group": a parse error like any other.
         if !in_group {
             return false;
         }
@@ -221,7 +221,7 @@ pub(crate) fn has_dconf_access(flatpak_info: &str) -> bool {
         if key.is_empty() {
             return false;
         }
-        // `g_key_file_is_key_name` accepts exactly one shape carrying a bracket — a
+        // `g_key_file_is_key_name` accepts exactly one shape carrying a bracket: a
         // trailing `[locale]`, well formed and with no space before it. Measured on GLib
         // 2.72: `bad]key`, `bad[key`, `foo[` and `a]b[c` are each `Invalid key name`,
         // while inner spaces, tabs and control characters are not. Flatpak writes no
@@ -265,7 +265,7 @@ fn group_name(after_bracket: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    // The shape of a real `/.flatpak-info`, trimmed to what matters here.
+    // The shape of a real `/.flatpak-info`, limited to the fields used here.
     const TEMPLATE: &str = "\
 [Application]
 name=org.example.App
@@ -293,11 +293,11 @@ instance-id=1234567890
         // GKeyFile drops a line's leading whitespace, a key's trailing whitespace and a
         // value's *leading* whitespace, so this still reaches `strcmp` as exactly `talk`.
         assert!(has_dconf_access(&info("  ca.desrt.dconf = talk")));
-        // The other half of `g_key_file_line_is_comment`, and the half this row alone holds: `#`
-        // opens a comment and the line is skipped, where the `;` below is a key and fails
-        // the load. Treating `#` as a key too would deny access over a file GLib reads
-        // without complaint — the cautious direction, but a wrong one, and it would send
-        // every such sandbox to the portal for no reason.
+        // The other half of `g_key_file_line_is_comment`, and the half this row alone
+        // holds: `#` opens a comment and the line is skipped, where the `;` below is a key
+        // and fails the load. Treating `#` as a key too would deny access over a file GLib
+        // reads without complaint, the cautious direction, but a wrong one, and it would
+        // send every such sandbox to the portal for no reason.
         assert!(has_dconf_access(&info("# a comment\nca.desrt.dconf=talk")));
     }
 
@@ -311,10 +311,9 @@ instance-id=1234567890
         assert!(!has_dconf_access(""));
     }
 
-    // Each of these was accepted here and is rejected by GLib's
-    // `strcmp (dconf_policy, "talk") == 0`, so each meant trusting a `GSettings` read
-    // that GLib serves from the keyfile backend as `mode = 'none'` — the silent `Direct`
-    // this whole module exists to prevent.
+    // GLib's `strcmp (dconf_policy, "talk") == 0` rejects each of these policies. Accepting
+    // them would trust a `GSettings` read that GLib serves from the keyfile backend as
+    // `mode = 'none'`, yielding silent `Direct`.
     #[test]
     fn a_policy_glib_itself_would_reject_does_not_grant_access() {
         assert!(
@@ -377,8 +376,7 @@ ca.desrt.dconf=talk
         );
         // Every row here needs a granting `ca.desrt.dconf` line *after* the bad one, or it
         // cannot fail: without it the answer is `false` because nothing granted anything,
-        // not because the load was refused. This row had no such line and did not hold the
-        // empty-key check at all.
+        // not because the load was refused.
         assert!(
             !has_dconf_access(&info("=talk\nca.desrt.dconf=talk")),
             "\"No empty keys, please\""
@@ -391,12 +389,12 @@ ca.desrt.dconf=talk
             !has_dconf_access("[App\u{1}]\n\n[Session Bus Policy]\nca.desrt.dconf=talk\n"),
             "and rejects an ASCII control character inside one"
         );
-        // The second `[` opens nothing — `g_key_file_line_is_group` stops at the first `]`
+        // The second `[` opens nothing: `g_key_file_line_is_group` stops at the first `]`
         // and hands `App[1` to `g_key_file_is_group_name`, which refuses it. Measured on
-        // GLib 2.72 through `g_key_file_load_from_data`: `Invalid group name: App[1`.
-        // This row is the only thing holding that half — the control character above is a
-        // different refusal — so without it a manifest carrying this line is read on past a
-        // load GLib refuses.
+        // GLib 2.72 through `g_key_file_load_from_data`: `Invalid group name: App[1`. No
+        // other test checks that refusal (the control character above is a different
+        // refusal), so without it a manifest carrying this line is read on past a load GLib
+        // refuses.
         assert!(
             !has_dconf_access("[App[1]\n\n[Session Bus Policy]\nca.desrt.dconf=talk\n"),
             "and a `[` inside one, which no locale suffix can excuse in a group name"
@@ -414,7 +412,7 @@ ca.desrt.dconf=talk
             "only spaces and tabs may follow the `]`"
         );
         // Measured on GLib 2.72 through `g_key_file_load_from_data`. The key is in another
-        // group, exactly as a real one would be — the load fails before the policy line is
+        // group, as a real one would be: the load fails before the policy line is
         // ever reached.
         assert!(
             !has_dconf_access(
@@ -429,7 +427,7 @@ ca.desrt.dconf=talk
     }
 
     // `g_key_file_parse_group` keeps the name exactly as written, so the padded header
-    // names a group GLib never looks in — while `g_key_file_line_is_group` does allow
+    // names a group GLib never looks in, while `g_key_file_line_is_group` does allow
     // blanks *after* the `]`.
     #[test]
     fn a_group_header_is_taken_exactly_as_written() {
@@ -441,7 +439,7 @@ ca.desrt.dconf=talk
         ));
     }
 
-    // The shape of a real `meta/snap.yaml`, trimmed to what matters here.
+    // The shape of a real `meta/snap.yaml`, limited to the fields used here.
     const SNAP_YAML_TEMPLATE: &str = "\
 name: example
 version: '1.0'
@@ -472,7 +470,7 @@ grade: stable
 
     // `g_str_has_prefix` is anchored, unlike the `/.flatpak-info` reader above, which goes
     // through GKeyFile and does trim. An indented line is therefore not the confinement
-    // line — and mistaking one for it would be the wrong way round, turning a strict snap
+    // line, and mistaking one for it would be the wrong way round, turning a strict snap
     // into an unsandboxed one.
     #[test]
     fn an_indented_confinement_line_is_not_the_confinement_line() {
@@ -488,10 +486,10 @@ grade: stable
         );
     }
 
-    // `snap_confinement` answering `None` is pinned above; what that `None` then *means* was
-    // not. A manifest this crate finds no level in is still a sandbox, and reading it the
-    // other way — believing only a manifest that names one — trusts GSettings inside a snap,
-    // which answers `mode = 'none'` from the keyfile backend.
+    // `snap_confinement` answering `None` is pinned above; what that `None` then *means*
+    // was not. A manifest this crate finds no level in is still a sandbox, and reading it
+    // the other way, believing only a manifest that names one, trusts GSettings inside a
+    // snap, which answers `mode = 'none'` from the keyfile backend.
     #[test]
     fn a_manifest_naming_no_confinement_is_still_confined() {
         assert!(snap_is_confined(&snap_yaml("grade: devel")));
@@ -514,12 +512,11 @@ grade: stable
         assert!(!Sandbox::Snap.gsettings_is_trustworthy());
     }
 
-    // Before `sandbox_from_flatpak_read` split the decision out of `detect`, *any*
-    // `/.flatpak-info` read failure — not only "the file does not exist" — fell straight
-    // through to the snap check and then `Sandbox::None`: a present-but-non-UTF-8 (or
-    // permission-denied) file read exactly like an absent one, trusting GSettings even
-    // though the sandbox is real. That is the silent `Direct` this whole module exists
-    // to prevent, one step earlier than the parse failures the tests above already cover.
+    // Only "the file does not exist" may fall through to the snap check and then
+    // `Sandbox::None`. A present-but-non-UTF-8 (or permission-denied) `/.flatpak-info` read
+    // like an absent one would trust GSettings even though the sandbox is real: the silent
+    // `Direct` this whole module exists to prevent, one step earlier than the parse
+    // failures the tests above cover.
     #[test]
     fn an_unreadable_flatpak_info_denies_dconf_access_instead_of_looking_unsandboxed() {
         let invalid_utf8 = std::io::Error::new(
@@ -543,7 +540,7 @@ grade: stable
         );
     }
 
-    // Only outright absence — not any other read failure — means "not a Flatpak", so
+    // Only outright absence, not any other read failure, means "not a Flatpak", so
     // only it falls through to the snap check.
     #[test]
     fn a_missing_flatpak_info_falls_through_to_the_snap_check() {

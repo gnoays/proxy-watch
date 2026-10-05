@@ -11,13 +11,13 @@ use crate::endpoint::{ProxyEndpoint, ProxyEntry, Scheme};
 
 /// What a single configuration source says about proxying.
 ///
-/// Hand-written [`Debug`], because [`ProxyConfig`](crate::ProxyConfig)'s is derived and would
-/// otherwise print whatever this one does. What each variant withholds is not the same thing:
-/// a [`Pac`](ProxyMode::Pac) URL is printed, minus its userinfo — the location is what makes a
-/// report actionable, and only the credentials are the secret — while a
+/// Hand-written [`Debug`], because [`ProxyConfig`](crate::ProxyConfig)'s is derived and
+/// prints whatever this one does. The variants withhold different things: a
+/// [`Pac`](ProxyMode::Pac) URL is printed minus its userinfo (the location makes a report
+/// actionable, and only the credentials are secret) while a
 /// [`PacInline`](ProxyMode::PacInline) body is withheld whole and stands in as length plus
 /// hash, because a script is not a locator and any part of it may be one.
-/// [`Manual`](ProxyMode::Manual) delegates — [`ProxyEntry`] masks auth.
+/// [`Manual`](ProxyMode::Manual) delegates: [`ProxyEntry`] masks auth.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProxyMode {
@@ -28,13 +28,12 @@ pub enum ProxyMode {
     /// Static per-scheme proxies plus bypass rules.
     ///
     /// Sealed, like the other variants that carry fields: build it with
-    /// [`ProxyMode::manual`], which is what keeps the [`rejected`](ProxyMode::Manual) list
-    /// and the `per_scheme` entries mirroring it in step — the constructor reads the list
-    /// back out of the map, so the two cannot be handed in disagreeing. The enum's own
-    /// `#[non_exhaustive]` does not seal a variant — it only forces a `_` arm in a match —
+    /// [`ProxyMode::manual`], which keeps the [`rejected`](ProxyMode::Manual) list and the
+    /// `per_scheme` entries mirroring it in step: the constructor reads the list back out
+    /// of the map, so the two cannot be handed in disagreeing. The enum's own
+    /// `#[non_exhaustive]` does not seal a variant: it only forces a `_` arm in a match,
     /// so without this a caller could assemble a `Manual` whose two halves disagree, and
-    /// `resolve` answers from the mirror. (Not linked: `resolve` is behind its own feature,
-    /// and this variant is not.)
+    /// `resolve` answers from the mirror.
     #[non_exhaustive]
     Manual {
         /// Per-scheme proxy entries.
@@ -51,10 +50,9 @@ pub enum ProxyMode {
     Pac {
         /// Script URL.
         url: Url,
-        /// Fail-open drops (redacted), as in [`Manual`](ProxyMode::Manual) — a source can
-        /// reach a PAC answer having already lost an unrelated key on the way to it. There
-        /// is no `per_scheme` to mirror them into here, so they are reachable only through
-        /// [`ProxyMode::rejected`].
+        /// Fail-open drops (redacted), as in [`Manual`](ProxyMode::Manual): a source can
+        /// reach a PAC answer having already lost an unrelated key. With no `per_scheme` to
+        /// mirror them into, they are reachable only through [`ProxyMode::rejected`].
         rejected: Vec<RejectedValue>,
     },
     /// Inline PAC script body.
@@ -70,23 +68,21 @@ pub enum ProxyMode {
     /// WPAD enabled (no DHCP/DNS probe in this crate).
     ///
     /// Not sealed, and neither is [`Direct`](ProxyMode::Direct): a sealed unit variant
-    /// cannot be *named* by another crate, not merely constructed by one, so sealing these
-    /// two would cost every caller `mode == ProxyMode::Direct`. `Direct` could not be
-    /// sealed in any case — it is this enum's [`Default`], and a default variant must be
-    /// exhaustive. Neither carries fields, and neither ever will: a backend that dropped a
-    /// setting answers [`Manual`](ProxyMode::Manual) so the record has somewhere to go
-    /// (`proxy_dict.rs`' "reject-only stays `Manual`"), which is why the pair that cannot
-    /// be sealed is also the pair with nothing to add.
+    /// cannot be *named* by another crate, not only constructed by one, so sealing these
+    /// two would break every caller's `mode == ProxyMode::Direct`. `Direct` could not be
+    /// sealed in any case: it is this enum's [`Default`], and a default variant must be
+    /// exhaustive. Neither carries fields, and neither will: a backend that dropped a
+    /// setting answers [`Manual`](ProxyMode::Manual) so the record has somewhere to go.
     WpadAutoDetect,
 }
 
-// Both lookups' precedence rule, in the one place, so that adding a step to either cannot
-// put them out of step: the first entry that is an *answer* wins, and a drop is not one.
-// A later step that answers is a proxy the platform did configure — macOS' SOCKS fallback
-// and Windows' `socks=` fill are exactly that — so preferring the record over it would turn
-// a resolvable request into an error. With nothing to answer anywhere the earliest record
-// is returned, because that is the slot whose loss took the answer away; walking the chain
-// is what keeps that order the *lookup's* order rather than a second one maintained by hand.
+// Both lookups' precedence rule, defined only here, so that adding a step to either cannot
+// put them out of step: the first entry that is an *answer* wins, and a drop is not one. A
+// later step that answers is a proxy the platform did configure (including macOS' SOCKS
+// fallback and Windows' `socks=` fill), so preferring the record over it would turn a
+// resolvable request into an error. With nothing to answer anywhere the earliest record is
+// returned, because that is the slot whose loss took the answer away; walking the chain is
+// what keeps that order the *lookup's* order rather than a second one maintained by hand.
 fn first_answer<'a>(chain: impl IntoIterator<Item = &'a ProxyEntry>) -> Option<&'a ProxyEntry> {
     let mut dropped = None;
     for entry in chain {
@@ -103,13 +99,13 @@ impl ProxyMode {
     /// [`rejected`](ProxyMode::Manual) list from whatever drops `per_scheme` already holds.
     ///
     /// Empty for the map a backend builds, which records its drops separately and attaches
-    /// them with `with_rejected` (private) once the map is complete. It is a caller filtering
-    /// or merging a *parsed* `Manual` that hands one back already carrying
-    /// [`ProxyEntry::Unusable`] entries, because that is where `with_rejected` put them, and
-    /// the list has to be recovered from there rather than left empty — an empty list beside
-    /// a lookup that answers `Unusable` says nothing was lost about a request that cannot be
-    /// routed. Read in [`Scheme::ALL`]'s order, not the map's, which is seeded per instance.
-    /// A record that named no scheme was never in the map and cannot come back this way.
+    /// them once the map is complete. A caller filtering or merging a *parsed* `Manual`
+    /// hands back a map already carrying [`ProxyEntry::Unusable`] entries, and the list is
+    /// recovered from them rather than left empty: an empty list beside a lookup that
+    /// answers `Unusable` would say nothing was lost about a request that cannot be
+    /// routed. Read in [`Scheme::ALL`]'s order, not the map's, which is seeded per
+    /// instance. A record that named no scheme was never in the map and cannot come back
+    /// this way.
     #[must_use]
     pub fn manual(per_scheme: HashMap<Scheme, ProxyEntry>, bypass: BypassRules) -> Self {
         let rejected = Scheme::ALL
@@ -154,31 +150,30 @@ impl ProxyMode {
     ///
     /// A no-op on [`ProxyMode::Direct`] and [`ProxyMode::WpadAutoDetect`], which have
     /// nowhere to put the list. No backend needs one there: a reader that dropped a setting
-    /// answers [`Manual`](ProxyMode::Manual) rather than `Direct` precisely so the record
-    /// has somewhere to go, and the two WPAD returns are reached only from a flag that read
-    /// cleanly, so nothing can have been recorded by the time either is taken.
+    /// answers [`Manual`](ProxyMode::Manual) rather than `Direct` so the record has
+    /// somewhere to go, and every backend's WPAD return is reached only from a flag that
+    /// read cleanly, so nothing can have been recorded by the time one is taken.
     ///
     /// Only [`Manual`](ProxyMode::Manual) mirrors the list into `per_scheme`; the PAC
     /// variants have no map, and a lookup against them answers `None` for every scheme
     /// anyway. The rest of this describes that mirror.
     ///
     /// Every record that names a scheme is also written into `per_scheme` as
-    /// [`ProxyEntry::Unusable`], which is what makes a drop reachable from a lookup instead
-    /// of only from a second list the lookup would have to be kept in step with. Doing it
-    /// here rather than in each backend is the point: spread across the backends, five
-    /// readers express "keep this scheme out of the map so the record answers instead" in
-    /// five dialects, and the two orderings — the lookup's and the record walk's — have to
-    /// agree by hand.
+    /// [`ProxyEntry::Unusable`], so a drop is reachable from a lookup instead of only from
+    /// a second list the lookup would have to be kept in step with. It is done here rather
+    /// than in each backend because, spread across the backends, five readers express "keep
+    /// this scheme out of the map so the record answers instead" in five dialects, and the
+    /// two orderings (the lookup's and the record walk's) have to agree by hand.
     ///
     /// Two rules:
     ///
-    /// - An occupied slot stands, including one holding [`ProxyEntry::Disabled`] — that is
+    /// - An occupied slot stands, including one holding [`ProxyEntry::Disabled`]: that is
     ///   an answer the platform gave, and a backend that recorded a drop and wrote the slot
     ///   anyway (macOS' SOCKS fallback, GNOME's `use-same-proxy`) meant the write. A backend
     ///   that wants the record to answer leaves the slot empty. A record naming
     ///   [`Scheme::All`] is no exception here: a *live* catch-all does not reach past a
     ///   `Disabled` either ([`entry_for`](Self::entry_for)'s first rule), so losing one took
-    ///   nothing from that scheme — clearing it would turn `http_proxy=` beside an
+    ///   nothing from that scheme: clearing it would turn `http_proxy=` beside an
     ///   unparseable `all_proxy=` into an error. The one reader whose catch-all *overwrites*
     ///   `Disabled` rather than filling around it is macOS', and it empties those slots
     ///   itself before calling this.
@@ -246,7 +241,7 @@ impl ProxyMode {
     /// [`Unusable`](ProxyEntry::Unusable) does not: a drop is the last resort, so a live
     /// `All` still answers and the record surfaces only when nothing else covers `scheme`.
     /// Backends may substitute before the map is built (macOS SOCKS fallback, Windows
-    /// `socks=` fill) — this applies to the finished map.
+    /// `socks=` fill); this applies to the finished map.
     #[must_use]
     pub fn entry_for(&self, scheme: Scheme) -> Option<&ProxyEntry> {
         let ProxyMode::Manual { per_scheme, .. } = self else {
@@ -266,14 +261,15 @@ impl ProxyMode {
     ///
     /// `None` is "no endpoint to hand out". Inside [`Manual`](ProxyMode::Manual) that is
     /// direct access when nothing covers the scheme and when what does is
-    /// [`Disabled`](ProxyEntry::Disabled) — but not when it is
+    /// [`Disabled`](ProxyEntry::Disabled), but not when it is
     /// [`Unusable`](ProxyEntry::Unusable), a setting that was lost rather than an answer,
     /// which `resolve` reports as
-    /// [`Error::ProxyEntryUnusable`](crate::Error::ProxyEntryUnusable). A caller that has to
-    /// tell those two apart asks [`entry_for`](Self::entry_for), which is the same lookup
-    /// with the entry left intact. Every other mode returns `None` for every scheme,
-    /// including the PAC and WPAD ones that keep their answer in a script this method cannot
-    /// run; that is [`Error::PacNotSupported`](crate::Error::PacNotSupported), not direct.
+    /// [`Error::ProxyEntryUnusable`](crate::Error::ProxyEntryUnusable). A caller that has
+    /// to tell those two apart asks [`entry_for`](Self::entry_for), which is the same
+    /// lookup with the entry left intact. Every other mode returns `None` for every scheme,
+    /// including the PAC and WPAD ones that keep their answer in a script this method
+    /// cannot run; that is [`Error::PacNotSupported`](crate::Error::PacNotSupported), not
+    /// direct.
     ///
     /// ```
     /// # use proxy_watch::{parse, ProxyMode, Scheme, BypassRules};
@@ -290,15 +286,16 @@ impl ProxyMode {
 
     // Only the first three steps come from the references (Chromium's
     // `GetProxyListForWebSocketScheme`). `all` is a fourth that neither has and Chromium
-    // structurally cannot reach — there a catch-all and a per-scheme entry never coexist —
-    // so it goes last, for the reason it does everywhere else here: a named entry beats
-    // [`Scheme::All`]. `§4.1.3` is Chromium's way of citing it; in the RFC the note is item 3
-    // of the numbered list in §4.1, not a section of that number.
+    // structurally cannot reach: there a catch-all and a per-scheme entry never coexist, so
+    // it goes last, for the reason it does everywhere else here: a named entry beats
+    // [`Scheme::All`]. `§4.1.3` is Chromium's way of citing it; in the RFC the note is item
+    // 3 of the numbered list in §4.1, not a section of that number.
     /// Entry for `ws`/`wss`: socks → https → http (RFC 6455 §4.1.3, as Chromium reads it),
-    /// then `all` — a step this crate adds.
+    /// then `all`: a step this crate adds.
     ///
     /// Unlike [`entry_for`](Self::entry_for), intermediate `Disabled` entries do not stop
-    /// the chain — only terminal [`Scheme::All`] is returned as-is (e.g. empty `all_proxy=`).
+    /// the chain: only terminal [`Scheme::All`] is returned as-is (e.g. empty
+    /// `all_proxy=`).
     /// An intermediate [`Unusable`](ProxyEntry::Unusable) does not stop it either, but is
     /// remembered, and the earliest one is the answer when no step has a real one.
     ///
@@ -353,11 +350,11 @@ impl fmt::Debug for ProxyMode {
             } => f
                 .debug_struct("Manual")
                 // Sorted, which a `HashMap` is not: its iteration order is seeded per
-                // instance, so the same configuration would print differently on each
-                // run and a diff between two logged configurations would report changes
-                // nobody made. `Scheme`'s `Ord` is the declaration order, which is
+                // instance, so the same configuration would print differently on each run
+                // and a diff between two logged configurations would report changes that
+                // did not happen. `Scheme`'s `Ord` is the declaration order, which is
                 // [`Scheme::ALL`]'s documented one. Every map this crate's `Debug` prints
-                // is ordered for that reason — `ProxyEnv`'s is the other public one.
+                // is ordered for that reason: `ProxyEnv`'s is the other public one.
                 .field(
                     "per_scheme",
                     &per_scheme
@@ -423,10 +420,10 @@ mod tests {
         assert!(debug.contains("proxy.corp"), "{debug}");
     }
 
-    // Two `Debug` renderings of the same configuration must be the same text. A
-    // `HashMap` gives no such promise: its iteration order is seeded per instance, so
-    // the field would come out in a different order on each run and a diff between two
-    // logged configurations would report changes nobody made.
+    // Two `Debug` renderings of the same configuration must be the same text. A `HashMap`
+    // gives no such promise: its iteration order is seeded per instance, so the field would
+    // come out in a different order on each run and a diff between two logged
+    // configurations would report changes that did not happen.
     #[test]
     fn manual_debug_prints_the_schemes_in_a_fixed_order() {
         use crate::parse;
@@ -449,12 +446,12 @@ mod tests {
         }
     }
 
-    // The impl is hand-written for the whole enum, and this test is the only thing holding
-    // four of its renderings. `WpadAutoDetect` printed as `Direct` makes "discovery is
-    // running" and "no proxy at all" the same line in a log — and `is_direct` is false for
-    // one of them, so a reader comparing the two would be told the line is wrong. `Pac`'s
-    // `rejected` is where a PAC configuration parks what it could not read, and
-    // `PacInline`'s `len` is named here for the same reason.
+    // The impl is hand-written for the whole enum, and only this test checks four of its
+    // renderings. `WpadAutoDetect` printed as `Direct` makes "discovery is running" and "no
+    // proxy at all" the same line in a log, and `is_direct` is false for one of them, so a
+    // reader comparing the two would be told the line is wrong. `Pac`'s `rejected` is where
+    // a PAC configuration parks what it could not read, and `PacInline`'s `len` is named
+    // here for the same reason.
     //
     // Exact strings, so that a label, a field order or a variant name cannot change unseen.
     // The `RejectedValue` and the hash keep their own renderings, which this impl does not
@@ -536,7 +533,7 @@ mod tests {
     }
 
     // Unlike [`ProxyMode::entry_for`], a disabled entry along the chain does not stop
-    // it — [`ProxyMode::websocket_entry`]'s doc states that difference, and it is why
+    // it: [`ProxyMode::websocket_entry`]'s doc states that difference, and it is why
     // the chain cannot be three `entry_for` calls.
     #[test]
     fn websocket_entry_treats_a_disabled_tier_as_absent_not_as_a_stop_signal() {
@@ -563,8 +560,8 @@ mod tests {
 
     // The other half of the same doc sentence: the three tiers above drop a `Disabled`,
     // but the terminal [`Scheme::All`] is returned as-is. [`authority`] cannot see the
-    // difference — it reads through [`ProxyMode::websocket_endpoint`], which turns both
-    // `Some(Disabled)` and `None` into no endpoint — so the entry is asserted directly.
+    // difference: it reads through [`ProxyMode::websocket_endpoint`], which turns both
+    // `Some(Disabled)` and `None` into no endpoint, so the entry is asserted directly.
     #[test]
     fn a_disabled_terminal_catch_all_is_returned_rather_than_dropped() {
         use crate::parse;
@@ -587,11 +584,12 @@ mod tests {
     }
 
     // Empty is the answer for a map with nothing lost in it, and the row above is the whole
-    // of that case. A caller filtering or merging a parsed `Manual` reaches for its map, and
-    // the map is where `with_rejected` put the drops — so handing one back to the only public
-    // constructor there is must not turn them into a list that says nothing was lost while a
-    // lookup still answers `Unusable`. That is the shape of a drop nobody can name: `resolve`
-    // errors, and the report written from `rejected()` has no line for it.
+    // of that case. A caller filtering or merging a parsed `Manual` reaches for its map,
+    // and the map is where `with_rejected` put the drops, so handing one back to the only
+    // public constructor there is must not turn them into a list that says nothing was lost
+    // while a lookup still answers `Unusable`. That leaves a drop with no corresponding
+    // diagnostic: `resolve` errors, and the report written from `rejected()` has no line
+    // for it.
     #[test]
     fn manual_recovers_the_drops_the_map_it_was_handed_already_carries() {
         let lost = rejection("http=not a host").for_scheme(Some(Scheme::Http));
@@ -604,7 +602,7 @@ mod tests {
             ]),
             BypassRules::new(),
         );
-        // In `Scheme::ALL`'s order, not the map's, which is seeded per instance — the same
+        // In `Scheme::ALL`'s order, not the map's, which is seeded per instance: the same
         // reason the `Debug` above sorts.
         assert_eq!(mode.rejected(), Some(&[lost, inherited][..]));
     }
@@ -650,8 +648,8 @@ mod tests {
         }
     }
 
-    // Two [`ProxyMode::Manual`] values built from identical input —
-    // including identical `rejected` text — must compare equal so
+    // Two [`ProxyMode::Manual`] values built from identical input
+    // (including identical `rejected` text) must compare equal so
     // [`ProxyConfig`](crate::ProxyConfig)'s duplicate-notification suppression keeps
     // working now that `rejected` is part of the derived [`PartialEq`].
     #[test]
