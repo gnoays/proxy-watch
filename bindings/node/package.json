@@ -1,7 +1,7 @@
 {
   "name": "proxy-watch",
   "version": "0.1.0",
-  "description": "The operating system's proxy settings, layered with *_proxy, for Node.js",
+  "description": "The operating system's proxy settings, layered with *_proxy, and the route each URL takes under them, for Node.js",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",

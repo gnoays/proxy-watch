@@ -11,7 +11,7 @@
     "LICENSE-APACHE",
     "THIRD-PARTY-LICENSES.txt"
   ],
-  "description": "The operating system's proxy settings, layered with *_proxy, for Node.js",
+  "description": "The operating system's proxy settings, layered with *_proxy, and the route each URL takes under them, for Node.js",
   "keywords": [
     "proxy",
     "pac",
