@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "proxy-watch"
 version = "0.1.0"
-description = "The operating system's proxy settings, layered with *_proxy, for Python"
+description = "The operating system's proxy settings, layered with *_proxy, and the route each URL takes under them, for Python"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 # Written by `cargo xtask stage-licenses python <target> bindings/python` before a build;
