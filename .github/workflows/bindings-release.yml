@@ -345,7 +345,8 @@ jobs:
         # install of the root alone between the two steps would find none.
         run: |
           set -euo pipefail
-          npm install -g "npm@$NPM_VERSION"
+          # The runner's Node lives under `/usr/local`, which only root can write.
+          sudo npm install -g "npm@$NPM_VERSION"
           for package in dist/proxy-watch-*-[0-9]*.tgz; do
             npm publish "$package" --access public
           done
