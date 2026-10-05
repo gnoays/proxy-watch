@@ -312,9 +312,10 @@ jobs:
           set -euo pipefail
           unzip -q dist/proxy-watch-c-*-x86_64-pc-windows-msvc.zip -d "$RUNNER_TEMP"
           c=$(echo "$RUNNER_TEMP"/proxy-watch-c-*-x86_64-pc-windows-msvc)
-          # On MSVC the list is in `link.exe` syntax (`kernel32.lib`, `/defaultlib:msvcrt`), which
-          # the clang driver reads as input files; `-Wl,` hands each entry to the linker as is.
-          clang -I"$c/include" bindings/c/tests/smoke.c "$c/lib/proxy_watch_c.lib" $(sed 's/[^ ]*/-Wl,&/g' "$c/lib/native-static-libs.txt") -o "$RUNNER_TEMP/smoke-static.exe"
+          # Linked the way the README tells an MSVC program to: `/MD`, with rustc's list, which is
+          # in `link.exe` syntax, after `/link`. `MSYS2_ARG_CONV_EXCL` keeps Git Bash from
+          # rewriting the `/` options into paths.
+          MSYS2_ARG_CONV_EXCL='*' clang-cl /nologo /MD /I"$c/include" bindings/c/tests/smoke.c /Fe:"$RUNNER_TEMP/smoke-static.exe" /link "$c/lib/proxy_watch_c.lib" $(cat "$c/lib/native-static-libs.txt")
           "$RUNNER_TEMP/smoke-static.exe"
           clang -I"$c/include" bindings/c/tests/smoke.c "$c/lib/proxy_watch_c.dll.lib" -o "$RUNNER_TEMP/smoke.exe"
           PATH="$c/lib:$PATH" "$RUNNER_TEMP/smoke.exe"
