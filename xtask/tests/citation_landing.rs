@@ -546,27 +546,34 @@ fn no_comment_names_a_document_the_published_tree_leaves_behind() {
 
 #[test]
 fn an_external_docs_path_is_still_a_landing() {
-    // The distinction the gate above rests on. Chromium's and curl's own `docs/` paths are
-    // not files of this repository, so they stay citations; this tree's are not.
-    let root = repo_root();
-    assert!(in_tree_doc_paths(&root, "Chromium's `docs/proxy.md` describes the flow.").is_empty());
-    assert!(in_tree_doc_paths(&root, "curl documents this in `docs/url-syntax.html`.").is_empty());
-    // This tree's own directory, and a file under it that does not exist, are both caught.
-    assert_eq!(
-        in_tree_doc_paths(&root, "see docs/knowledge/ and docs/issues/T999-typo.md"),
-        ["docs/knowledge/", "docs/issues/T999-typo.md"]
+    // The distinction the gate above rests on, against a tree built for it. The published
+    // tree carries no `docs/`, so a control that read this repository's own would pass in
+    // one tree and fail in the other; naming a real page would also tie it to one filename
+    // in the directory this whole gate treats as disposable.
+    let fixture = std::env::temp_dir().join(format!("proxy-watch-landing-{}", std::process::id()));
+    for dir in ["knowledge", "issues"] {
+        fs::create_dir_all(fixture.join("docs").join(dir))
+            .expect("the temporary tree is creatable");
+    }
+    fs::write(fixture.join("docs").join("NOTE.md"), "x").expect("the note is writable");
+
+    // Chromium's and curl's own `docs/` paths are not files of this tree, so they stay
+    // citations.
+    assert!(
+        in_tree_doc_paths(&fixture, "Chromium's `docs/proxy.md` describes the flow.").is_empty()
+    );
+    assert!(
+        in_tree_doc_paths(&fixture, "curl documents this in `docs/url-syntax.html`.").is_empty()
     );
     assert!(has_landing(
         "Chromium's `docs/proxy.md` describes the flow."
     ));
-
-    // The arm that finds an existing in-tree document path, against a tree built for it.
-    // Naming a real page here would tie the control to one filename in the directory this
-    // whole gate treats as disposable, so a rename would report the gate broken and say
-    // nothing about the gate.
-    let fixture = std::env::temp_dir().join(format!("proxy-watch-landing-{}", std::process::id()));
-    fs::create_dir_all(fixture.join("docs")).expect("the temporary tree is creatable");
-    fs::write(fixture.join("docs").join("NOTE.md"), "x").expect("the note is writable");
+    // The tree's own directory, and a file under it that does not exist, are both caught.
+    assert_eq!(
+        in_tree_doc_paths(&fixture, "see docs/knowledge/ and docs/issues/T999-typo.md"),
+        ["docs/knowledge/", "docs/issues/T999-typo.md"]
+    );
+    // An existing in-tree document is caught.
     assert_eq!(
         in_tree_doc_paths(&fixture, "The rule is in `docs/NOTE.md`."),
         vec!["docs/NOTE.md".to_owned()]
