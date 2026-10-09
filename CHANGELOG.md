@@ -7,6 +7,12 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+### Added
+
+- `ProxyWatcher::current_shared()`: the current snapshot as an `Arc<ProxyConfig>`, without
+  copying the configuration, for a caller that asks on every connection. A change no
+  longer copies the configuration either.
+
 ### Routing answers that change
 
 - macOS: an empty `ExceptionsList` array is no bypass key, so `localhost`, `127.0.0.1` and
