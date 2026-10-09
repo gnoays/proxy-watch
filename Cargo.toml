@@ -1,6 +1,6 @@
 [package]
 name = "proxy-watch"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # MSRV 1.88 (`let` chains).
 rust-version = "1.88"

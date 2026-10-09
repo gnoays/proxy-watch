@@ -7,6 +7,12 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+MSRV unchanged: 1.88, with every feature. One addition to the library's API,
+`ProxyWatcher::current_shared()`. The same machine and destination can route differently
+from 0.2.0; `### Routing answers that change` has each case.
+
 ### Added
 
 - `ProxyWatcher::current_shared()`: the current snapshot as an `Arc<ProxyConfig>`, without
@@ -26,6 +32,11 @@ supported Rust version in force for that release.
   `fe80::/10`, `169.254.169.254` among them) go to the proxy unless an entry names them;
   they were `Direct`. Every `no_proxy` reader measured proxies them. Loopback is still
   bypassed.
+
+### Changed
+
+- Dependencies: `core-foundation` 0.10 and `system-configuration` 0.8 on macOS and iOS,
+  `libloading` 0.9 on Linux. None of their types is in this crate's API.
 
 ## [0.2.0] - 2026-10-05
 
@@ -304,7 +315,8 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
-[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0
