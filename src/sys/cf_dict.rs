@@ -14,7 +14,7 @@ use core_foundation::string::CFString;
 use super::proxy_dict::{self, DictValue, ProxyDict};
 
 // `CFString::to_string()` (`Display`, which every call site below goes through) calls into
-// `core-foundation` 0.9.4's own `Cow<str>: From<&CFString>`. For content its
+// `core-foundation` 0.10.1's own `Cow<str>: From<&CFString>`. For content its
 // UTF-8-fast-path pointer cannot serve, that impl asks `CFStringGetBytes` to reencode with
 // `lossByte: 0` and then does `assert_eq!(chars_written, char_len)`, so a CFString holding
 // an unpaired UTF-16 surrogate (not data this crate ever writes, but not something
