@@ -13,9 +13,10 @@ changes.
 
 ## [Unreleased]
 
-Built from the crate's unreleased changes after 0.2.0, which change some routing answers
-(macOS with an empty bypass list, KDE's `ReversedException`, link-local destinations under
-`no_proxy`).
+## [0.2.0] - 2026-10-09
+
+Built from crate 0.3.0, which changes some routing answers (macOS with an empty bypass
+list, KDE's `ReversedException`, link-local destinations under `no_proxy`).
 
 ### Added
 
