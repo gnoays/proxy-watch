@@ -42,8 +42,8 @@
 //! [`WatchOptions::poll_interval`] to poll) or reports [`Error::Sandboxed`].
 //!
 //! **Unverified:** the macOS backend and that sandbox path have run only in CI, the iOS
-//! backend only on a simulator and the Android backend only on an emulator; no device has
-//! run either mobile backend. The table below says what each run covered.
+//! backend only on a simulator, and the Android backend on an emulator and one phone; no
+//! device has run the iOS backend. The table below says what each run covered.
 //! **Risk:** macOS reads a missing or unexpected answer as "nothing is configured"
 //! instead of reporting an error, so a host that does have a proxy is reported as having
 //! none. iOS reads the same dictionary the same way. The sandbox path fails loudly, so
@@ -62,7 +62,7 @@
 //! | Linux (GNOME) | Implemented, tested in CI (GSettings `changed` signal), behind `linux-gnome` |
 //! | Linux (KDE) | Implemented, tested in CI (`kioslaverc` file watch, no desktop environment needed), behind `linux-kde` |
 //! | Linux (Flatpak/Snap) | Sandbox detected from `/.flatpak-info`, or (as GLib's `is_snap` does it) from `$SNAP/meta/snap.yaml` declaring anything but `confinement: classic`; read via the `ProxyResolver` portal (needs `linux-gnome`) or `Error::Sandboxed`. Watch needs `WatchOptions::poll_interval` (portal has no change signal). **Unverified** |
-//! | Android | Read through JNI, API 23+; the crate needs the app's `JavaVM` and a `Context`: `android-activity` registers them with `ndk-context`, which the crate reads, and so does `tao` from 0.36 (Tauri 2.12); a host built on an earlier `tao` calls `android::init` instead. The bypass list is read with `java.net.ProxySelector`'s rules, so loopback goes direct only when the list is non-empty. Watch receives the `PROXY_CHANGE_ACTION` broadcast through a small receiver class the crate loads from memory (API 26+); below API 26, or where in-memory code loading is refused, it needs `WatchOptions::poll_interval`. **Partly verified**. `read()` (direct, manual, PAC), `pac-android-native` and the watcher ran on an API 36 x86-64 emulator: a settings change, a switch of the default network between a Wi-Fi with its own proxy and bypass list and mobile data, and unregistering on drop. The host registered through `ndk-context` there, through `android::init` from a Tauri 2.11 app, and through what `tao` registers in a Tauri 2.12 app built for release; the poll fallback has not run, and no device has run the backend |
+//! | Android | Read through JNI, API 23+; the crate needs the app's `JavaVM` and a `Context`: `android-activity` registers them with `ndk-context`, which the crate reads, and so does `tao` from 0.36 (Tauri 2.12); a host built on an earlier `tao` calls `android::init` instead. The bypass list is read with `java.net.ProxySelector`'s rules, so loopback goes direct only when the list is non-empty. Watch receives the `PROXY_CHANGE_ACTION` broadcast through a small receiver class the crate loads from memory (API 26+); below API 26, or where in-memory code loading is refused, it needs `WatchOptions::poll_interval`. **Partly verified**. `read()` (direct, manual, PAC), `pac-android-native` and the watcher ran on an API 36 x86-64 emulator: a settings change, a switch of the default network between a Wi-Fi with its own proxy and bypass list and mobile data, and unregistering on drop. The host registered through `ndk-context` there, through `android::init` from a Tauri 2.11 app, and through what `tao` registers in a Tauri 2.12 app built for release. On a phone with Android 17, a Tauri app read, resolved and received changes for a Wi-Fi proxy with a bypass list, a PAC URL, and a switch to mobile data. The poll fallback has not run, nor a global, VPN or APN proxy |
 //! | iOS | Read through `CFNetworkCopySystemProxySettings()` and interpreted as macOS's dictionary is. Watch needs `WatchOptions::poll_interval`: iOS gives an app no proxy change notification. The app becoming active and a network path change (`nw_path_monitor`, iOS 12+) re-read before the interval is up. **Partly verified**: on an iOS simulator in CI, watchers read, take their first network path update and drop; what they read is not checked against a configured proxy, and no device has run it |
 //! | Environment variables | `ProxyEnv::from_env()` on every platform: a snapshot, never a `Stream`. Nothing outside the process can change them, and a process changing its own is signalled nowhere. Re-read to pick that up; `ProxyEnv::captured_at()` says when the snapshot was taken |
 //!
@@ -112,6 +112,25 @@
 //!
 //! Each of those spells its bypass list differently, and the differences decide which hosts go
 //! direct. The [`parse`] module's docs have the table, entry shape by entry shape.
+//!
+//! # Pitfalls
+//!
+//! - [`read`] can block for seconds on macOS and inside a Linux sandbox, while a system
+//!   service comes up or times out. Keep it off a UI thread.
+//! - A PAC or WPAD machine makes `resolve()` fail with [`Error::PacNotSupported`] rather
+//!   than answering direct, so a caller that treats an error as "go direct" routes traffic
+//!   around the administrator's proxy. Handle it, or pass the snapshot to a PAC resolver
+//!   with an engine enabled.
+//! - A sandboxed watcher never fires without [`WatchOptions::poll_interval`]: the portal
+//!   has no change signal, so the stream stays on its first snapshot.
+//! - A `kioslaverc` that is a symlink into another directory is read but not watched: the
+//!   watch is on the config directories, and an edit to the link's target fires nothing
+//!   there. Set [`WatchOptions::poll_interval`] if a dotfile manager links it.
+//! - `ProxyStep::to_url()` carries the password in the clear. It exists to hand
+//!   `user:password@` to a client; `endpoint()`'s `Display` masks it, so print that one.
+//! - `watch_channel()` (behind `tokio`) publishes configuration only. A failed re-read or a
+//!   dead notification route leaves the last good configuration standing with nothing
+//!   marking it.
 //!
 //! # Backend limits
 //!
