@@ -7,6 +7,20 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+### Routing answers that change
+
+- macOS: an empty `ExceptionsList` array is no bypass key, so `localhost`, `127.0.0.1` and
+  `::1` go to the proxy, as the Mac sends them; they were `Direct`. A list cleared in
+  System Settings is stored this way.
+- KDE: `ReversedException` is read as KConfig reads a bool, so `true`, the value KDE's
+  settings dialog writes, inverts the list as KF5's KIO and Chromium do; the list was used
+  the ordinary way round. libproxy's `config-kde`, which answers for Qt and KIO 6
+  applications, ignores `true`; a warning names the values on which the two part.
+- Environment (`no_proxy`, `BypassRules::new()`): link-local destinations (`169.254.0.0/16`,
+  `fe80::/10`, `169.254.169.254` among them) go to the proxy unless an entry names them;
+  they were `Direct`. Every `no_proxy` reader measured proxies them. Loopback is still
+  bypassed.
+
 ## [0.2.0] - 2026-10-05
 
 MSRV 1.88 with every feature; `linux-gnome` no longer raises it to 1.92. Additions to the
