@@ -59,7 +59,8 @@ export interface RouteOptions {
    * service), with real DNS; it downloads a PAC URL, runs a body only on macOS and iOS,
    * and runs WPAD only with `wpad` on Windows, macOS and iOS. `'quickjs'`: QuickJS in this
    * process under `policy`, for a body (the configuration's own or `script`); built for
-   * x64 and arm64 Windows, Linux and macOS, `ERR_PAC_ENGINE_UNAVAILABLE` elsewhere.
+   * x64 and arm64 Windows, Linux and macOS and for arm (ARMv7) Linux with glibc,
+   * `ERR_PAC_ENGINE_UNAVAILABLE` elsewhere.
    * `'auto'`: the OS's engine where it has one for the mode, else QuickJS, else the
    * caller's route; chosen before anything runs, so an engine's failure is thrown, not
    * retried on the other. A mode no chosen engine runs stays the caller's route. A URL
@@ -91,6 +92,61 @@ export declare class Snapshot {
   /** @deprecated `routeAsync(url, { pac: 'native' })`. */
   routeNative(url: string): Promise<Route>;
   diagnostics(): Diagnostics;
+  /** The configuration on one line, passwords masked; also what `util.inspect` shows. */
+  toString(): string;
+  /** The whole configuration as plain data, which `JSON.stringify` also takes. A proxy's
+   * password is in it as the value. */
+  toJSON(): SnapshotJson;
+}
+
+/** The fields each kind carries. `kind` and the other enumerations are open: a later
+ * release can add a value. */
+export type ModeJson =
+  | { kind: 'direct' }
+  | { kind: 'manual'; proxies: Record<string, EntryJson>; bypass: BypassJson; rejected: string[] }
+  | { kind: 'pac'; url: string; rejected: string[] }
+  | { kind: 'pac-inline'; script: string; rejected: string[] }
+  | { kind: 'wpad' };
+
+/** Keyed by `http`, `https`, `ftp`, `socks` or `all`. `unusable` is a proxy the source
+ * named that could not be read; `rejected` says why, credentials masked. */
+export type EntryJson =
+  | {
+      kind: 'use';
+      /** The protocol the source named (`http`, `socks5h`, …), or `null` where it named none. */
+      scheme: string | null;
+      host: string;
+      port: number;
+      username: string | null;
+      password: string | null;
+      /** `Present`, `Absent`, `NotRead` (GNOME's stored password, which is not read) or
+       * `InKeychain` (macOS); `null` without a username. */
+      passwordState: string | null;
+    }
+  | { kind: 'disabled' }
+  | { kind: 'unusable'; rejected: string };
+
+export interface BypassJson {
+  /** Each rule in the form it parses back from. */
+  patterns: string[];
+  /** The destinations bypassed without a rule: `Broad`, `WinInet`, `CfNetwork` or `Empty`. */
+  implicit: string;
+  excludeSimpleHostnames: boolean;
+  reversedExceptions: boolean;
+  requireExplicitPort: boolean;
+  ipv4MappedAsIpv4: boolean;
+  stripTrailingDot: boolean;
+  rejected: string[];
+}
+
+export interface SnapshotJson {
+  /** The mode in effect. */
+  mode: ModeJson;
+  /** Every source read, highest precedence first, with its own mode. */
+  sources: { source: string; mode: ModeJson }[];
+  fallbacks: string[];
+  rejected: string[];
+  osReadable: boolean;
 }
 
 /**
@@ -130,6 +186,8 @@ export declare class Watcher {
   /** Stop watching. Safe to call more than once. Once it returns, `onChange` is not
    * called again. */
   close(): void;
+  /** `Watcher { open: <boolean> }`; also what `util.inspect` shows. */
+  toString(): string;
 }
 
 /**

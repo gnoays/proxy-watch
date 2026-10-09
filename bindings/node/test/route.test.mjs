@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pbkdf2 } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { inspect } from 'node:util';
 
 const { read, readSync, watchSync } = createRequire(import.meta.url)('../proxy-watch.node');
 
@@ -50,6 +51,30 @@ test('diagnostics list a dropped value without its password', () => {
   assert.match(rejected[0], /https_proxy/);
   assert.doesNotMatch(rejected[0], /hunter2/);
   assert.deepEqual(readSync({ env }).diagnostics().rejected, []);
+});
+
+test('a snapshot inspects as its configuration with the password masked', () => {
+  const shown = inspect(readSync({ env }));
+  assert.match(shown, /^Snapshot \{ osReadable: \w+, config: ProxyConfig/);
+  assert.match(shown, /proxy\.example/);
+  assert.doesNotMatch(shown, /"pass"/);
+});
+
+test('toJSON holds the configuration with its password', () => {
+  const snapshot = readSync({ env });
+  const { mode, osReadable } = snapshot.toJSON();
+  assert.equal(typeof osReadable, 'boolean');
+  assert.deepEqual(mode.proxies.https, {
+    kind: 'use',
+    scheme: 'http',
+    host: 'proxy.example',
+    port: 3128,
+    username: 'user',
+    password: 'pass',
+    passwordState: 'Present',
+  });
+  assert.deepEqual(mode.bypass.patterns, ['internal.example']);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot.toJSON());
 });
 
 test('the environment outranks the OS by default', async () => {

@@ -17,8 +17,9 @@ use std::time::Duration;
 use futures_core::Stream;
 use proxy_watch::pac::{PacPolicy, PacScript};
 use proxy_watch::{
-    CapturedEnv, EnvPrecedence, Error, Host, ProxyConfig, ProxyEnv, ProxyMode, ProxyStep,
-    ProxyWatcher, Url, WatchEvent, WatchOptions,
+    BypassRules, CapturedEnv, EnvPrecedence, Error, Host, ProxyAuth, ProxyConfig, ProxyEntry,
+    ProxyEnv, ProxyMode, ProxyScheme, ProxyStep, ProxyWatcher, RejectedValue, Scheme, Url,
+    WatchEvent, WatchOptions,
 };
 
 /// Where a request to one URL goes.
@@ -654,17 +655,192 @@ pub fn rejected(config: &ProxyConfig) -> Vec<String> {
             }
         }
     }
-    values
-        .into_iter()
-        .map(|value| {
-            format!(
-                "{:?} from {:?}: {}",
-                value.kind(),
-                value.source(),
-                value.redacted_input()
-            )
-        })
-        .collect()
+    values.into_iter().map(rejected_text).collect()
+}
+
+fn rejected_text(value: &RejectedValue) -> String {
+    format!(
+        "{:?} from {:?}: {}",
+        value.kind(),
+        value.source(),
+        value.redacted_input()
+    )
+}
+
+/// A language-neutral tree each binding turns into its own dict or object.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    List(Vec<Value>),
+    Map(Vec<(String, Value)>),
+}
+
+impl From<&str> for Value {
+    fn from(text: &str) -> Self {
+        Self::Str(text.to_owned())
+    }
+}
+
+impl From<String> for Value {
+    fn from(text: String) -> Self {
+        Self::Str(text)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(flag: bool) -> Self {
+        Self::Bool(flag)
+    }
+}
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(value: Option<T>) -> Self {
+        value.map_or(Self::Null, Into::into)
+    }
+}
+
+fn map<const N: usize>(entries: [(&str, Value); N]) -> Value {
+    Value::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn list<T>(items: impl IntoIterator<Item = T>, each: impl Fn(T) -> Value) -> Value {
+    Value::List(items.into_iter().map(each).collect())
+}
+
+/// The whole snapshot as data: the effective mode, every source's own, the sources left
+/// out, and `os_readable`. A proxy's password is its value, not a mask. A dropped value
+/// (`rejected`) stays masked, as [`rejected`] gives it: nothing uses it, so nothing needs
+/// its secret. Enumerations are strings, a core variant's name where the bindings have no
+/// name of their own, so a later variant is a new string rather than a failure.
+pub fn describe(config: &ProxyConfig, os_readable: bool) -> Value {
+    map([
+        ("mode", describe_mode(&config.effective)),
+        (
+            "sources",
+            list(&config.sources, |(source, mode)| {
+                map([
+                    ("source", format!("{source:?}").into()),
+                    ("mode", describe_mode(mode)),
+                ])
+            }),
+        ),
+        (
+            "fallbacks",
+            list(&config.fallbacks, |source| format!("{source:?}").into()),
+        ),
+        ("rejected", list(rejected(config), Value::Str)),
+        ("os_readable", os_readable.into()),
+    ])
+}
+
+fn describe_mode(mode: &ProxyMode) -> Value {
+    let rejected = |values: &[RejectedValue]| list(values, describe_rejected);
+    match mode {
+        ProxyMode::Direct => map([("kind", "direct".into())]),
+        ProxyMode::Manual {
+            per_scheme,
+            bypass,
+            rejected: dropped,
+            ..
+        } => {
+            // In `Scheme::ALL`'s order, so the output does not follow the map's.
+            let proxies = Scheme::ALL
+                .iter()
+                .filter_map(|scheme| {
+                    per_scheme
+                        .get(scheme)
+                        .map(|entry| (scheme.as_str().to_owned(), describe_entry(entry)))
+                })
+                .collect();
+            map([
+                ("kind", "manual".into()),
+                ("proxies", Value::Map(proxies)),
+                ("bypass", describe_bypass(bypass)),
+                ("rejected", rejected(dropped)),
+            ])
+        }
+        ProxyMode::Pac {
+            url,
+            rejected: dropped,
+            ..
+        } => map([
+            ("kind", "pac".into()),
+            ("url", url.as_str().into()),
+            ("rejected", rejected(dropped)),
+        ]),
+        ProxyMode::PacInline {
+            script,
+            rejected: dropped,
+            ..
+        } => map([
+            ("kind", "pac-inline".into()),
+            ("script", script.as_str().into()),
+            ("rejected", rejected(dropped)),
+        ]),
+        ProxyMode::WpadAutoDetect => map([("kind", "wpad".into())]),
+        other => map([("kind", format!("{other:?}").into())]),
+    }
+}
+
+fn describe_entry(entry: &ProxyEntry) -> Value {
+    match entry {
+        ProxyEntry::Use(endpoint) => {
+            let auth = endpoint.auth.as_ref();
+            map([
+                ("kind", "use".into()),
+                (
+                    "scheme",
+                    endpoint.scheme_hint.map(ProxyScheme::as_str).into(),
+                ),
+                ("host", endpoint.host.to_string().into()),
+                ("port", Value::Int(endpoint.port.into())),
+                ("username", auth.map(ProxyAuth::username).into()),
+                ("password", auth.and_then(ProxyAuth::password).into()),
+                (
+                    "password_state",
+                    auth.map(|auth| format!("{:?}", auth.password_state()))
+                        .into(),
+                ),
+            ])
+        }
+        ProxyEntry::Disabled => map([("kind", "disabled".into())]),
+        ProxyEntry::Unusable(value) => map([
+            ("kind", "unusable".into()),
+            ("rejected", describe_rejected(value)),
+        ]),
+        other => map([("kind", format!("{other:?}").into())]),
+    }
+}
+
+fn describe_bypass(bypass: &BypassRules) -> Value {
+    map([
+        (
+            "patterns",
+            list(&bypass.patterns, |pattern| pattern.to_string().into()),
+        ),
+        ("implicit", format!("{:?}", bypass.implicit).into()),
+        (
+            "exclude_simple_hostnames",
+            bypass.exclude_simple_hostnames.into(),
+        ),
+        ("reversed_exceptions", bypass.reversed_exceptions.into()),
+        ("require_explicit_port", bypass.require_explicit_port.into()),
+        ("ipv4_mapped_as_ipv4", bypass.ipv4_mapped_as_ipv4.into()),
+        ("strip_trailing_dot", bypass.strip_trailing_dot.into()),
+        ("rejected", list(&bypass.rejected, describe_rejected)),
+    ])
+}
+
+fn describe_rejected(value: &RejectedValue) -> Value {
+    rejected_text(value).into()
 }
 
 fn stopped_on_its_own() -> Failure {
