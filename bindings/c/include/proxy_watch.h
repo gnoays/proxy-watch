@@ -74,11 +74,11 @@ enum pw_step_kind {
  * it downloads a PAC URL, runs a body only on macOS and iOS, and runs WPAD only with wpad
  * on Windows, macOS and iOS. PW_PAC_QUICKJS: QuickJS in this process under the options'
  * policy, for a body - the configuration's own or script; built for x86-64 and AArch64
- * Windows, Linux and macOS, PW_ERR_PAC_ENGINE_UNAVAILABLE elsewhere. PW_PAC_AUTO: the OS's
- * engine where it has one for the mode, else QuickJS, else the caller's route; chosen
- * before anything runs, so an engine's failure is returned, not retried on the other. A
- * mode no chosen engine runs stays the caller's route. A URL with no host (mailto:, file:,
- * data:) is one direct step under every choice. */
+ * Windows, Linux and macOS and for ARMv7 Linux with glibc, PW_ERR_PAC_ENGINE_UNAVAILABLE
+ * elsewhere. PW_PAC_AUTO: the OS's engine where it has one for the mode, else QuickJS, else
+ * the caller's route; chosen before anything runs, so an engine's failure is returned, not
+ * retried on the other. A mode no chosen engine runs stays the caller's route. A URL with
+ * no host (mailto:, file:, data:) is one direct step under every choice. */
 enum pw_pac {
     PW_PAC_NONE = 0,
     PW_PAC_NATIVE = 1,

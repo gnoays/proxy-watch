@@ -24,7 +24,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_ABOUT_VERSION: 0.9.2
   MATURIN_VERSION: 1.15.0
   MACOSX_DEPLOYMENT_TARGET: "11.0"
   PYTHONUTF8: "1"
@@ -36,7 +35,7 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -49,7 +48,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/pip" install "maturin==$MATURIN_VERSION"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
-          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+          bash .github/scripts/install_cargo_about.sh
       - name: Package, as the release does
         continue-on-error: true
         run: |
@@ -93,7 +92,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
@@ -107,7 +106,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/Scripts/pip" install "maturin==$MATURIN_VERSION"
           echo "$RUNNER_TEMP/tools/Scripts" >> "$GITHUB_PATH"
-          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+          bash .github/scripts/install_cargo_about.sh
       - name: Package, as the release does
         continue-on-error: true
         run: |
@@ -148,7 +147,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: aarch64-linux-android,x86_64-linux-android
@@ -167,7 +166,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$bin/x86_64-linux-android21-clang" >> "$GITHUB_ENV"
       - name: Install the packaging tools
-        run: cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+        run: bash .github/scripts/install_cargo_about.sh
       - name: Package, as the release does
         continue-on-error: true
         run: |

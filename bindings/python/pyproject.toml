@@ -20,6 +20,7 @@ classifiers = [
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: Free Threading :: 2 - Beta",
   "Programming Language :: Rust",
   "Topic :: Internet :: Proxy Servers",
   "Typing :: Typed",
