@@ -9,11 +9,14 @@ name: Semver
 
 on:
   pull_request:
+    branches: [main]
     paths:
       - "src/**"
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/semver.yml
+    # A draft runs nothing, by the job's `if`; marking it ready for review runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
     paths:
@@ -33,6 +36,7 @@ concurrency:
 jobs:
   semver:
     name: cargo semver-checks
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

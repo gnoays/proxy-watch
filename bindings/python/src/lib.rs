@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use proxy_watch::{CapturedEnv, ProxyConfig};
 use proxy_watch_shared::{self as shared, Answer, Failure, Layering, Route as SharedRoute};
-use pyo3::PyTypeInfo;
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
+use pyo3::{IntoPyObjectExt, PyTypeInfo};
 use pyo3::{PyTraverseError, PyVisit};
 
 pyo3::create_exception!(
@@ -83,7 +83,8 @@ fn layering(
 /// `kind` is `"steps"`, `"pac"`, `"pac-inline"` or `"wpad"`. `steps` holds `"direct"` or
 /// proxy URLs with their credentials, so do not log it. `engine` is `"none"`, `"native"`
 /// or `"quickjs"`.
-#[pyclass(module = "proxy_watch", frozen, get_all)]
+#[pyclass(module = "proxy_watch", frozen, get_all, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct Route {
     kind: &'static str,
     steps: Option<Vec<String>>,
@@ -122,12 +123,75 @@ impl TryFrom<Answer> for Route {
     }
 }
 
+#[pymethods]
+impl Route {
+    /// The kind, the one field it carries, and the engine. A step's password shows as
+    /// `***`, since a repr reaches tracebacks and logs unasked; `steps` itself keeps it.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let carried = match (&self.steps, &self.pac_url, &self.script) {
+            (Some(steps), _, _) => {
+                let masked: Vec<String> = steps.iter().map(|step| masked_url(step)).collect();
+                format!(", steps={}", repr(py, masked)?)
+            }
+            (_, Some(pac_url), _) => format!(", pac_url={}", repr(py, pac_url)?),
+            (_, _, Some(script)) => format!(", script=<{} chars>", script.chars().count()),
+            _ => String::new(),
+        };
+        Ok(format!(
+            "Route(kind={}{carried}, engine={})",
+            repr(py, self.kind)?,
+            repr(py, self.engine)?
+        ))
+    }
+}
+
+fn repr<'py>(py: Python<'py>, value: impl IntoPyObject<'py>) -> PyResult<String> {
+    Ok(value.into_bound_py_any(py)?.repr()?.to_string())
+}
+
+fn to_python(py: Python<'_>, value: shared::Value) -> PyResult<Bound<'_, PyAny>> {
+    match value {
+        shared::Value::Null => Ok(py.None().into_bound(py)),
+        shared::Value::Bool(flag) => flag.into_bound_py_any(py),
+        shared::Value::Int(number) => number.into_bound_py_any(py),
+        shared::Value::Str(text) => text.into_bound_py_any(py),
+        shared::Value::List(items) => items
+            .into_iter()
+            .map(|item| to_python(py, item))
+            .collect::<PyResult<Vec<_>>>()?
+            .into_bound_py_any(py),
+        shared::Value::Map(entries) => {
+            let dict = PyDict::new(py);
+            for (key, value) in entries {
+                dict.set_item(key, to_python(py, value)?)?;
+            }
+            Ok(dict.into_any())
+        }
+    }
+}
+
+fn masked_url(step: &str) -> String {
+    match proxy_watch::Url::parse(step) {
+        Ok(mut url) if url.password().is_some() => {
+            // Refused only for a URL that cannot hold credentials, which this one does.
+            let _ = url.set_password(Some("***"));
+            url.into()
+        }
+        _ => step.to_owned(),
+    }
+}
+
 /// What QuickJS runs a script under; each argument left out keeps its default.
-#[pyclass(module = "proxy_watch", frozen)]
+#[pyclass(module = "proxy_watch", frozen, eq)]
+#[derive(PartialEq)]
 pub struct PacPolicy(proxy_watch::pac::PacPolicy);
 
 #[pymethods]
 impl PacPolicy {
+    fn __repr__(&self) -> String {
+        format!("<{:?}>", self.0)
+    }
+
     #[new]
     #[pyo3(signature = (
         *,
@@ -174,7 +238,8 @@ impl PacPolicy {
 }
 
 /// Where a snapshot's answer came from, without the proxy addresses or credentials.
-#[pyclass(module = "proxy_watch", frozen, get_all)]
+#[pyclass(module = "proxy_watch", frozen, get_all, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct Diagnostics {
     /// Whether the OS had proxy settings to read.
     os_readable: bool,
@@ -187,6 +252,19 @@ pub struct Diagnostics {
     rejected: Vec<String>,
 }
 
+#[pymethods]
+impl Diagnostics {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "Diagnostics(os_readable={}, sources={}, fallbacks={}, rejected={})",
+            repr(py, self.os_readable)?,
+            repr(py, &self.sources)?,
+            repr(py, &self.fallbacks)?,
+            repr(py, &self.rejected)?
+        ))
+    }
+}
+
 /// One reading of the proxy configuration.
 #[pyclass(module = "proxy_watch", frozen)]
 pub struct Snapshot {
@@ -196,6 +274,15 @@ pub struct Snapshot {
 
 #[pymethods]
 impl Snapshot {
+    /// The configuration on one line, passwords masked.
+    fn __repr__(&self) -> String {
+        format!(
+            "<Snapshot os_readable={} {:?}>",
+            if self.os_readable { "True" } else { "False" },
+            self.config
+        )
+    }
+
     /// The route for `url`. `pac` names who runs a PAC configuration: `"none"` (the
     /// default), `"native"`, `"quickjs"` or `"auto"`, with `script`, `wpad` and `policy` as
     /// the stub file describes. The GIL is released while an engine downloads or runs a
@@ -217,6 +304,12 @@ impl Snapshot {
             .and_then(|options| py.detach(|| shared::route(&self.config, url, &options)))
             .and_then(Route::try_from)
             .map_err(|failure| error(py, failure))
+    }
+
+    /// The whole configuration as plain dicts and lists, the stub file describes the
+    /// shape. A proxy's password is in it as the value.
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        to_python(py, shared::describe(&self.config, self.os_readable))
     }
 
     /// Which sources the snapshot came from.
@@ -314,6 +407,17 @@ impl Watcher {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+    }
+
+    fn __repr__(&self) -> String {
+        let state = if self.forked() {
+            "forked"
+        } else if self.watch.is_closed() {
+            "closed"
+        } else {
+            "open"
+        };
+        format!("<Watcher {state}>")
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {

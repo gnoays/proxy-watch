@@ -19,6 +19,10 @@ else:
     print(route.kind)   # "pac", "pac-inline" or "wpad": the caller runs the script
 ```
 
+`snapshot.to_dict()` gives the whole configuration as dicts and lists: the mode in effect,
+each proxy's host, port and credentials, the bypass rules, and every source's own mode.
+`repr()` masks passwords; `to_dict()` holds them.
+
 ## PAC
 
 `route(url, pac=...)` chooses who runs a PAC configuration:
@@ -48,8 +52,12 @@ with proxy_watch.watch(lambda err, snapshot: print(err or snapshot.route("https:
 ## Wheels
 
 One `abi3` wheel per platform serves CPython 3.10 and later: Linux x86-64 and AArch64
-(manylinux2014 and musllinux 1.2), macOS x86-64 and arm64, Windows x86-64 and ARM64.
-QuickJS is built into each of them.
+(manylinux2014 and musllinux 1.2), Linux ARMv7 (manylinux2014), macOS x86-64 and arm64,
+Windows x86-64 and ARM64. QuickJS is built into each of them.
+
+The free-threaded build has no stable ABI before 3.15, so CPython 3.14t takes a wheel of its
+own on each of those platforms. The module runs without the GIL: importing it leaves
+`sys._is_gil_enabled()` false. 3.13t is not supported.
 
 ## License
 

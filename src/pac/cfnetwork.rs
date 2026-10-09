@@ -194,7 +194,7 @@ mod native {
     // the caller's run loop runs while this one waits, and nothing here runs in theirs.
     const RUN_LOOP_MODE: &str = "proxy-watch.cfnetwork-pac";
 
-    // `CFStreamClientContext`, spelled out: `core-foundation` 0.9 keeps its `stream` module
+    // `CFStreamClientContext`, spelled out: `core-foundation` 0.10 keeps its `stream` module
     // private, and its `-sys` twin declares the three callbacks non-nullable where CFNetwork
     // takes NULL.
     #[repr(C)]

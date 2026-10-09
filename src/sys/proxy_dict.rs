@@ -787,8 +787,16 @@ fn bypass_from_dict(dict: &ProxyDict) -> BypassRules {
     // (`a_bypass_key_is_what_turns_on_the_loopback_bypass_not_any_entry_in_it`). A key in a
     // shape no run has asked about (a list that is not an array, the switch set to 0) is
     // read as absent, which proxies.
-    let has_bypass_key =
-        dict.list(EXCEPTIONS_LIST).is_some() || dict.flag(EXCLUDE_SIMPLE_HOSTNAMES) == Some(true);
+    //
+    // An empty array is no key either. Clearing the list in System Settings stores
+    // `ExceptionsList = []` in the dynamic store, and `CFNetworkCopySystemProxySettings`
+    // drops the key before CFNetwork sees it, so the Mac proxies the three; reading the
+    // stored array as a key would answer them direct. One element is enough, even an empty
+    // string or one that is not a string: the array then reaches CFNetwork.
+    let has_bypass_key = dict
+        .list(EXCEPTIONS_LIST)
+        .is_some_and(|(items, unreadable)| !items.is_empty() || unreadable > 0)
+        || dict.flag(EXCLUDE_SIMPLE_HOSTNAMES) == Some(true);
     // CFNetwork reads a trailing dot as the DNS root on either side, and an IPv4 entry does
     // not reach the IPv4-mapped spelling of its address (`cfnetwork_sheds_a_trailing_dot`
     // and `cfnetwork_reads_a_mapped_destination_as_written` in
@@ -2126,10 +2134,13 @@ mod tests {
     }
 
     // CFNetwork bypasses `localhost`, `127.0.0.1` and `::1` only while the settings carry a
-    // bypass key; with neither, it proxies them too.
+    // bypass key; with neither, it proxies them too. An empty `ExceptionsList` is the shape
+    // System Settings stores for a cleared list, and the system settings call drops it, so
+    // it is no key; a list of one blank entry is one.
     #[test]
     fn the_implicit_set_follows_the_presence_of_a_bypass_key() {
         let empty: &[&str] = &[];
+        let blank: &[&str] = &[""];
         for (dict, expected) in [
             (
                 dict! { "HTTPEnable" => 1i64, "HTTPProxy" => "proxy.corp" },
@@ -2140,6 +2151,14 @@ mod tests {
                     "HTTPEnable" => 1i64,
                     "HTTPProxy" => "proxy.corp",
                     "ExceptionsList" => empty,
+                },
+                ImplicitBypass::Empty,
+            ),
+            (
+                dict! {
+                    "HTTPEnable" => 1i64,
+                    "HTTPProxy" => "proxy.corp",
+                    "ExceptionsList" => blank,
                 },
                 ImplicitBypass::CfNetwork,
             ),

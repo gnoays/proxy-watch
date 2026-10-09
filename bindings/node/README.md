@@ -20,6 +20,10 @@ if (route.kind === 'steps') {
 }
 ```
 
+`snapshot.toJSON()` gives the whole configuration as plain objects: the mode in effect,
+each proxy's host, port and credentials, the bypass rules, and every source's own mode.
+`util.inspect` masks passwords; `toJSON()` and `JSON.stringify(snapshot)` hold them.
+
 ## PAC
 
 `route(url, { pac })` and `routeAsync(url, { pac })` choose who runs a PAC configuration:
@@ -55,8 +59,9 @@ The watch does not keep the process alive.
 
 ## Platforms
 
-Prebuilt for Linux x64 and arm64 (glibc 2.17 and later, and musl), macOS x64 and arm64,
-and Windows x64 and arm64. npm installs the one package that matches the machine.
+Prebuilt for Linux x64 and arm64 (glibc 2.17 and later, and musl), Linux arm (ARMv7,
+glibc 2.17 and later), macOS x64 and arm64, and Windows x64 and arm64. npm installs the one
+package that matches the machine.
 
 ## License
 

@@ -49,6 +49,16 @@ cargo add proxy-watch
 GNOME support, on by default, opens GLib at run time: a build needs no C library or
 headers, and a machine without GLib reads the other stores.
 
+## Other languages
+
+The same library, built from this repository; each package's README has its usage.
+
+| Language | Package | |
+|---|---|---|
+| Node.js | [`proxy-watch`](bindings/node/README.md) on npm | [![npm](https://img.shields.io/npm/v/proxy-watch.svg)](https://www.npmjs.com/package/proxy-watch) |
+| Python | [`proxy-watch`](bindings/python/README.md) on PyPI | [![PyPI](https://img.shields.io/pypi/v/proxy-watch.svg)](https://pypi.org/project/proxy-watch/) |
+| C | [header and libraries](bindings/c/README.md) on the GitHub Releases page (`bindings-v*` tags) | |
+
 ## Usage
 
 [`examples/`](examples/) has a runnable file per section (`current`, `watch`, `resolve`,
@@ -66,23 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`read()` reports the OS settings only. `http_proxy` / `no_proxy` come from
-`ProxyEnv::from_env()`, and you choose which one wins. This puts the environment first:
-
-```rust,no_run
-use proxy_watch::{read, EnvPrecedence, ProxyEnv};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = read()?.with_env(&ProxyEnv::from_env()?, EnvPrecedence::BeforeSystem);
-    println!("effective: {:?}", config.effective);
-    Ok(())
-}
-```
-
-On a Linux host with neither desktop's store (no GNOME proxy schema and no `kioslaverc`,
-as on most servers, containers and CI hosts), `read()` answers `Error::Unsupported`. Treat
-that as "use `ProxyEnv` alone", not as fatal. With the schema installed and nothing set,
-it answers `Direct` instead.
+`read()` reports the OS settings only; layer `http_proxy` / `no_proxy` on top with
+`.with_env(&ProxyEnv::from_env()?, EnvPrecedence::BeforeSystem)`, or `AfterSystem`. On a
+Linux host with no desktop store (most servers, containers and CI hosts), `read()` answers
+`Error::Unsupported`: use `ProxyEnv` alone there.
 
 ### Watch it
 
@@ -110,14 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The first item is the current configuration. After that, a snapshot means the
-configuration changed or a notification route was lost, which `state.health` shows.
-Changes are coalesced over 200 ms (`WatchOptions::debounce`). After a
-`WatchEvent::Error`, a recovery that changes nothing publishes nothing; call `current()` to
-check.
-
-With the `tokio` feature, `watch_channel()` publishes to a `tokio::sync::watch::Receiver`,
-which clones for more than one consumer. Call it inside a runtime.
+The first item is the current configuration; each later one is a change, coalesced over
+200 ms. With the `tokio` feature, `watch_channel()` publishes to a
+`tokio::sync::watch::Receiver` instead.
 
 ### Decide how to reach a URL
 
@@ -138,70 +130,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-On a machine configured with a PAC script or WPAD it **fails**, with
-`Error::PacNotSupported`, instead of answering direct. To get an answer there, pass the
-snapshot to `pac::PacResolver`:
-
-```rust,ignore
-let resolver = PacResolver::new(PacPolicy::new()).with_system_native()?;
-let steps = resolver.resolve_config(&config, &url, None)?;
-```
-
-- **Let the OS evaluate it**: enable `pac-native`. On Windows, macOS, iOS and Android
-  the OS downloads and runs the script; elsewhere `with_system_native()` does nothing.
-- **Evaluate a script you have**: enable `pac-quickjs`. It runs a body carried in the
-  settings, or one you fetched and pass as the last argument; it never downloads
-  (`examples/pac.rs`). Android and iOS builds leave the engine out and answer as if none
-  were enabled.
-- **Keep the script out of your process**: enable `pac-subprocess` and attach a
-  `SubprocessEvaluator` with `with_evaluator()`. It runs `proxy-watch-pac-worker`, which
-  `cargo install proxy-watch --features pac-subprocess,pac-quickjs` builds. The worker
-  sandboxes itself only on Linux (x86-64, AArch64); elsewhere the evaluator refuses it
-  until you call `allow_unsandboxed()`.
-
-WPAD on Windows and Apple platforms stays `PacNotSupported` until you build the native
-resolver `with_wpad(true)` and attach it with `with_native()`.
+On a machine configured with a PAC script or WPAD it **fails** with
+`Error::PacNotSupported` instead of answering direct. `pac::PacResolver` answers there,
+with the OS's engine (`pac-native`) or a bundled one (`pac-quickjs`, or `pac-subprocess`
+to keep the script out of your process); `examples/pac.rs` shows one.
 
 ### With `reqwest`
 
-`reqwest` fixes its proxy when the `Client` is built, but `Proxy::custom` asks on every new
-connection, so a config kept fresh by a watcher makes one `Client` follow the OS
-([`examples/reqwest_client.rs`](examples/reqwest_client.rs)):
-
-```rust,ignore
-let client = reqwest::Client::builder()
-    .proxy(reqwest::Proxy::custom(move |url| {
-        let config = for_proxy.read().ok()?;          // Arc<RwLock<ProxyConfig>>
-        resolve(&config, url).ok()?.first().and_then(ProxyStep::to_url)
-    }))
-    .build()?;
-```
-
-A pooled connection keeps its old route until `pool_idle_timeout` (90 s by default); set
-`pool_max_idle_per_host(0)` to apply a change at once. `.ok()?` sends the request direct on
-any `resolve` error, `PacNotSupported` included. `Proxy::custom` cannot fail a request, so
-decide PAC hosts before the closure runs; the full example says how.
+`reqwest`'s `Proxy::custom` asks on every new connection, so a configuration kept fresh by
+a watcher makes one `Client` follow the OS:
+[`examples/reqwest_client.rs`](examples/reqwest_client.rs).
 
 ## Pitfalls
 
-- **`read()` can block for seconds** on macOS and inside a Linux sandbox, while a system
-  service comes up or times out. Keep it off a UI thread.
-- **A PAC or WPAD machine makes `resolve()` fail** with `Error::PacNotSupported` rather
-  than answering `DIRECT`, so a caller that treats an error as "go direct" routes traffic
-  around the administrator's proxy. Handle it, or pass the snapshot to `PacResolver` with a
-  PAC engine enabled.
-- **Windows reports one connection and one mode**: the active connection's settings only,
-  and when more than one is enabled, auto-detect wins over a PAC URL, which wins over
-  static servers.
-- **A sandboxed watcher never fires** without `WatchOptions::poll_interval`: the portal
-  has no change signal, so the stream stays on its first snapshot.
-- **A `kioslaverc` that is a symlink into another directory is read but not watched**: the
-  watch is on the config directories, and an edit to the link's target fires nothing there.
-  Set `WatchOptions::poll_interval` if a dotfile manager links it.
-- **`ProxyStep::to_url()` carries the password in the clear.** It exists to hand
-  `user:password@` to a client; `endpoint()`'s `Display` masks it, so print that one.
-- **`watch_channel()` publishes configuration only.** A failed re-read or a dead
-  notification route leaves the last good configuration standing with nothing marking it.
+- **`read()` can block for seconds** on macOS and inside a Linux sandbox. Keep it off a UI
+  thread.
+- **Do not treat a `resolve()` error as "go direct"**: on a PAC or WPAD machine that routes
+  traffic around the administrator's proxy.
+- **A sandboxed watcher never fires** without `WatchOptions::poll_interval`.
+
+The rest, with each platform's limits, is on [docs.rs](https://docs.rs/proxy-watch).
 
 ## Feature flags
 
@@ -229,7 +177,7 @@ decide PAC hosts before the closure runs; the full example says how.
 | macOS | Tested in CI without a GUI. GUI changes, network-location switches and MDM `GlobalHTTPProxy` are **unverified** on real hardware |
 | Linux (GNOME, KDE) | Tested in CI; behind `linux-gnome` and `linux-kde` |
 | Linux (Flatpak/Snap) | Read through the desktop portal (needs `linux-gnome`); watching needs `WatchOptions::poll_interval`. **Unverified** |
-| Android | The crate needs the app's `JavaVM` and a `Context`: `android-activity`, and `tao` from 0.36 (Tauri 2.12), register them with `ndk-context`, which the crate reads. A host that registers neither, `tao` before 0.36 among them, calls `proxy_watch::android::init` before the first read; a read before it fails, and under `panic = "abort"` aborts the process. Reading needs API 23+; watching needs API 26+ and in-memory code loading, or else `WatchOptions::poll_interval`. **Partly verified** on an emulator, registered through `ndk-context`, through `android::init` from a Tauri 2.11 app, and through what `tao` registers in a Tauri 2.12 app; no device has run it |
+| Android | API 23+; watching needs API 26+, or else `WatchOptions::poll_interval`. `android-activity` and Tauri 2.12+ hand the crate the app's `JavaVM` and `Context`; any other host calls `proxy_watch::android::init` before the first read, which otherwise fails, or aborts under `panic = "abort"`. **Partly verified** on an emulator and a phone (Android 17) |
 | iOS | Watching needs `WatchOptions::poll_interval`: iOS gives an app no proxy change notification. **Partly verified** on a simulator |
 | Environment variables | `ProxyEnv::from_env()` on every platform; a snapshot, never a `Stream` |
 

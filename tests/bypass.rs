@@ -90,12 +90,9 @@ const GO_CASES: &[(&str, bool)] = &[
     ("[2001:db8::52:0:3]:81", false),
     // IPv6 CIDR.
     ("[2002:db8:a::123]", true),
-    // Link-local joins loopback in the implicit bypass set (`is_link_local` in
-    // `bypass.rs`), so it bypasses whatever the patterns say; only `<-loopback>`, absent
-    // from this list, takes that away. Go proxies this address instead; do not copy its
-    // `match` column into this row. It is the one row the two tables share where they
-    // disagree on the answer and not merely on how the column is spelled.
-    ("[fe80::424b:c8be:1643:a1b6]", true),
+    // Link-local is in no implicit set for `no_proxy`, and no pattern here names it, so it
+    // goes to the proxy, as in Go.
+    ("[fe80::424b:c8be:1643:a1b6]", false),
     // `foobar.com` matches itself and every subdomain.
     ("foobar.com", true),
     ("foobar.com:8080", true),
@@ -1199,7 +1196,7 @@ fn a_rejected_entry_in_a_reversed_list_stops_unlisted_destinations_going_direct(
     assert!(!rules.matches_authority("api.corp.example"));
     // The implicit bypasses are untouched; they are not gated on the pattern verdict.
     assert!(rules.matches_authority("localhost"));
-    assert!(rules.matches_authority("169.254.1.1"));
+    assert!(rules.matches_authority("127.0.0.2"));
 }
 
 /// The other side of the same rule: with nothing rejected, a reversed list keeps its
@@ -1329,24 +1326,33 @@ fn ignores_entries_without_a_host() {
     assert!(rules.rejected.is_empty());
 }
 
-/// Chromium's *implicit* bypass set, which it connects directly without the list saying
-/// so: the link-local ranges, plus what its own `IsLocalHostname` treats as the loopback
-/// name (`*.localhost`, a trailing dot) and what `IsIPv4MappedLoopback` does (the
+/// The loopback half of Chromium's *implicit* bypass set, which `no_proxy` connects
+/// directly without the list saying so: what Chromium's `IsLocalHostname` treats as the
+/// loopback name (`*.localhost`, a trailing dot) and what `IsIPv4MappedLoopback` does (the
 /// IPv4-mapped form). An empty list must bypass every one of them. Implicit, not
 /// unconditional: `<-loopback>` subtracts the set, which is
 /// [`no_loopback_token_clears_the_whole_implicit_bypass_set`]'s subject.
+///
+/// Chromium's link-local ranges are not in it. Every `no_proxy` reader measured (Go,
+/// Python's `urllib`, curl, .NET, hyper-util) proxies them, `169.254.169.254` among them,
+/// and so does an empty `no_proxy` here.
 #[test]
-fn implicit_bypass_covers_the_chromium_set_even_with_an_empty_list() {
+fn implicit_bypass_covers_loopback_and_not_link_local_with_an_empty_list() {
     let rules = parse::no_proxy("");
     for authority in [
-        "169.254.1.1",          // IPv4 link-local (APIPA)
-        "[fe80::1]",            // IPv6 link-local
-        "app.localhost",        // `*.localhost` subdomain
-        "localhost.",           // trailing dot
-        "[::ffff:127.0.0.1]",   // IPv4-mapped loopback
-        "[::ffff:169.254.1.1]", // IPv4-mapped link-local
+        "app.localhost",      // `*.localhost` subdomain
+        "localhost.",         // trailing dot
+        "[::ffff:127.0.0.1]", // IPv4-mapped loopback
     ] {
         assert!(rules.matches_authority(authority), "{authority}");
+    }
+    for authority in [
+        "169.254.1.1",              // IPv4 link-local (APIPA)
+        "169.254.169.254",          // the instance-metadata endpoint
+        "[fe80::1]",                // IPv6 link-local
+        "[::ffff:169.254.169.254]", // IPv4-mapped link-local
+    ] {
+        assert!(!rules.matches_authority(authority), "{authority}");
     }
 }
 
@@ -2004,8 +2010,9 @@ fn wininet_implicit_bypass_is_the_measured_six() {
     assert!(!parse::proxy_override("example.com").matches_authority("127.0.0.2"));
 }
 
-/// The environment variable keeps the widest set: it has no single resolver to measure,
-/// and Chromium, which reads it on Linux, bypasses all of these.
+/// The environment variable keeps the broad loopback set: it has no single resolver to
+/// measure, and Chromium, which reads it on Linux, bypasses all of these. Chromium's
+/// link-local ranges stay with the proxy, where every `no_proxy` reader measured sends them.
 #[test]
 fn no_proxy_keeps_the_broad_implicit_set() {
     let rules = parse::no_proxy("");
@@ -2016,11 +2023,11 @@ fn no_proxy_keeps_the_broad_implicit_set() {
         "app.localhost",
         "127.0.0.2",
         "[::ffff:127.0.0.1]",
-        "[::ffff:169.254.1.1]",
-        "169.254.169.254",
-        "[fe80::1]",
     ] {
         assert!(rules.matches_authority(destination), "{destination}");
+    }
+    for destination in ["[::ffff:169.254.1.1]", "169.254.169.254", "[fe80::1]"] {
+        assert!(!rules.matches_authority(destination), "{destination}");
     }
 }
 

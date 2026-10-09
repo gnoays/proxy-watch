@@ -12,7 +12,8 @@
 //! `proxyConnectTimeout` and nothing else on the subject: no `proxyForUrl`, no
 //! `ManualProxy`, no `useReverseProxy`. So KDE is quoted for what it meant each key to
 //! say, and libproxy's `config-kde` for what reads them on the live path today. Where the
-//! two disagree the comment at hand names which one this crate follows and why.
+//! two disagree the comment at hand names which one this crate follows and why; a
+//! libproxy reading that misses what KDE's own dialog writes is not followed.
 
 // Compiled on every target under `cfg(test)`, exactly like `super::gsettings_map`, and
 // also on Linux with `linux-kde` off, where it likewise has no caller.
@@ -309,40 +310,49 @@ impl KioslavercSettings {
             .is_some_and(|entry| entry.value.is_some())
     }
 
-    // Whether `ReversedException` is set, under the **narrower** of the two readings the
-    // KDE stack has for this one key.
+    // Whether `ReversedException` is set, read the way `KConfigGroup::readEntry` reads a
+    // bool: every value but `KCONFIG_FALSE` (case-insensitive) is true. That is KDE's
+    // meaning for the key, the one its settings dialog writes (`true` from the
+    // "Use proxy settings only for addresses in the exceptions list" checkbox) and the one
+    // KF5's `KProtocolManager` and Chromium's `proxy_config_service_linux.cc` apply.
+    // libproxy's `config-kde`, which reads the key for Qt and KIO 6 applications, parses it
+    // with `!!atoi` instead and so ignores the dialog's `true`; that is its defect, and
+    // this crate does not reproduce it. `reversed_exception_is_disputed` names the values
+    // on which the two part.
     //
-    // Read without the [`KioslavercSettings::needs_expansion`] guard the proxy keys carry:
-    // an unexpanded `$VAR` is not a number and not one of `KCONFIG_FALSE`, so it answers
-    // `false` here and `true` at `reversed_exception_is_disputed`, which is the log line.
-    // A flag has no destination to invent, and the one caller
-    // ([`bypass_from`]) has already built the list this would invert.
+    // Read without the [`KioslavercSettings::needs_expansion`] guard the proxy keys carry,
+    // because KConfig reads this key without expanding it either: `KConfigGroup` converts a
+    // bool through `convertToQVariant`, which never calls `expandString`, so an unexpanded
+    // `$VAR` is the literal text, and true. An empty value is collapsed onto absent by
+    // `text`, as for every key here, and so is false.
     fn reversed_exception(&self) -> bool {
-        self.text(KEY_REVERSED_EXCEPTION)
-            .is_some_and(atoi_is_nonzero)
+        self.text(KEY_REVERSED_EXCEPTION).is_some_and(|value| {
+            !KCONFIG_FALSE
+                .iter()
+                .any(|no| value.eq_ignore_ascii_case(no))
+        })
     }
 
-    // Whether `ReversedException` holds a value KConfig would have read as true but
-    // [`KioslavercSettings::reversed_exception`] does not, worth a log line rather than a
-    // silent divergence.
+    // Whether `ReversedException` holds a value this crate applies and libproxy's
+    // `!!atoi` does not, so a Qt or KIO 6 application on the same desktop uses the list the
+    // ordinary way round. Worth a log line rather than a silent divergence.
     fn reversed_exception_is_disputed(&self) -> bool {
-        self.text(KEY_REVERSED_EXCEPTION).is_some_and(|value| {
-            !atoi_is_nonzero(value)
-                && !KCONFIG_FALSE
-                    .iter()
-                    .any(|no| value.eq_ignore_ascii_case(no))
-        })
+        self.reversed_exception()
+            && self
+                .text(KEY_REVERSED_EXCEPTION)
+                .is_some_and(|value| !atoi_is_nonzero(value))
     }
 }
 
 // The whole of `KConfigGroup`'s falsehood: `convertToQVariant`'s `negatives` array.
 const KCONFIG_FALSE: [&str; 4] = ["false", "no", "off", "0"];
 
-// C's `atoi`, reduced to the only question [`KioslavercSettings::reversed_exception`]
-// asks of it: is the result non-zero? Leading whitespace included, because `\s` can put
+// C's `atoi`, reduced to the only question
+// [`KioslavercSettings::reversed_exception_is_disputed`] asks of it: is the result
+// non-zero? Leading whitespace included, because `\s` can put
 // some back after the raw line was trimmed; what is not modelled is the string libproxy
 // passes it, which `config-kde.c` strips of every `"` and colonises the spaces of first.
-// That edge is a row in `the_reversed_exception_flag_follows_libproxys_atoi`.
+// That edge is a row in `the_reversed_exception_flag_follows_kconfig`.
 fn atoi_is_nonzero(value: &str) -> bool {
     let value = value.trim_ascii_start();
     let rest = value.strip_prefix(['+', '-']).unwrap_or(value);
@@ -650,8 +660,7 @@ fn manual_mode(settings: &KioslavercSettings) -> Result<ProxyMode, Error> {
     // scheme test is an `else if` chain (`ftp`, `https`, `http`, else SOCKS), so an
     // `http://` destination with a blank `httpProxy` never reaches the SOCKS arm and gets
     // no proxy at all. Two references to one, and the majority is also the direction that
-    // proxies rather than silently going direct, so the catch-all stays, unlike
-    // `ReversedException` below, where libproxy is the one this crate follows.
+    // proxies rather than silently going direct, so the catch-all stays.
     //
     // A blank `<scheme>Proxy=` is therefore *not* an explicit "off" here: KDE reads it
     // with `readEntry()`, which cannot tell it from an absent key, and falls back to
@@ -903,22 +912,23 @@ fn bypass_from(settings: &KioslavercSettings) -> Result<BypassRules, Error> {
         if rules.patterns.is_empty() && rules.rejected.is_empty() {
             warn_empty_reversed_exception();
         }
-    } else if settings.reversed_exception_is_disputed() {
-        warn_reversed_exception_not_applied();
+        if settings.reversed_exception_is_disputed() {
+            warn_reversed_exception_disputed();
+        }
     }
     Ok(rules)
 }
 
 // Log-only sink for [`KioslavercSettings::reversed_exception_is_disputed`].
-fn warn_reversed_exception_not_applied() {
+fn warn_reversed_exception_disputed() {
     crate::trace::warning!(
         key = KEY_REVERSED_EXCEPTION,
-        "kioslaverc: ReversedException is set to a value KConfig reads as true but \
-         libproxy's config-kde parses with !!atoi, which reads the leading run of digits \
-         and yields 0 unless one of them is non-zero, so 000, 0x10 and yes all come out \
-         false here. libproxy is the implementation on the live path \
-         since KIO 6.0.0, so the exception list is used the ordinary way round rather \
-         than inverted"
+        "kioslaverc: ReversedException is set to a value KConfig reads as true, so the \
+         exception list is inverted here as KDE means it to be. libproxy's config-kde, \
+         which answers for Qt and KIO 6 applications, parses the value with !!atoi, \
+         which yields 0 for true, yes, 000 and 0x10, so those applications use the list \
+         the ordinary way round and proxy what this answers direct. Writing the value \
+         as 1 makes both agree"
     );
 }
 
@@ -1982,10 +1992,11 @@ mod tests {
 
     // `ReversedException=true`, the only spelling KDE's own dialog writes, is **not**
     // applied, because libproxy's `config-kde` parses the key with `!!atoi` and
-    // `atoi("true")` is 0. Following KIO here would report `Direct` for every destination
-    // the live path in fact sends through the proxy.
+    // KDE's settings dialog writes `true`, and KConfig reads it as true: the list names the
+    // destinations that use the proxy, and everything else goes direct, as in KF5's
+    // `KProtocolManager` and in Chromium.
     #[test]
-    fn a_dialog_written_reversed_exception_is_not_applied() {
+    fn a_dialog_written_reversed_exception_is_applied() {
         let settings = kioslaverc! {
             "ProxyType" => "1",
             "httpProxy" => "http://proxy.corp:8080",
@@ -1994,34 +2005,21 @@ mod tests {
         };
         let mode = mode_of(&settings);
         let bypass = mode.bypass().expect("manual mode has bypass rules");
-        assert!(!bypass.reversed_exceptions);
-        // The list means what it says: the named suffix is bypassed, everything else uses
-        // the proxy.
-        assert!(bypass.matches_authority("api.corp.example"));
-        assert!(!bypass.matches_authority("example.net"));
-
-        // And the empty-list form, where applying the reversal turns *every* destination
-        // direct while `httpProxy` is set, from a file the settings dialog wrote unaided.
-        let settings = kioslaverc! {
-            "ProxyType" => "1",
-            "httpProxy" => "http://proxy.corp:8080",
-            "ReversedException" => "true",
-        };
-        let mode = mode_of(&settings);
-        let bypass = mode.bypass().expect("manual mode has bypass rules");
-        assert!(!bypass.reversed_exceptions);
-        assert!(!bypass.matches_authority("example.net"));
+        assert!(bypass.reversed_exceptions);
+        // Inverted: the named suffix uses the proxy, everything else is bypassed.
+        assert!(!bypass.matches_authority("api.corp.example"));
+        assert!(bypass.matches_authority("example.net"));
     }
 
-    // The `atoi`-based rule, spelling by spelling: `atoi`-non-zero is applied, everything
-    // else is not, and the disputed middle (KConfig-true but `atoi`-zero) is the set that
-    // earns `warn_reversed_exception_not_applied`.
+    // KConfig's bool, spelling by spelling: everything but its four falsehoods is applied,
+    // and the applied values `atoi` reads as 0 (KConfig-true but `atoi`-zero) are the set
+    // that earns `warn_reversed_exception_disputed`.
     #[test]
-    fn the_reversed_exception_flag_follows_libproxys_atoi() {
+    fn the_reversed_exception_flag_follows_kconfig() {
         // (value, applied, disputed)
         let cases = [
             // What KDE's dialog writes. KConfig says true, `atoi` says 0.
-            ("true", false, true),
+            ("true", true, true),
             ("false", false, false),
             // KConfig's other three falsehoods, verbatim from its `negatives` array, and
             // case-insensitively as `compare(..., Qt::CaseInsensitive)` reads them.
@@ -2032,12 +2030,12 @@ mod tests {
             // Not KConfig's `0`, so KConfig reads it as true while `atoi` still says 0.
             // These two are why the warning cannot say `atoi` returns 0 for values that
             // do not start with a digit: both start with one, and both still return 0.
-            ("000", false, true),
-            ("0x10", false, true),
+            ("000", true, true),
+            ("0x10", true, true),
             // KConfig-true spellings `atoi` cannot see a digit in.
-            ("yes", false, true),
-            ("on", false, true),
-            ("maybe", false, true),
+            ("yes", true, true),
+            ("on", true, true),
+            ("maybe", true, true),
             // Where the two readings coincide.
             ("1", true, false),
             ("2", true, false),
@@ -2046,20 +2044,15 @@ mod tests {
             // `atoi` takes one optional sign before the digits.
             ("-1", true, false),
             ("+1", true, false),
-            // Where this reader and libproxy part company, because libproxy never hands
-            // `atoi` the raw value: `config-kde.c` deletes every `"` and turns every space
-            // into `:` before the call, and it reverses no KConfig escape. So
-            // `ReversedException=\s1`, which `kde.rs` expands to `" 1"`, and which reaches
-            // `atoi` with the space on, as it would in C, is applied here and is
-            // `atoi("\s1") == 0` there, while the quoted spelling goes the other way.
-            //
-            // Left as written: following `config-kde.c` through means holding one key's bytes
-            // unparsed inside a reader that is KConfig-shaped everywhere else, for spellings
-            // no dialog writes. Do not read the divergence as one-sided: this reader applies
-            // `\s1` where libproxy does not, so what it applies is not a subset of what
-            // `config-kde.c` applies.
+            // The disputed column models `atoi` on the value as KConfig reads it, which is
+            // not quite the string libproxy hands it: `config-kde.c` deletes every `"` and
+            // turns every space into `:` first, and reverses no KConfig escape. So
+            // `ReversedException=\s1`, which `kde.rs` expands to `" 1"`, is undisputed here
+            // and is `atoi("\s1") == 0` in libproxy, while the quoted spelling is disputed
+            // here and `1` there. Both are applied, as KConfig reads both as true; only the
+            // log line is approximate, for spellings no dialog writes.
             (" 1", true, false),
-            ("\"1\"", false, true),
+            ("\"1\"", true, true),
             // Present but empty. `text` collapses it onto absent, as it does for every
             // other key in this module, so it is not reported as disputed either, even
             // though `KConfigGroup` would technically convert the empty (non-null) value

@@ -164,6 +164,9 @@ const DESKTOP: [&str; 6] = [
 ];
 // Linux with musl (Alpine and other distroless images); QuickJS is built there too.
 const MUSL: [&str; 2] = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
+// 32-bit ARM Linux with glibc (Raspberry Pi OS and other ARMv7 boards), for Node and Python;
+// QuickJS is built there too.
+const ARMV7: [&str; 1] = ["armv7-unknown-linux-gnueabihf"];
 // The C ABI also has `pw_android_init`, so an Android app can link it.
 const ANDROID: [&str; 2] = ["aarch64-linux-android", "x86_64-linux-android"];
 
@@ -185,8 +188,8 @@ fn third_party_licenses() -> ExitCode {
     .and_then(|()| std::fs::create_dir_all(&out).map_err(|e| e.to_string()))
     .and_then(|()| {
         for binding in ["node", "python", "c"] {
-            let android: &[&str] = if binding == "c" { &ANDROID } else { &[] };
-            for target in DESKTOP.iter().chain(&MUSL).chain(android) {
+            let only: &[&str] = if binding == "c" { &ANDROID } else { &ARMV7 };
+            for target in DESKTOP.iter().chain(&MUSL).chain(only) {
                 render_notice(
                     binding,
                     target,

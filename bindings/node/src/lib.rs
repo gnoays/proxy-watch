@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use napi::bindgen_prelude::{
-    AsyncTask, Either, FnArgs, FromNapiValue, Function, JsValue, ToNapiValue, Undefined, Unknown,
-    ValidateNapiValue,
+    AsyncTask, ClassInstance, Either, FnArgs, FromNapiValue, Function, JsObjectValue, JsValue,
+    Null, Object, ToNapiValue, Undefined, Unknown, ValidateNapiValue,
 };
 use napi::bindgen_prelude::{TypeName, ValueType};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -278,6 +278,22 @@ impl Snapshot {
         })
     }
 
+    /// The configuration on one line, passwords masked.
+    #[napi(js_name = "toString")]
+    pub fn describe(&self) -> String {
+        format!(
+            "Snapshot {{ osReadable: {}, config: {:?} }}",
+            self.os_readable, self.config
+        )
+    }
+
+    /// The whole configuration as plain objects and arrays, which `JSON.stringify` also
+    /// takes. A proxy's password is in it as the value.
+    #[napi(js_name = "toJSON")]
+    pub fn to_json(&self) -> Json {
+        Json(shared::describe(&self.config, self.os_readable))
+    }
+
     /// Which sources the snapshot came from.
     #[napi]
     pub fn diagnostics(&self) -> Diagnostics {
@@ -469,6 +485,49 @@ fn gate(env: &Env, on_change: &UserOnChange<'_>, open: Arc<AtomicBool>) -> napi:
         .build()
 }
 
+/// [`shared::describe`]'s tree as JavaScript values.
+pub struct Json(shared::Value);
+
+impl ToNapiValue for Json {
+    unsafe fn to_napi_value(
+        env: sys::napi_env,
+        Json(value): Self,
+    ) -> napi::Result<sys::napi_value> {
+        // SAFETY: `env` is the live environment napi hands every conversion.
+        unsafe {
+            match value {
+                shared::Value::Null => Null::to_napi_value(env, Null),
+                shared::Value::Bool(flag) => bool::to_napi_value(env, flag),
+                shared::Value::Int(number) => i64::to_napi_value(env, number),
+                shared::Value::Str(text) => String::to_napi_value(env, text),
+                shared::Value::List(items) => {
+                    Vec::to_napi_value(env, items.into_iter().map(Json).collect())
+                }
+                shared::Value::Map(entries) => {
+                    let mut object = Object::new(&Env::from(env))?;
+                    for (key, value) in entries {
+                        object.set(camel_case(&key), Json(value))?;
+                    }
+                    Object::to_napi_value(env, object)
+                }
+            }
+        }
+    }
+}
+
+// `os_readable` as `osReadable`, the spelling the rest of this API uses. A scheme key
+// (`http`, `all`) has no underscore and stays as it is.
+fn camel_case(key: &str) -> String {
+    let mut parts = key.split('_');
+    let mut out = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        let mut chars = part.chars();
+        out.extend(chars.next().map(|first| first.to_ascii_uppercase()));
+        out.push_str(chars.as_str());
+    }
+    out
+}
+
 /// A running watch. It keeps running while unreferenced, without keeping the process
 /// alive, until `close()` or until its thread's environment shuts down.
 #[napi]
@@ -498,6 +557,43 @@ impl Watcher {
         self.open.store(false, Ordering::SeqCst);
         self.watch.close();
     }
+
+    /// `Watcher { open: <bool> }`.
+    #[napi(js_name = "toString")]
+    pub fn describe(&self) -> String {
+        let open = self.open.load(Ordering::SeqCst) && !self.watch.is_closed();
+        format!("Watcher {{ open: {open} }}")
+    }
+}
+
+/// Gives `Snapshot` and `Watcher` a `util.inspect` form, their `toString()`: inspect shows
+/// a class instance's own properties, and these hold none.
+#[napi(module_exports)]
+pub fn install_inspect(exports: Object, env: Env) -> napi::Result<()> {
+    // `Symbol.for` from JavaScript: `Env::symbol_for` needs N-API 9, past Node 18.0.
+    let custom = env
+        .get_global()?
+        .get_named_property::<Function<(), Unknown>>("Symbol")?
+        .get_named_property::<Function<&str, Unknown>>("for")?
+        .call("nodejs.util.inspect.custom")?;
+    let snapshot = env.create_function_from_closure::<(), String, _>("inspect", |ctx| {
+        // `this` is the prototype itself when the prototype is inspected.
+        Ok(ctx
+            .this::<ClassInstance<Snapshot>>()
+            .map_or_else(|_| "Snapshot {}".to_owned(), |this| this.describe()))
+    })?;
+    let watcher = env.create_function_from_closure::<(), String, _>("inspect", |ctx| {
+        Ok(ctx
+            .this::<ClassInstance<Watcher>>()
+            .map_or_else(|_| "Watcher {}".to_owned(), |this| this.describe()))
+    })?;
+    for (class, inspect) in [("Snapshot", snapshot), ("Watcher", watcher)] {
+        exports
+            .get_named_property::<Function<(), Unknown>>(class)?
+            .get_named_property::<Object>("prototype")?
+            .set_property(custom, inspect)?;
+    }
+    Ok(())
 }
 
 fn watch_options(

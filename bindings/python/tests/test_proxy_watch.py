@@ -32,9 +32,20 @@ class ReadTest(unittest.TestCase):
             routed = snapshot.route("https://a.example/", pac=pac)
             self.assertEqual((routed.steps, routed.engine), (route.steps, "none"), pac)
 
-    def test_route_has_no_repr_that_shows_credentials(self):
-        route = proxy_watch.read(env=ENV).route("https://a.example/")
-        self.assertNotIn("pass", repr(route))
+    def test_a_route_compares_by_value_and_its_repr_masks_the_password(self):
+        snapshot = proxy_watch.read(env=ENV)
+        route = snapshot.route("https://a.example/")
+        self.assertEqual(route, snapshot.route("https://a.example/"))
+        self.assertIn("user:***@proxy.example", repr(route))
+        self.assertNotIn(":pass@", repr(route))
+        self.assertNotIn('"pass"', repr(snapshot))
+
+    def test_to_dict_holds_the_configuration_with_its_password(self):
+        mode = proxy_watch.read(env=ENV).to_dict()["mode"]
+        self.assertEqual(mode["kind"], "manual")
+        self.assertEqual(mode["proxies"]["https"]["password"], "pass")
+        self.assertEqual(mode["proxies"]["all"]["scheme"], "socks5h")
+        self.assertEqual(mode["bypass"]["patterns"], ["internal.example"])
 
     def test_failures_carry_a_code(self):
         snapshot = proxy_watch.read(env={})
@@ -177,8 +188,9 @@ class WatchTest(unittest.TestCase):
     # A PAC URL from the OS with the body the caller fetched: QuickJS runs it under the
     # policy, and the defaults place the script off every network.
     @unittest.skipUnless(
-        sys.platform.startswith("linux") and os.uname().machine in ("x86_64", "aarch64"),
-        "kioslaverc is the Linux store, and QuickJS is built for x86-64 and AArch64",
+        sys.platform.startswith("linux")
+        and os.uname().machine in ("x86_64", "aarch64", "armv7l", "armv8l"),
+        "kioslaverc is the Linux store, and QuickJS is built for x86-64, AArch64 and ARMv7",
     )
     def test_quickjs_runs_a_fetched_script_under_the_policy(self):
         script = textwrap.dedent(

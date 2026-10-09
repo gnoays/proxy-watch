@@ -14,9 +14,10 @@ use std::process::Command;
 use crate::{render_notice, repo, run};
 
 /// The npm platform suffix napi-rs gives each target the Node binding is built for.
-const NODE_PLATFORMS: [(&str, &str); 8] = [
+const NODE_PLATFORMS: [(&str, &str); 9] = [
     ("x86_64-unknown-linux-gnu", "linux-x64-gnu"),
     ("aarch64-unknown-linux-gnu", "linux-arm64-gnu"),
+    ("armv7-unknown-linux-gnueabihf", "linux-arm-gnueabihf"),
     ("x86_64-unknown-linux-musl", "linux-x64-musl"),
     ("aarch64-unknown-linux-musl", "linux-arm64-musl"),
     ("x86_64-apple-darwin", "darwin-x64"),
@@ -77,28 +78,44 @@ fn node(target: &str, out: &Path) -> Result<(), String> {
     npm_pack(&dir, out)
 }
 
+/// The interpreters a wheel is built for beside the `abi3` one. The free-threaded build has no
+/// stable ABI before 3.15, so each of its versions takes a wheel of its own.
+const FREE_THREADED: [&str; 1] = ["python3.14t"];
+
+/// Two wheels for `target`: the `abi3` one, and one for each [`FREE_THREADED`] interpreter.
+///
+/// maturin takes a free-threaded wheel's extension suffix from an interpreter of that name on
+/// `PATH`, if there is one, even when it runs on another architecture, and from its own table
+/// for the target otherwise. So a cross build runs with no such interpreter on `PATH`;
+/// `check_bindings_artifacts.py` fails a wheel whose suffix names another architecture.
 fn python(target: &str, out: &Path) -> Result<(), String> {
     let dir = repo().join("bindings/python");
     stage("python", target, &dir)?;
-    let mut maturin = Command::new("maturin");
-    maturin
-        .env("RUSTC", crate::std_notice::rustc_binary()?)
-        .current_dir(&dir)
-        .args([
-            "build",
-            "--release",
-            "--locked",
-            "--target",
-            target,
-            "--out",
-        ])
-        .arg(out);
-    if target.ends_with("-linux-gnu") {
-        maturin.args(["--zig", "--compatibility", "manylinux2014"]);
-    } else if target.ends_with("-linux-musl") {
-        maturin.args(["--zig", "--compatibility", "musllinux_1_2"]);
+    for interpreter in std::iter::once(None).chain(FREE_THREADED.map(Some)) {
+        let mut maturin = Command::new("maturin");
+        maturin
+            .env("RUSTC", crate::std_notice::rustc_binary()?)
+            .current_dir(&dir)
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--target",
+                target,
+                "--out",
+            ])
+            .arg(out);
+        if let Some(interpreter) = interpreter {
+            maturin.args(["--interpreter", interpreter]);
+        }
+        if target.contains("-linux-gnu") {
+            maturin.args(["--zig", "--compatibility", "manylinux2014"]);
+        } else if target.ends_with("-linux-musl") {
+            maturin.args(["--zig", "--compatibility", "musllinux_1_2"]);
+        }
+        run(&mut maturin)?;
     }
-    run(&mut maturin)
+    Ok(())
 }
 
 fn c(target: &str, out: &Path) -> Result<(), String> {
@@ -186,7 +203,7 @@ fn cargo_build(
     if build == Build::Addon && target.ends_with("-windows-msvc") {
         flags.push("-C target-feature=+crt-static");
     }
-    if target.ends_with("-linux-gnu") {
+    if target.contains("-linux-gnu") {
         // The `.2.17` suffix is `cargo zigbuild`'s: link against that glibc's symbols.
         cargo.args(["zigbuild", "--target", &format!("{target}.2.17")]);
     } else if target.ends_with("-linux-musl") {

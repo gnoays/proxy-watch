@@ -1,8 +1,9 @@
 # `cargo about` configuration for the third-party license notice each binding artifact
 # ships. `cargo xtask third-party-licenses` renders it with `about.hbs`, one file per
 # binding and target, since what links differs by target (`windows` on Windows, `inotify`
-# on Linux, QuickJS on x86-64 and AArch64 desktops only). The workspace's own crates are
-# left out: an artifact carries `LICENSE-MIT` and `LICENSE-APACHE` for those.
+# on Linux, QuickJS on x86-64 and AArch64 desktops and on ARMv7 Linux only). The
+# workspace's own crates are left out: an artifact carries `LICENSE-MIT` and
+# `LICENSE-APACHE` for those.
 #
 # Two kinds of linked code are not listed, because neither asks for a notice in a binary:
 # the parts of LLVM's compiler-rt and libunwind that `compiler_builtins`, the zig linker and

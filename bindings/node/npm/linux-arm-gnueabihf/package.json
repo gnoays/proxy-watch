@@ -1,12 +1,12 @@
 {
-  "name": "proxy-watch-win32-x64-msvc",
+  "name": "proxy-watch-linux-arm-gnueabihf",
   "version": "0.2.0",
   "cpu": [
-    "x64"
+    "arm"
   ],
-  "main": "proxy-watch.win32-x64-msvc.node",
+  "main": "proxy-watch.linux-arm-gnueabihf.node",
   "files": [
-    "proxy-watch.win32-x64-msvc.node",
+    "proxy-watch.linux-arm-gnueabihf.node",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "THIRD-PARTY-LICENSES.txt"
@@ -31,6 +31,9 @@
     "directory": "bindings/node"
   },
   "os": [
-    "win32"
+    "linux"
+  ],
+  "libc": [
+    "glibc"
   ]
 }

@@ -97,8 +97,9 @@ pub enum HostPattern {
     /// IPv6 literal.
     Local,
     /// Windows `<-loopback>`: the one entry that takes a bypass away instead of adding
-    /// one. It subtracts the implicit set (loopback *and* link-local, see
-    /// [`NO_LOOPBACK_TOKEN`]) from every entry written before it, and from none written
+    /// one. It subtracts the implicit set in force (loopback, and under
+    /// [`ImplicitBypass::WinInet`] link-local too, see [`NO_LOOPBACK_TOKEN`]) from every
+    /// entry written before it, and from none written
     /// after it, which is why it is an entry in [`BypassRules::patterns`] and not a
     /// switch beside them. [`BypassRules::matches`] has the evaluation order.
     SubtractImplicit,
@@ -928,17 +929,21 @@ pub const NO_LOOPBACK_TOKEN: &str = "<-loopback>";
 /// | `127.0.0.1`, `[::1]` | ✓ | ✓ | ✓ | |
 /// | the rest of `127.0.0.0/8` | ✓ | | | |
 /// | `*.localhost`, a trailing dot | ✓ | | | |
-/// | `169.254.0.0/16`, `[fe80::]/10` | ✓ | ✓ | | |
-/// | an IPv4-mapped spelling of any of the above | ✓ | | | |
+/// | `169.254.0.0/16`, `[fe80::]/10` | | ✓ | | |
+/// | an IPv4-mapped spelling of a loopback address | ✓ | | | |
 ///
 /// [`HostPattern::SubtractImplicit`] (`<-loopback>`) subtracts whichever set is in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum ImplicitBypass {
-    /// Chromium's implicit rules (`IsLocalhost`, IPv4-mapped loopback, link-local) and
-    /// WinINet's `loopback` name. The default, and what [`parse::no_proxy`] carries: the
-    /// environment variable has no single resolver to measure, and this is the widest set
-    /// any reader of it applies.
+    /// The loopback half of Chromium's implicit rules (`IsLocalhost`, IPv4-mapped
+    /// loopback) and WinINet's `loopback` name. The default, and what [`parse::no_proxy`]
+    /// carries: the environment variable has no single resolver to measure, and loopback
+    /// is the part of Chromium's set a local proxy has no use for. Chromium's link-local
+    /// ranges are left out: every `no_proxy` reader measured (Go, Python's `urllib`, curl,
+    /// .NET, hyper-util) sends `169.254.0.0/16` and `fe80::/10` to the proxy, and
+    /// `169.254.169.254` is the cloud instance-metadata endpoint, which an inspecting proxy
+    /// is often there to see.
     ///
     /// [`parse::no_proxy`]: crate::parse::no_proxy
     #[default]
@@ -950,10 +955,12 @@ pub enum ImplicitBypass {
     WinInet,
     /// CFNetwork's: the name `localhost` and the addresses `127.0.0.1` and `::1`.
     /// CFNetwork applies it only while the settings carry a bypass key, so the macOS and
-    /// iOS stores carry this set when the dictionary has an `ExceptionsList` array or
-    /// `ExcludeSimpleHostnames` switched on, and [`Empty`](Self::Empty) otherwise,
-    /// `ExcludeSimpleHostnames` set to 0 included. A Mac configured through System Settings
-    /// always has the array.
+    /// iOS stores carry this set when the dictionary has an `ExceptionsList` array with at
+    /// least one element or `ExcludeSimpleHostnames` switched on, and
+    /// [`Empty`](Self::Empty) otherwise, `ExcludeSimpleHostnames` set to 0 and an empty
+    /// array included. A Mac configured through System Settings has the array while its
+    /// list holds an entry; clearing the list leaves an empty one, which the system
+    /// settings call drops.
     CfNetwork,
     /// No implicit bypass: every destination is decided by the entries. GNOME's
     /// `GSimpleProxyResolver` and KDE's KIO have none.
@@ -965,10 +972,7 @@ impl ImplicitBypass {
     // `reduce_mapped`: only `Broad` reads an IPv4-mapped spelling as the address it maps.
     fn covers(self, host_text: &str, ip: Option<IpAddr>) -> bool {
         match self {
-            Self::Broad => {
-                let ip = ip.map(reduce_mapped);
-                is_loopback(host_text, ip) || is_link_local(ip)
-            }
+            Self::Broad => is_loopback(host_text, ip.map(reduce_mapped)),
             Self::WinInet => match ip {
                 Some(ip) => is_loopback_address(ip) || is_link_local(Some(ip)),
                 None => host_text == "localhost" || host_text == "loopback",
@@ -1091,8 +1095,8 @@ impl Default for BypassRules {
 }
 
 impl BypassRules {
-    /// An empty rule set with the [`ImplicitBypass::Broad`] implicit set, so loopback and
-    /// link-local destinations are bypassed.
+    /// An empty rule set with the [`ImplicitBypass::Broad`] implicit set, so loopback
+    /// destinations are bypassed.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -1361,10 +1365,13 @@ impl BypassRules {
     /// assert!(rules.matches_authority("www.example.com"));
     /// assert!(rules.matches_authority("10.1.2.3:443"));
     /// assert!(!rules.matches_authority("example.org"));
-    /// // Link-local destinations bypass even though the list above never mentions them.
-    /// assert!(rules.matches_authority("169.254.1.1"));
-    /// assert!(rules.matches_authority("[fe80::1]"));
-    /// // A Windows list carries WinINet's implicit set, which stops at `127.0.0.1`.
+    /// // Loopback bypasses even though the list above names only `localhost`; link-local
+    /// // does not, in `no_proxy`.
+    /// assert!(rules.matches_authority("127.0.0.2"));
+    /// assert!(!rules.matches_authority("169.254.1.1"));
+    /// // A Windows list carries WinINet's implicit set, which stops at `127.0.0.1` and
+    /// // takes in link-local.
+    /// assert!(parse::proxy_override("").matches_authority("169.254.1.1"));
     /// assert!(parse::proxy_override("").matches_authority("127.0.0.1"));
     /// assert!(!parse::proxy_override("").matches_authority("127.0.0.2"));
     /// ```
@@ -1638,9 +1645,9 @@ fn is_loopback(host_text: &str, ip: Option<IpAddr>) -> bool {
     name == "localhost" || name == "loopback" || name.ends_with(".localhost")
 }
 
-// Whether `ip` is link-local: IPv4 `169.254.0.0/16` (APIPA) or IPv6 `fe80::/10`.
-// `::ffff:169.254.0.0/112` is the first of those only once `reduce_mapped` has run, which
-// `ImplicitBypass::Broad` does and `ImplicitBypass::WinInet` does not.
+// Whether `ip` is link-local: IPv4 `169.254.0.0/16` (APIPA) or IPv6 `fe80::/10`. Only
+// `ImplicitBypass::WinInet` holds these, compared as written: `::ffff:169.254.0.0/112`
+// is another address there.
 //
 // Read as one implicit set together with the loopback members, so
 // [`NO_LOOPBACK_TOKEN`] clears both at once. That is what the token means upstream:
@@ -1724,7 +1731,7 @@ fn host_ip(host: &Host) -> Option<IpAddr> {
 // `::ffff:a.b.c.d` reduced to the IPv4 address it maps; every other address unchanged.
 //
 // Applied once in `BypassRules::matches` rather than at each comparison, so `is_loopback`
-// and `is_link_local` need no mapped-spelling arm of their own. Chromium and Go both
+// needs no mapped-spelling arm of its own. Chromium and Go both
 // reduce, in their own idiom; GLib and Qt do not, which is what
 // `BypassRules::ipv4_mapped_as_ipv4` switches.
 fn reduce_mapped(ip: IpAddr) -> IpAddr {

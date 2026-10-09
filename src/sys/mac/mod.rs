@@ -100,7 +100,7 @@ unsafe extern "C" {
 const SC_STATUS_OK: c_int = 0;
 
 // `kSCStatusNoKey`: "no such key" (`1004`). Spelled out because `system-configuration-sys`
-// does not export the enum; `system-configuration` 0.7 still collapses CopyValue to `None`.
+// does not export the enum; `system-configuration` 0.8 still collapses CopyValue to `None`.
 const SC_STATUS_NO_KEY: c_int = 1004;
 
 // The `State:` dynamic store key that carries the global proxy settings.

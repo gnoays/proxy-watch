@@ -1,6 +1,6 @@
 [package]
 name = "proxy-watch-shared"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "What the Node, Python and C bindings of proxy-watch share"
@@ -11,8 +11,9 @@ publish = false
 proxy-watch = { path = "../..", default-features = false, features = ["resolve", "linux-gnome", "linux-kde", "pac-native"] }
 futures-core = "0.3"
 
-# QuickJS where `rquickjs-sys` ships bindings and the bindings' CI builds natively: x86-64 and
-# AArch64 Windows, Linux and macOS. Elsewhere `pac: "quickjs"` answers
-# `ERR_PAC_ENGINE_UNAVAILABLE`, and the build needs no C compiler.
-[target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(windows, target_os = "linux", target_os = "macos")))'.dependencies]
+# QuickJS where `rquickjs-sys` ships bindings and the release builds have a C compiler for the
+# target: x86-64 and AArch64 Windows, Linux and macOS, and ARMv7 Linux with glibc, which
+# `cargo zigbuild` compiles. Elsewhere `pac: "quickjs"` answers `ERR_PAC_ENGINE_UNAVAILABLE`,
+# and the build needs no C compiler.
+[target.'cfg(any(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(windows, target_os = "linux", target_os = "macos")), all(target_arch = "arm", target_os = "linux", target_env = "gnu")))'.dependencies]
 proxy-watch = { path = "../..", default-features = false, features = ["resolve", "linux-gnome", "linux-kde", "pac-native", "pac-quickjs"] }

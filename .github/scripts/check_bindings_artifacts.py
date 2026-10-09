@@ -4,11 +4,14 @@ Every artifact carries LICENSE-MIT and LICENSE-APACHE, and every one with compil
 also carries the THIRD-PARTY-LICENSES.txt rendered for its target. Every such notice ends
 with the Rust standard library's section. A desktop or Linux artifact links QuickJS, so its
 notice names QuickJS's authors; an Android one does not, and names bionic's crtbegin_so.o
-instead.
+instead. A wheel built for one interpreter rather than for abi3 holds an extension module
+whose suffix names the architecture and C library of the wheel's platform tag, since the
+interpreter imports no other.
 
 Usage: check_bindings_artifacts.py <dir>
 """
 
+import re
 import sys
 import tarfile
 import zipfile
@@ -28,6 +31,32 @@ def wheel(path):
         notice = next((n for n in licenses if n.endswith(NOTICE)), None)
         text = archive.read(notice).decode() if notice else ""
     return names, [Path(n).name for n in licenses], text
+
+
+def suffix_for(platform):
+    """What a version-specific extension module's file name holds on `platform`, a wheel's
+    first platform tag, or None where the suffix names no architecture (macOS)."""
+    linux = re.fullmatch(r"(many|musl)linux_\d+_\d+_(\w+)", platform)
+    if linux:
+        libc, arch = linux.groups()
+        libc = "gnu" if libc == "many" else "musl"
+        if arch == "armv7l":
+            return f"-arm-linux-{libc}eabihf."
+        return f"-{arch}-linux-{libc}."
+    if platform.startswith("win_"):
+        return f"-{platform}.pyd"
+    return None
+
+
+def interpreter_errors(name, names):
+    abi, platform = name[: -len(".whl")].split("-")[3:5]
+    if abi == "abi3":
+        return []
+    marker = suffix_for(platform.split(".")[0])
+    modules = [n for n in names if n.endswith((".so", ".pyd"))]
+    if marker is None or any(marker in m for m in modules):
+        return []
+    return [f"{name}: no extension module for {platform}: {', '.join(modules)}"]
 
 
 def tarball(path):
@@ -51,6 +80,9 @@ def check(path):
     if name.endswith(".whl"):
         names, files, notice = wheel(path)
         compiled = True
+        mismatch = interpreter_errors(name, names)
+        if mismatch:
+            return mismatch
     elif name.endswith(".tgz"):
         names, files, notice = tarball(path)
         compiled = any(n.endswith(".node") for n in names)

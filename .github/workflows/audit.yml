@@ -14,6 +14,7 @@ name: Audit
 
 on:
   pull_request:
+    branches: [main]
     paths:
       - '**/Cargo.toml'
       - Cargo.lock
@@ -23,7 +24,10 @@ on:
       - xtask/src/std_notice.rs
       - xtask/src/crt_notice.rs
       - xtask/src/linked.rs
+      - .github/scripts/install_cargo_about.sh
       - .github/workflows/audit.yml
+    # A draft runs nothing, by each job's `if`; marking it ready for review runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
     paths:
@@ -35,6 +39,7 @@ on:
       - xtask/src/std_notice.rs
       - xtask/src/crt_notice.rs
       - xtask/src/linked.rs
+      - .github/scripts/install_cargo_about.sh
       - .github/workflows/audit.yml
   schedule:
     # Monday 06:00 UTC. GitHub disables a schedule on a public repository after sixty
@@ -53,6 +58,7 @@ concurrency:
 jobs:
   deny:
     name: cargo deny
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,17 +74,18 @@ jobs:
   # text (QuickJS's) that an update changed, so either is read before an artifact ships it.
   third-party-licenses:
     name: third-party licenses
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Each notice ends with the standard library's section for its target, read from that
       # target's sysroot and the `rust-src` sources.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,aarch64-linux-android,x86_64-linux-android
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,armv7-unknown-linux-gnueabihf,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,aarch64-linux-android,x86_64-linux-android
           components: rust-src
       - name: Install cargo-about
-        run: cargo install --locked cargo-about --version 0.9.2 --features cli
+        run: bash .github/scripts/install_cargo_about.sh
       - name: cargo xtask third-party-licenses
         run: cargo xtask third-party-licenses

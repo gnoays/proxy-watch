@@ -21,7 +21,7 @@
 //! | `<local>`, `<-loopback>` | read | read | read | **rejected**: GLib reads neither and compares the token to a host so named |
 //! | an entry ending in a dot (`example.com.`) | the dot is the DNS root and comes off; KDE: **rejected**; KIO compares the text | **rejected** | the dot comes off, as CFNetwork reads it | **rejected** |
 //! | a trailing dot on the destination (`example.com.`) | shed, so `example.com` matches it; KDE: kept, so it does not | kept | shed | kept |
-//! | no entry at all | `localhost`, `127.0.0.0/8`, `::1`, `*.localhost` and link-local go direct; KDE: nothing does | `localhost`, `loopback`, `127.0.0.1`, `::1` and link-local go direct | `localhost`, `127.0.0.1` and `::1` go direct while the dictionary has a bypass key; with none, nothing does | nothing goes direct |
+//! | no entry at all | `localhost`, `127.0.0.0/8`, `::1` and `*.localhost` go direct, link-local does not; KDE: nothing does | `localhost`, `loopback`, `127.0.0.1`, `::1` and link-local go direct | `localhost`, `127.0.0.1` and `::1` go direct while the dictionary has a bypass key; with none, nothing does | nothing goes direct |
 //! | a space at either end | trimmed | trimmed | **kept**, and no host carries it, so the entry is rejected | trailing trimmed, leading kept and rejected |
 //!
 //! A rejected entry lands in

@@ -18,10 +18,15 @@ on:
     # next commit that touches anything else.
     paths-ignore: ['docs/**']
   pull_request:
+    branches: [main]
     # Repeated because GitHub's workflow parser resolves no YAML anchors. Edit both.
     paths-ignore: ['docs/**']
-  # Nothing above fires for a branch that is neither `main` nor in a PR, nor for a change
-  # confined to the paths ignored. Dispatch is how such a branch reaches the two platforms
+    # A draft runs nothing: every job's `if` skips it, so a push to a draft costs no
+    # runner time. Marking it ready for review runs the jobs. The skip is in the jobs and
+    # not here, because a workflow that never starts leaves a required check pending.
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Nothing above fires for a branch that is neither `main` nor in a PR into `main`, nor for
+  # a change confined to the paths ignored. Dispatch is how such a branch reaches the two platforms
   # a Windows development machine cannot run, and it costs nothing until someone presses it.
   #
   # A dispatch can run one job, and the matrix jobs on one runner, so a question one job
@@ -188,12 +193,12 @@ jobs:
   # but run them once instead of recompiling and executing them in every OS/feature leg.
   repo-audit:
     name: repository audit
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'repo-audit'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'repo-audit'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: clippy
@@ -223,7 +228,7 @@ jobs:
   # exactly the coverage an outside contribution needs and reports the run green anyway.
   test:
     name: test (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'test'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'test'
     runs-on: ${{ matrix.os }}
     # A watcher that never stops makes `drop` block in a test; without a bound the job
     # runs for GitHub's six hours instead of failing.
@@ -237,7 +242,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
 
@@ -417,7 +422,7 @@ jobs:
   # proxy settings. Node and Python are the runner images' own, so no setup action is pinned.
   bindings:
     name: bindings (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'bindings'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'bindings'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -432,7 +437,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: clippy
@@ -502,13 +507,13 @@ jobs:
   # process.
   test-features:
     name: test (feature matrix)
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'test-features'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'test-features'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
 
@@ -566,14 +571,14 @@ jobs:
   # target this crate does not otherwise see is the most likely thing to be wrong here.
   wasm:
     name: wasm32-unknown-unknown
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'wasm'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'wasm'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -595,12 +600,12 @@ jobs:
   # for clippy, in a build script, so `musl-gcc` has to be installed.
   musl:
     name: x86_64-unknown-linux-musl
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'musl'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'musl'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
@@ -621,7 +626,7 @@ jobs:
   # job for iOS; Android has no runner here.
   mobile:
     name: clippy (${{ matrix.target }})
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'mobile'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'mobile'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -630,7 +635,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -649,12 +654,12 @@ jobs:
   # image's, since JDK 21 and 25 compile this source to the same dex.
   android-dex:
     name: android dex matches its source
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'android-dex'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'android-dex'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
 
@@ -681,7 +686,7 @@ jobs:
   # so running it on the ubuntu leg alone is sufficient.
   lint:
     name: lint (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'lint'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'lint'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -697,7 +702,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -747,14 +752,14 @@ jobs:
   # --- docs -------------------------------------------------------------------
   docs:
     name: docs
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'docs'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'docs'
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
 
@@ -869,7 +874,7 @@ jobs:
   # breakage.
   msrv:
     name: msrv (${{ matrix.toolchain }})
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'msrv'
+    if: (github.event_name != 'workflow_dispatch' && !github.event.pull_request.draft) || inputs.jobs == 'all' || inputs.jobs == 'msrv'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -879,7 +884,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ matrix.toolchain }}
 

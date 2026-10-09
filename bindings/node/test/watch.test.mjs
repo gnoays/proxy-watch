@@ -150,7 +150,7 @@ for (const precedence of ['ignore', 'before-system', 'after-system']) {
 // A PAC URL from the OS with the body the caller fetched: QuickJS runs it under the policy,
 // and the defaults place the script off every network.
 test('quickjs runs a fetched script under the policy, on either thread', {
-  skip: process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch),
+  skip: process.platform !== 'linux' || !['x64', 'arm64', 'arm'].includes(process.arch),
 }, () => {
   const script = `
 import { createRequire } from 'node:module';

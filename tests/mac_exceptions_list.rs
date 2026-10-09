@@ -71,7 +71,9 @@
 //! whatever is in it, including one empty string. The macOS reader carries this as
 //! [`ImplicitBypass::CfNetwork`] when a key is there and [`ImplicitBypass::Empty`] when
 //! neither is; [`BypassRules::bypass_loopback`] reads only `<-loopback>` and does not
-//! follow the key.
+//! follow the key. An `ExceptionsList` with no element counts as no key: System Settings
+//! stores that shape for a cleared list, and `CFNetworkCopySystemProxySettings` drops it
+//! before CFNetwork sees it.
 //!
 //! # Where the Mac differs from the other sources
 //!
@@ -520,9 +522,10 @@ fn a_port_in_an_entry_makes_it_match_nothing() {
 /// With no `ExceptionsList` key, CFNetwork sends `127.0.0.1`, `localhost` and `[::1]` to
 /// the proxy, and the macOS reader carries `ImplicitBypass::Empty` for such a dictionary
 /// and `ImplicitBypass::CfNetwork` once either key is there. A Mac configured through
-/// System Settings always has the key (the `SCDynamicStore` dictionary the watcher test
-/// reads off this same runner carries `*.local` and `169.254/16`) and any entry at all
-/// turns the bypass on.
+/// System Settings has the key while its list holds an entry (the `SCDynamicStore`
+/// dictionary the watcher test reads off this same runner carries `*.local` and
+/// `169.254/16`), and any entry at all turns the bypass on. A cleared list leaves an
+/// empty array that the system settings call drops, so it turns nothing on.
 ///
 /// No entry is matching loopback: `<-loopback>` (a WinINet token, a dead literal here by
 /// every rule above), `<local>`, `other.invalid` and an empty-string entry all bypass
@@ -654,7 +657,7 @@ fn ipv6_loopback_bypasses_with_a_list_present() {
 /// Every other destination below went to the proxy with a list present that names none of
 /// them: the rest of `127.0.0.0/8`, `*.localhost`, a trailing dot, `loopback`, the
 /// IPv4-mapped spelling, and both link-local ranges. `ImplicitBypass::Broad` answers each
-/// of those direct, which is why macOS does not carry it. The default list a Mac ships with names
+/// of those but the link-local ranges direct, which is why macOS does not carry it. The default list a Mac ships with names
 /// `169.254/16`, so the IPv4 link-local rows go direct on a stock Mac through that entry;
 /// `fe80::/10` has no entry and goes to the proxy.
 #[test]

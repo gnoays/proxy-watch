@@ -7,6 +7,37 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+MSRV unchanged: 1.88, with every feature. One addition to the library's API,
+`ProxyWatcher::current_shared()`. The same machine and destination can route differently
+from 0.2.0; `### Routing answers that change` has each case.
+
+### Added
+
+- `ProxyWatcher::current_shared()`: the current snapshot as an `Arc<ProxyConfig>`, without
+  copying the configuration, for a caller that asks on every connection. A change no
+  longer copies the configuration either.
+
+### Routing answers that change
+
+- macOS: an empty `ExceptionsList` array is no bypass key, so `localhost`, `127.0.0.1` and
+  `::1` go to the proxy, as the Mac sends them; they were `Direct`. A list cleared in
+  System Settings is stored this way.
+- KDE: `ReversedException` is read as KConfig reads a bool, so `true`, the value KDE's
+  settings dialog writes, inverts the list as KF5's KIO and Chromium do; the list was used
+  the ordinary way round. libproxy's `config-kde`, which answers for Qt and KIO 6
+  applications, ignores `true`; a warning names the values on which the two part.
+- Environment (`no_proxy`, `BypassRules::new()`): link-local destinations (`169.254.0.0/16`,
+  `fe80::/10`, `169.254.169.254` among them) go to the proxy unless an entry names them;
+  they were `Direct`. Every `no_proxy` reader measured proxies them. Loopback is still
+  bypassed.
+
+### Changed
+
+- Dependencies: `core-foundation` 0.10 and `system-configuration` 0.8 on macOS and iOS,
+  `libloading` 0.9 on Linux. None of their types is in this crate's API.
+
 ## [0.2.0] - 2026-10-05
 
 MSRV 1.88 with every feature; `linux-gnome` no longer raises it to 1.92. Additions to the
@@ -284,7 +315,8 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
-[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.0

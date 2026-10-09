@@ -1,6 +1,6 @@
 [package]
 name = "proxy-watch"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # MSRV 1.88 (`let` chains).
 rust-version = "1.88"
@@ -104,14 +104,15 @@ features = [
     "Win32_System_Threading",
 ]
 
-# Pinned to 0.9 to match `system-configuration` 0.7 (0.10 would split CF types).
+# `core-foundation` moves with `system-configuration`: 0.8 is built on 0.10, and two
+# versions would split the CF types the two hand each other.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9"
-system-configuration = "0.7"
+core-foundation = "0.10"
+system-configuration = "0.8"
 
 # Optional via `linux-gnome` / `linux-kde`.
 [target.'cfg(target_os = "linux")'.dependencies]
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 notify = { version = "8", optional = true }
 configparser = { version = "3", optional = true }
 # `pac-subprocess` only: `RLIMIT_AS` on the worker.
@@ -125,7 +126,7 @@ ndk-context = "0.1"
 
 # iOS reads `CFNetworkCopySystemProxySettings`, the same dictionary schema macOS's store holds.
 [target.'cfg(target_os = "ios")'.dependencies]
-core-foundation = "0.9"
+core-foundation = "0.10"
 
 [dev-dependencies]
 futures-executor = "0.3"
@@ -139,7 +140,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # `tests/mac_configd_denied.rs` needs `SCDynamicStoreBuilder` directly; keep in lockstep
 # with the normal macOS dependency above.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-system-configuration = "0.7"
+system-configuration = "0.8"
 
 [[bin]]
 name = "proxy-watch-pac-worker"

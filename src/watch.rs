@@ -683,6 +683,24 @@ impl ProxyWatcher {
         self.shared.current()
     }
 
+    /// [`current`](Self::current) without copying the configuration: the snapshot itself,
+    /// shared. The mutex is held only to clone the [`Arc`], so this suits a caller that asks
+    /// on every connection. A later change replaces the snapshot the watcher holds and
+    /// leaves the one returned here as it was.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), proxy_watch::Error> {
+    /// let watcher = proxy_watch::ProxyWatcher::new()?;
+    /// let snapshot = watcher.current_shared();
+    /// assert_eq!(*snapshot, watcher.current());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn current_shared(&self) -> Arc<ProxyConfig> {
+        self.shared.current_shared()
+    }
+
     /// Construction-time routes plus any runtime degradation (see [`WatchHealth`]).
     /// Does no OS I/O; it may briefly wait for the same internal mutex
     /// [`ProxyWatcher::current`] uses.
@@ -748,7 +766,8 @@ enum Queued {
 
 #[derive(Debug)]
 struct State {
-    current: ProxyConfig,
+    // Shared, so `current_shared` hands it out without copying the configuration.
+    current: Arc<ProxyConfig>,
     // At most two `Queued::Snapshot`s, the front one and one behind a failure queued after
     // it (folded by [`Shared::emit`]); failures keep their
     // order and count, coalescing only at the tail via [`Shared::fail`], and are trimmed
@@ -810,7 +829,7 @@ impl Shared {
         queue.push_back(Queued::Snapshot);
         Self {
             state: Mutex::new(State {
-                current: initial,
+                current: Arc::new(initial),
                 queue,
                 dropped: 0,
                 waker: None,
@@ -922,13 +941,17 @@ impl Shared {
 
     fn stamp(&self, state: &State) -> WatchState {
         WatchState {
-            config: state.current.clone(),
+            config: ProxyConfig::clone(&state.current),
             health: self.merged_health(state),
         }
     }
 
     pub(crate) fn current(&self) -> ProxyConfig {
-        self.lock().current.clone()
+        ProxyConfig::clone(&self.current_shared())
+    }
+
+    pub(crate) fn current_shared(&self) -> Arc<ProxyConfig> {
+        Arc::clone(&self.lock().current)
     }
 
     // Publish `config` unless it is equal to the previous one (the equality skip).
@@ -960,7 +983,7 @@ impl Shared {
     )]
     pub(crate) fn emit(&self, config: ProxyConfig) {
         let mut state = self.lock();
-        if state.current == config {
+        if *state.current == config {
             // Log after unlock: subscriber code must not run under this mutex.
             drop(state);
             crate::trace::debug!(
@@ -971,9 +994,10 @@ impl Shared {
         }
         // Rendering the transition asks the subscriber whether `INFO` is enabled, and a
         // level filter is consumer code like the event hook above, so it waits for the
-        // unlock too, and the previous value is kept here to make that possible. The clone
-        // is the price, paid only when the configuration changed.
-        let previous = std::mem::replace(&mut state.current, config.clone());
+        // unlock too, and the previous value is kept here to make that possible; holding
+        // both behind `Arc` keeps them without copying either.
+        let config = Arc::new(config);
+        let previous = std::mem::replace(&mut state.current, Arc::clone(&config));
         // Fold: at most one undelivered snapshot past the front, and it is always the newest
         // one. The entry carries no payload, so the one already queued renders whatever
         // `current` says when it is taken, and `current` was just replaced above. Moving it
@@ -1219,6 +1243,29 @@ mod tests {
             shared.current().effective,
             crate::mode::ProxyMode::WpadAutoDetect
         );
+    }
+
+    // A snapshot handed out stays the one it was; the watcher moves on to a new one. An
+    // equal read keeps the very same allocation, so a caller comparing by pointer sees no
+    // change where there was none.
+    #[test]
+    fn a_shared_snapshot_is_not_rewritten_by_a_later_change() {
+        let shared = Shared::new(ProxyConfig::direct());
+        let before = shared.current_shared();
+
+        shared.emit(ProxyConfig::direct());
+        assert!(Arc::ptr_eq(&before, &shared.current_shared()));
+
+        shared.emit(ProxyConfig::from_source(
+            crate::config::ProxyConfigSource::Registry,
+            crate::mode::ProxyMode::WpadAutoDetect,
+        ));
+        assert_eq!(before.effective, crate::mode::ProxyMode::Direct);
+        assert_eq!(
+            shared.current_shared().effective,
+            crate::mode::ProxyMode::WpadAutoDetect
+        );
+        assert_eq!(*shared.current_shared(), shared.current());
     }
 
     // Why [`ProxyConfig::fallbacks`] is compared by `PartialEq` rather than left beside
