@@ -26,10 +26,18 @@ use crate::util::MASK;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ProxyAuth {
     username: String,
-    password: Option<String>,
-    // Why `password` is `None`: never `Present`, and `Absent` while `password` is `Some`, so
-    // the derived `PartialEq` and `Hash` see no difference `password_state` hides.
-    missing: PasswordState,
+    password: Password,
+}
+
+// The password, or why there is none: one value, so no password can sit beside a reason
+// for its absence. Private, and without `Debug`, because `Present` holds the secret; the
+// public face is `PasswordState`, which holds none and is safe to print.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Password {
+    Present(String),
+    Absent,
+    NotRead,
+    InKeychain,
 }
 
 /// Whether [`ProxyAuth::password`] has a value, and why not when it has none.
@@ -62,8 +70,9 @@ impl ProxyAuth {
     pub fn new(username: impl Into<String>, password: Option<impl Into<String>>) -> Self {
         Self {
             username: username.into(),
-            password: password.map(Into::into),
-            missing: PasswordState::Absent,
+            password: password.map_or(Password::Absent, |password| {
+                Password::Present(password.into())
+            }),
         }
     }
 
@@ -79,18 +88,24 @@ impl ProxyAuth {
         not(all(target_os = "linux", feature = "linux-gnome")),
         allow(dead_code)
     )]
-    pub(crate) fn password_not_read(mut self) -> Self {
-        if self.password.is_none() {
-            self.missing = PasswordState::NotRead;
-        }
-        self
+    pub(crate) fn password_not_read(self) -> Self {
+        self.mark_missing(Password::NotRead)
     }
 
     // Mark a missing password as one kept in the macOS keychain.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn password_in_keychain(mut self) -> Self {
-        if self.password.is_none() {
-            self.missing = PasswordState::InKeychain;
+    pub(crate) fn password_in_keychain(self) -> Self {
+        self.mark_missing(Password::InKeychain)
+    }
+
+    // A password that is there outranks any reason given for its absence.
+    #[cfg_attr(
+        not(any(target_os = "macos", all(target_os = "linux", feature = "linux-gnome"))),
+        allow(dead_code)
+    )]
+    fn mark_missing(mut self, reason: Password) -> Self {
+        if !matches!(self.password, Password::Present(_)) {
+            self.password = reason;
         }
         self
     }
@@ -104,13 +119,16 @@ impl ProxyAuth {
     /// The password, if the source provided one.
     #[must_use]
     pub fn password(&self) -> Option<&str> {
-        self.password.as_deref()
+        match &self.password {
+            Password::Present(password) => Some(password),
+            _ => None,
+        }
     }
 
     /// Whether a password is present (without exposing it).
     #[must_use]
     pub fn has_password(&self) -> bool {
-        self.password.is_some()
+        matches!(self.password, Password::Present(_))
     }
 
     /// [`Present`](PasswordState::Present) when [`password`](Self::password) has a value,
@@ -118,8 +136,10 @@ impl ProxyAuth {
     #[must_use]
     pub fn password_state(&self) -> PasswordState {
         match self.password {
-            Some(_) => PasswordState::Present,
-            None => self.missing,
+            Password::Present(_) => PasswordState::Present,
+            Password::Absent => PasswordState::Absent,
+            Password::NotRead => PasswordState::NotRead,
+            Password::InKeychain => PasswordState::InKeychain,
         }
     }
 }
@@ -133,7 +153,7 @@ impl fmt::Debug for ProxyAuth {
         };
         f.debug_struct("ProxyAuth")
             .field("username", &username)
-            .field("password", &self.password.as_ref().map(|_| MASK))
+            .field("password", &self.password().map(|_| MASK))
             .finish()
     }
 }
