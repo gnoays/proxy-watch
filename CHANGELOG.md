@@ -16,11 +16,14 @@ supported Rust version in force for that release.
 ### Routing answers that change
 
 - PAC: a result's words are split at ASCII whitespace only. A no-break space or another
-  Unicode space between `PROXY` and its address spoils the candidate, which was read as
-  if a space stood there.
+  Unicode space between `PROXY` and its address, or at either end of the address, spoils
+  the candidate, which was read as if a space stood there or as if it were absent.
 - PAC: a result keeps its first 64 steps and drops the rest, an explicit `DIRECT` past
-  them included. The chain is held outside the script's heap; 200,000 short candidates
+  them included, whichever engine ran the script (WinHTTP and Android's `ProxySelector`
+  as well). The chain is held outside the script's heap; 200,000 short candidates
   cost 77 MB.
+- `AndroidPacResolver`: a step `ProxySelector` names twice is kept once, at its first
+  place, as every other PAC engine's chain does.
 
 ### Changed
 

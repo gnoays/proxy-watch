@@ -5,11 +5,57 @@ use crate::error::Error;
 use crate::resolve::ProxyStep;
 use std::collections::HashSet;
 
-// The most steps `parse_find_proxy_result` keeps. The chain is held outside the script's
-// heap, which bounds only the string it came from: at a few hundred bytes a step, 200,000
-// short candidates cost 77 MB. A client tries the steps in order, and one that needs a 65th
-// has spent 64 connection timeouts first.
-const MAX_CHAIN: usize = 64;
+// The most steps a PAC result keeps. The chain is held outside the script's heap, which
+// bounds only the string it came from: at a few hundred bytes a step, 200,000 short
+// candidates cost 77 MB. A client tries the steps in order, and one that needs a 65th has
+// spent 64 connection timeouts first.
+pub(crate) const MAX_CHAIN: usize = 64;
+
+// The fallback chain a PAC answer builds, whichever engine gave it: this parse, WinHTTP's
+// entry array (`winhttp.rs`) and Android's `ProxySelector` list (`sys/proxy_info.rs`) all
+// push their usable steps here, so the same script gets the same chain from each.
+//
+// Repeats collapse. Chromium's `ProxyList::SetFromPacString` keeps them: it
+// `emplace_back`s every valid element with no membership check. A chain is a list of
+// things to try in order, and a proxy that just failed is no more alive the second time the
+// script names it. The test is against the whole chain rather than the previous element, so
+// `a; b; a` collapses as well as `a; a`: by the time the second `a` is reached, `a` has
+// already been tried and failed within this same chain.
+//
+// The set answers in constant time and `MAX_CHAIN` bounds the chain, so reading an answer
+// is linear in its length, on a thread the PAC timeout may have stopped waiting for
+// (`a_long_result_of_repeats_and_junk_parses_in_linear_time`).
+pub(crate) struct Chain {
+    steps: Vec<ProxyStep>,
+    seen: HashSet<ProxyStep>,
+}
+
+impl Chain {
+    pub(crate) fn new() -> Self {
+        Self {
+            steps: Vec::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    // Append `step` unless it is already in the chain or the chain is full.
+    pub(crate) fn push(&mut self, step: ProxyStep) {
+        if !self.is_full() && self.seen.insert(step.clone()) {
+            self.steps.push(step);
+        }
+    }
+
+    // Whether the chain holds `MAX_CHAIN` steps; the caller stops reading the answer.
+    pub(crate) fn is_full(&self) -> bool {
+        self.steps.len() == MAX_CHAIN
+    }
+
+    // The steps in order, or `None` when nothing usable was pushed. Each caller builds its
+    // own error: an empty chain never becomes `DIRECT`.
+    pub(crate) fn finish(self) -> Option<Vec<ProxyStep>> {
+        (!self.steps.is_empty()).then_some(self.steps)
+    }
+}
 
 /// Parse a `FindProxyForURL` return string into an ordered fallback chain.
 ///
@@ -21,7 +67,7 @@ const MAX_CHAIN: usize = 64;
 /// authorities: `/`, `?` or `#`, including in `scheme://`, invalidates the whole candidate.
 /// Bad tokens are skipped, repeats collapse, and embedded credentials are dropped. An empty
 /// usable chain returns [`Error::PacInvalidResult`]. Words are split at ASCII whitespace
-/// only, so a no-break space stays inside a word and spoils it. An IPv6 address without a
+/// only, so a no-break space or a vertical tab stays inside a word and spoils it. An IPv6 address without a
 /// port can go without brackets (`PROXY ::1`). The chain keeps its first 64 steps and drops
 /// the rest, an explicit `DIRECT` among them.
 ///
@@ -41,8 +87,7 @@ const MAX_CHAIN: usize = 64;
 /// [`Error::PacInvalidResult`] when no candidate in the string could be understood,
 /// including the empty string.
 pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
-    let mut steps = Vec::new();
-    let mut seen = HashSet::new();
+    let mut chain = Chain::new();
     // A newline is a separator here, and in Chromium it is not:
     // `ProxyList::SetFromPacString` builds a `base::StringTokenizer(pac_string, ";")`. A
     // script that separated its candidates with newlines instead therefore loses all of
@@ -52,38 +97,21 @@ pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
     // declines to inherit, caused here by the separator choice. The divergence runs one way
     // only: this accepts what the reference rejects, never the other way round.
     for candidate in result.split([';', '\n', '\r']) {
-        // Chromium's `ProxyList::SetFromPacString` keeps repeats: it `emplace_back`s
-        // every valid element with no membership check. A chain is a list of things to
-        // try in order, and a proxy that just failed is no more alive the second time
-        // the script names it. The test is against the whole chain rather than the
-        // previous element, so `a; b; a` collapses as well as `a; a`: by the time the
-        // second `a` is reached, `a` has already been tried and failed within this same
-        // chain. Dropping them is visible in `len()`, hence the doc line above.
-        //
-        // Chromium keeps repeats and needs no deduplication index. This crate checks every
-        // candidate, so do not use `steps.contains`: scanning a vector that grows with the
-        // remote script's output makes parsing quadratic on a thread the timeout has
-        // stopped waiting for
-        // (`a_long_chain_of_distinct_candidates_does_not_stall_the_parse`).
-        if let Some(step) = parse_candidate(candidate)
-            && seen.insert(step.clone())
-        {
-            steps.push(step);
-            if steps.len() == MAX_CHAIN {
+        if let Some(step) = parse_candidate(candidate) {
+            chain.push(step);
+            if chain.is_full() {
                 break;
             }
         }
     }
-    if steps.is_empty() {
-        // Chromium's `PacResult::ToProxyList` pushes `DIRECT` here instead, under the
-        // comment "this basically means an error in the PAC script". Same diagnosis,
-        // opposite handling: a script that said something unreadable has not said "go
-        // direct", and silently going direct is how traffic leaves a network the script
-        // was written to keep it inside. The caller gets the error and can choose
-        // `DIRECT` itself.
-        return Err(Error::pac_invalid_result(result));
-    }
-    Ok(steps)
+    // Chromium's `PacResult::ToProxyList` pushes `DIRECT` on an empty chain instead, under
+    // the comment "this basically means an error in the PAC script". Same diagnosis,
+    // opposite handling: a script that said something unreadable has not said "go direct",
+    // and silently going direct is how traffic leaves a network the script was written to
+    // keep it inside. The caller gets the error and can choose `DIRECT` itself.
+    chain
+        .finish()
+        .ok_or_else(|| Error::pac_invalid_result(result))
 }
 
 // One `;`-separated candidate, or `None` when it is not usable.
@@ -132,6 +160,11 @@ fn parse_candidate(candidate: &str) -> Option<ProxyStep> {
     // when that yields no host, which is why a `scheme://` is accepted there and then
     // ignored, and it is the one measured for the scheme only, not for a path.
     if address.contains(['/', '?', '#']) {
+        return None;
+    }
+    // A Unicode space left at either end of the address is part of the word, and
+    // `ProxyEndpoint::parse` would trim it off: refuse it here, as one inside the word is.
+    if address.contains(char::is_whitespace) {
         return None;
     }
     let mut endpoint = ProxyEndpoint::parse(address, scheme.default_port())
@@ -388,36 +421,39 @@ mod tests {
     }
 
     // The string parsed here is whatever a remote script returned, and nothing caps its
-    // length: `quickjs::run` hands `FindProxyForURL`'s string straight over. Worse, this
-    // parse runs *after* `FindProxyForURL` returns, so `run_with_timeout` has already given
-    // its caller `PacTimeout` and walked away: the thread still finishing this loop is one
-    // nobody is waiting for and nothing will stop. Collapsing repeats with `Vec::contains`
-    // makes that quadratic: hence the `HashSet`. The bound sits between the two costs,
-    // near enough to the quadratic one to still fail on it and far enough from the linear
-    // one that a loaded machine does not.
+    // length: `quickjs::run` hands `FindProxyForURL`'s string straight over. This parse
+    // runs *after* `FindProxyForURL` returns, so `run_with_timeout` has already given its
+    // caller `PacTimeout` and walked away: the thread still finishing this loop is one
+    // nobody is waiting for and nothing will stop. Repeats and junk never fill the chain, so
+    // `MAX_CHAIN` does not end the loop early and every candidate is read. The bound sits
+    // far enough from the linear cost that a loaded machine does not fail it.
     #[test]
-    fn a_long_chain_of_distinct_candidates_does_not_stall_the_parse() {
-        let result = (0..16_000)
-            .map(|i| format!("PROXY h{i}.example.com:8080"))
+    fn a_long_result_of_repeats_and_junk_parses_in_linear_time() {
+        let result = (0..200_000)
+            .map(|i| match i % 3 {
+                0 => format!("PROXY h0.example.com:{}", 8080 + i % 2),
+                1 => format!("PROXY h{i}.example.com/"),
+                _ => format!("JUNK{i}"),
+            })
             .collect::<Vec<_>>()
             .join(";");
         let start = std::time::Instant::now();
-        let steps = parse_find_proxy_result(&result).expect("every candidate is usable");
+        let chain = authorities(&result);
         let elapsed = start.elapsed();
         assert_eq!(
-            steps.len(),
-            MAX_CHAIN,
-            "the chain came back a different length"
+            chain,
+            ["http/h0.example.com:8080", "http/h0.example.com:8081"]
         );
         assert!(
             elapsed < std::time::Duration::from_secs(20),
-            "parsing {} candidates took {elapsed:?}",
-            steps.len()
+            "parsing 200,000 candidates took {elapsed:?}"
         );
     }
 
     #[test]
     fn the_chain_keeps_its_first_steps_and_drops_the_rest() {
+        // The doc of `parse_find_proxy_result` names the number.
+        assert_eq!(MAX_CHAIN, 64);
         // Junk and repeats are not steps and do not count; a `DIRECT` past the limit is
         // dropped with the rest, so the chain never widens to direct by being long.
         let mut result = String::from("junk; PROXY h0:1; PROXY h0:1;");
@@ -435,10 +471,16 @@ mod tests {
     #[test]
     fn words_are_split_at_ascii_whitespace_only() {
         assert_eq!(authorities("PROXY\ta:1"), ["http/a:1"]);
-        // A no-break space and an ideographic space are part of the word they sit in.
-        for space in ['\u{a0}', '\u{3000}'] {
-            let result = format!("PROXY{space}a:1; DIRECT");
-            assert_eq!(authorities(&result), ["direct"], "{space:?}");
+        // A no-break space, an ideographic space and a vertical tab are part of the word
+        // they sit in, at either end of a candidate as well as inside it.
+        for space in ['\u{a0}', '\u{3000}', '\u{b}'] {
+            for result in [
+                format!("PROXY{space}a:1; DIRECT"),
+                format!("{space}PROXY a:1; DIRECT"),
+                format!("PROXY a:1{space}; DIRECT"),
+            ] {
+                assert_eq!(authorities(&result), ["direct"], "{result:?}");
+            }
         }
     }
 }

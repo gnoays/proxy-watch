@@ -185,20 +185,16 @@ pub(crate) fn java_uri_text(url: &Url) -> String {
     text
 }
 
-/// Map `ProxySelector.select`'s list, in order, onto [`ProxyStep`]s.
+/// Map `ProxySelector.select`'s list, in order, onto [`ProxyStep`]s. Repeats collapse and
+/// the chain keeps its first 64 steps, as a PAC result's does.
 ///
 /// `SOCKS` becomes [`ProxyStep::Socks5`]: the `Proxy` does not say which version, and the
 /// `java.net` SOCKS client opens with version 5.
 #[cfg(feature = "pac-android-native")]
 pub(crate) fn steps_from_selected(selected: &[SelectedProxy]) -> Result<Vec<ProxyStep>, Error> {
-    if selected.is_empty() {
-        return Err(Error::pac_invalid_result(
-            "ProxySelector.select returned no proxy",
-        ));
-    }
-    // An element no client could use is skipped and the rest kept, as the in-process and
-    // WinHTTP parsers do with a chain; only an answer with nothing usable in it fails.
-    let mut steps = Vec::with_capacity(selected.len());
+    // An element no client could use is skipped and the rest go into the same `Chain` the
+    // in-process and WinHTTP parsers fill; only an answer with nothing usable in it fails.
+    let mut chain = crate::pac::result::Chain::new();
     let mut first_error = None;
     for result in selected.iter().map(|proxy| {
         let endpoint = || {
@@ -222,16 +218,21 @@ pub(crate) fn steps_from_selected(selected: &[SelectedProxy]) -> Result<Vec<Prox
         }
     }) {
         match result {
-            Ok(step) => steps.push(step),
+            Ok(step) => {
+                chain.push(step);
+                if chain.is_full() {
+                    break;
+                }
+            }
             Err(error) => {
                 first_error.get_or_insert(error);
             }
         }
     }
-    match first_error {
-        Some(error) if steps.is_empty() => Err(error),
-        _ => Ok(steps),
-    }
+    chain.finish().ok_or_else(|| {
+        first_error
+            .unwrap_or_else(|| Error::pac_invalid_result("ProxySelector.select returned no proxy"))
+    })
 }
 
 #[cfg(test)]
@@ -296,6 +297,28 @@ mod tests {
             steps_from_selected(&[proxy("HTTP", None, 1080), proxy("DIRECT", None, 0)]).unwrap(),
             [ProxyStep::Direct]
         );
+        // Repeats collapse against the whole chain, as in a PAC result.
+        assert_eq!(
+            steps_from_selected(&[
+                proxy("HTTP", Some("proxy.example"), 1080),
+                proxy("DIRECT", None, 0),
+                proxy("HTTP", Some("proxy.example"), 1080),
+            ])
+            .unwrap(),
+            [
+                ProxyStep::Http(endpoint("proxy.example")),
+                ProxyStep::Direct
+            ]
+        );
+        // The chain keeps its first steps, as a PAC result's does; a `DIRECT` past them goes
+        // with the rest.
+        let mut long = (1..=crate::pac::result::MAX_CHAIN as i32 + 1)
+            .map(|port| proxy("HTTP", Some("proxy.example"), port))
+            .collect::<Vec<_>>();
+        long.push(proxy("DIRECT", None, 0));
+        let steps = steps_from_selected(&long).unwrap();
+        assert_eq!(steps.len(), crate::pac::result::MAX_CHAIN);
+        assert!(!steps.contains(&ProxyStep::Direct));
     }
 
     fn info(host: &str, port: i32, exclusions: &[&str]) -> ProxyInfo {
