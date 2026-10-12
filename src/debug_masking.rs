@@ -128,7 +128,7 @@ const REGISTRY: &[Registered] = &[
         available: true,
     },
     Registered {
-        file: "sys/linux/kde.rs",
+        file: "sys/linux/kde/watch.rs",
         ty: "FileWatch",
         exposure: Exposure::Inert("nothing at all — the struct name and `..`"),
         available: cfg!(all(target_os = "linux", feature = "linux-kde")),
