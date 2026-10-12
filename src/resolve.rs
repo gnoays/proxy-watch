@@ -69,7 +69,10 @@ impl ProxyStep {
     /// [`ProxyEndpoint::parse`] cannot. Do not read `None` as "connect directly":
     /// [`endpoint`](Self::endpoint) is what answers that question.
     ///
-    /// Percent-encodes credentials (do not log). Keeps `socks4a`/`socks5h` from
+    /// Percent-encodes credentials (do not log), a `%` among them. An empty user name with
+    /// an empty password writes no userinfo, and an empty password beside a user name
+    /// writes no `:`; [`ProxyAuth::password_state`](crate::ProxyAuth::password_state) still
+    /// tells the two apart. Keeps `socks4a`/`socks5h` from
     /// [`ProxyEndpoint::scheme_hint`], unlike [`scheme`](Self::scheme). HTTP 407: client
     /// job.
     ///
@@ -90,9 +93,13 @@ impl ProxyStep {
         crate::endpoint::parse_host(&endpoint.host.to_string()).ok()?;
         let mut url = Url::parse(&format!("{scheme}://{}", endpoint.authority())).ok()?;
         if let Some(auth) = &endpoint.auth {
-            url.set_username(auth.username()).ok()?;
+            // The setters escape with WHATWG's userinfo set, which leaves `%` as it is: a
+            // user name `a%41` would read back as `aA`. `%` is escaped first, so a reader
+            // that decodes every escape gets the credentials the endpoint holds.
+            url.set_username(&auth.username().replace('%', "%25"))
+                .ok()?;
             if let Some(password) = auth.password() {
-                url.set_password(Some(password)).ok()?;
+                url.set_password(Some(&password.replace('%', "%25"))).ok()?;
             }
         }
         Some(url)
@@ -519,6 +526,26 @@ mod tests {
         let url = ProxyStep::Http(endpoint).to_url().unwrap();
         assert_eq!(url.as_str(), "http://al%20ice:p%40ss@proxy:8080/");
         assert_eq!(url.password(), Some("p%40ss"));
+    }
+
+    #[test]
+    fn to_url_escapes_a_percent_in_credentials() {
+        // A `%` the credentials hold literally, followed by two hex digits or not, and one
+        // `percent_decode` kept whole because its bytes are not UTF-8. A reader decoding
+        // every escape has to get each back as the endpoint holds it.
+        let endpoint = ProxyEndpoint::new(Host::Domain("proxy".to_owned()), 8080)
+            .with_auth(ProxyAuth::new("a%41", Some("p%FF%zz")));
+        let url = ProxyStep::Http(endpoint).to_url().unwrap();
+        assert_eq!(url.as_str(), "http://a%2541:p%25FF%25zz@proxy:8080/");
+        // Read back as this crate reads a proxy URL's userinfo.
+        let decode = crate::util::percent_decode;
+        assert_eq!(decode(url.username()), "a%41");
+        assert_eq!(decode(url.password().unwrap()), "p%FF%zz");
+        // And as the endpoint parser reads the URL whole.
+        let parsed = ProxyEndpoint::parse(url.as_str(), 80).unwrap();
+        let auth = parsed.auth.unwrap();
+        assert_eq!(auth.username(), "a%41");
+        assert_eq!(auth.password(), Some("p%FF%zz"));
     }
 
     #[test]

@@ -7,6 +7,12 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ProxyStep::to_url()` escapes a `%` in the user name or password as `%25`. The URL
+  setters leave `%` as it is, so a password holding `%41` literally read back as `A` in
+  any client that decodes the URL's userinfo, Node's and Python's adapters among them.
+
 ## [0.3.0] - 2026-10-09
 
 MSRV unchanged: 1.88, with every feature. One addition to the library's API,
