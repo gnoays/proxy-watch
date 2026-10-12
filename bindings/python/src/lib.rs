@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use proxy_watch::{CapturedEnv, ProxyConfig};
-use proxy_watch_shared::{self as shared, Answer, Failure, Layering, Route as SharedRoute};
+use proxy_watch_shared::{self as shared, Answer, Failure, Layering};
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -96,29 +96,20 @@ pub struct Route {
 impl TryFrom<Answer> for Route {
     type Error = Failure;
 
-    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
-        let (kind, steps, pac_url, script) = match route {
-            SharedRoute::Steps(steps) => (
-                "steps",
-                Some(
-                    steps
-                        .iter()
-                        .map(shared::step_url)
-                        .collect::<Result<_, _>>()?,
-                ),
-                None,
-                None,
-            ),
-            SharedRoute::Pac(url) => ("pac", None, Some(url), None),
-            SharedRoute::PacInline(script) => ("pac-inline", None, None, Some(script)),
-            SharedRoute::Wpad => ("wpad", None, None, None),
-        };
+    fn try_from(answer: Answer) -> Result<Self, Failure> {
+        let shared::AnswerFields {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine,
+        } = answer.try_into()?;
         Ok(Self {
             kind,
             steps,
             pac_url,
             script,
-            engine: engine.name(),
+            engine,
         })
     }
 }
@@ -320,13 +311,13 @@ impl Snapshot {
                 .config
                 .sources
                 .iter()
-                .map(|(source, _)| format!("{source:?}"))
+                .map(|(source, _)| shared::source_label(source))
                 .collect(),
             fallbacks: self
                 .config
                 .fallbacks
                 .iter()
-                .map(|source| format!("{source:?}"))
+                .map(shared::source_label)
                 .collect(),
             rejected: shared::rejected(&self.config),
         }

@@ -27,7 +27,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Task, sys};
 use napi_derive::napi;
 use proxy_watch::{CapturedEnv, ProxyConfig};
-use proxy_watch_shared::{self as shared, Answer, Failure, Layering, Route};
+use proxy_watch_shared::{self as shared, Answer, Failure, Layering};
 
 // napi puts the status on the thrown error as its `code`.
 fn into_napi(failure: Failure) -> napi::Error<&'static str> {
@@ -220,29 +220,20 @@ pub struct JsRoute {
 impl TryFrom<Answer> for JsRoute {
     type Error = Failure;
 
-    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
-        let (kind, steps, pac_url, script) = match route {
-            Route::Steps(steps) => (
-                "steps",
-                Some(
-                    steps
-                        .iter()
-                        .map(shared::step_url)
-                        .collect::<Result<_, _>>()?,
-                ),
-                None,
-                None,
-            ),
-            Route::Pac(url) => ("pac", None, Some(url), None),
-            Route::PacInline(script) => ("pac-inline", None, None, Some(script)),
-            Route::Wpad => ("wpad", None, None, None),
-        };
+    fn try_from(answer: Answer) -> Result<Self, Failure> {
+        let shared::AnswerFields {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine,
+        } = answer.try_into()?;
         Ok(Self {
             kind: kind.to_owned(),
             steps,
             pac_url,
             script,
-            engine: engine.name().to_owned(),
+            engine: engine.to_owned(),
         })
     }
 }
@@ -334,13 +325,13 @@ impl Snapshot {
                 .config
                 .sources
                 .iter()
-                .map(|(source, _)| format!("{source:?}"))
+                .map(|(source, _)| shared::source_label(source))
                 .collect(),
             fallbacks: self
                 .config
                 .fallbacks
                 .iter()
-                .map(|source| format!("{source:?}"))
+                .map(shared::source_label)
                 .collect(),
             rejected: shared::rejected(&self.config),
         }

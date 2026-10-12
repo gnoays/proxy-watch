@@ -17,9 +17,9 @@ use std::time::Duration;
 use futures_core::Stream;
 use proxy_watch::pac::{PacPolicy, PacScript};
 use proxy_watch::{
-    BypassRules, CapturedEnv, EnvPrecedence, Error, Host, ProxyAuth, ProxyConfig, ProxyEntry,
-    ProxyEnv, ProxyMode, ProxyScheme, ProxyStep, ProxyWatcher, RejectedValue, Scheme, Url,
-    WatchEvent, WatchOptions,
+    BypassRules, CapturedEnv, EnvPrecedence, Error, Host, ProxyAuth, ProxyConfig,
+    ProxyConfigSource, ProxyEntry, ProxyEnv, ProxyMode, ProxyScheme, ProxyStep, ProxyWatcher,
+    RejectedValue, Scheme, Url, WatchEvent, WatchOptions,
 };
 
 /// Where a request to one URL goes.
@@ -64,6 +64,41 @@ impl Engine {
 pub struct Answer {
     pub route: Route,
     pub engine: Engine,
+}
+
+/// An [`Answer`] as the Node and Python bindings show it: its kind, the one field that kind
+/// carries, and the engine's name.
+pub struct AnswerFields {
+    pub kind: &'static str,
+    pub steps: Option<Vec<String>>,
+    pub pac_url: Option<String>,
+    pub script: Option<String>,
+    pub engine: &'static str,
+}
+
+impl TryFrom<Answer> for AnswerFields {
+    type Error = Failure;
+
+    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
+        let (kind, steps, pac_url, script) = match route {
+            Route::Steps(steps) => (
+                "steps",
+                Some(steps.iter().map(step_url).collect::<Result<_, _>>()?),
+                None,
+                None,
+            ),
+            Route::Pac(url) => ("pac", None, Some(url), None),
+            Route::PacInline(script) => ("pac-inline", None, None, Some(script)),
+            Route::Wpad => ("wpad", None, None, None),
+        };
+        Ok(Self {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine: engine.name(),
+        })
+    }
 }
 
 /// A failure with the code each binding shows.
@@ -431,6 +466,11 @@ fn run_body_natively(
     Err(Error::PacEngineUnavailable)
 }
 
+/// The name the bindings show for a source: its core variant's name.
+pub fn source_label(source: &ProxyConfigSource) -> String {
+    format!("{source:?}")
+}
+
 /// `"direct"`, or the proxy URL with its credentials and its `socks5h` / `socks4a` hint.
 pub fn step_url(step: &ProxyStep) -> Result<String, Failure> {
     match step {
@@ -729,14 +769,14 @@ pub fn describe(config: &ProxyConfig, os_readable: bool) -> Value {
             "sources",
             list(&config.sources, |(source, mode)| {
                 map([
-                    ("source", format!("{source:?}").into()),
+                    ("source", source_label(source).into()),
                     ("mode", describe_mode(mode)),
                 ])
             }),
         ),
         (
             "fallbacks",
-            list(&config.fallbacks, |source| format!("{source:?}").into()),
+            list(&config.fallbacks, |source| source_label(source).into()),
         ),
         ("rejected", list(rejected(config), Value::Str)),
         ("os_readable", os_readable.into()),
