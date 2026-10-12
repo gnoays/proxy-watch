@@ -107,7 +107,7 @@ pub enum HostPattern {
 
 // Which list an entry came from, for the places the lists disagree about what an entry
 // means. Named after the source rather than after a behaviour, because no two of them
-// differ from `Suffix` on the same set of axes: `Windows` on four, `MacOs` on five, `Gnome`
+// differ from `Suffix` on the same set of axes: `Windows` on five, `MacOs` on five, `Gnome`
 // on four and `Kde` on two, no two the same set, and `MacOs` shares two of the `Windows`
 // axes while disagreeing with it everywhere else.
 //
@@ -142,14 +142,15 @@ pub enum HostPattern {
 // into matching nothing while still reading back as live, which is the shape `Gnome` below
 // refuses outright rather than store.
 //
-// `Windows` differs in four places. A bare name is the name alone, measured on this
+// `Windows` differs in five places. A bare name is the name alone, measured on this
 // crate's own terms rather than read off a reimplementation, because the two
 // reimplementations disagree and neither is the OS; the readings are the rows of
-// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`. And the three
+// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`. And the four
 // spellings a Windows list has no reading this crate can follow (an entry holding a `/`,
-// an entry starting with `.`, and an IPv4 address written other than as four decimal
-// octets) are refused rather than stored as rules the machine does not honour. Each has
-// a guard in `parse_in` carrying its readings.
+// an entry starting with `.`, an entry ending in `.`, which the store compares as written,
+// and an IPv4 address written other than as four decimal octets) are refused rather than
+// stored as rules the machine does not honour. Each has a guard in `parse_in` carrying
+// its readings; the trailing `.` shares `Kde`'s.
 //
 // `MacOs` is CFNetwork's `ExceptionsList`, measured the same way and by the same argument:
 // `tests/mac_exceptions_list.rs` hands `CFNetworkCopyProxiesForURL` a settings dictionary
@@ -821,9 +822,11 @@ impl HostPattern {
                 match_self,
                 port: rule_port,
             } => {
-                // No `ip.is_none()` guard, so `.1` also matches `10.0.0.1` through text
-                // matching, as in the Windows `ProxyOverride` lists this crate reads. Go
-                // excludes addresses here; Chromium does not.
+                // No `ip.is_none()` guard, so a `Domain` built by hand with the suffix `.1`
+                // matches `10.0.0.1` through text matching. `parse` builds none: it refuses
+                // a suffix that reads as an address, so from a list only a wildcard
+                // (`*.*.*.1`) reaches an address as text. Go excludes addresses here;
+                // Chromium does not.
                 //
                 // The leading dot is `parse`'s convention, not something the type can
                 // enforce: the fields are public and `BypassRules::new` exists to be filled

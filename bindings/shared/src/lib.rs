@@ -305,6 +305,8 @@ fn body_engine(pac: Pac) -> Option<Engine> {
 pub fn route(config: &ProxyConfig, url: &str, options: &RouteOptions) -> Result<Answer, Failure> {
     let url =
         Url::parse(url).map_err(|error| Failure::new("ERR_INVALID_URL", error.to_string()))?;
+    // The crate's own `has_request_host` test, which is not public: no host, or an empty
+    // one. Change the two together.
     let hostless = matches!(url.host(), None | Some(Host::Domain("")));
     let answer = |route| {
         Ok(Answer {
@@ -1315,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn wpad_without_a_script_is_the_callers_unless_the_os_is_asked_to_discover() {
+    fn wpad_without_a_script_or_os_discovery_is_the_callers() {
         let wpad = ProxyConfig::new(ProxyMode::WpadAutoDetect, Vec::new());
         for pac in [Pac::None, Pac::Native, Pac::QuickJs, Pac::Auto] {
             let answered = answer(&wpad, pac, None, PacPolicy::new()).unwrap();

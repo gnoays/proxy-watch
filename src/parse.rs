@@ -97,7 +97,9 @@ const WINDOWS_SERVER_SEPARATORS: [char; 5] = [';', ' ', '\t', '\r', '\n'];
 /// [`ProxyEntry::Disabled`]. Bad tokens skipped; recorded on [`windows_manual`]. A scheme
 /// named twice keeps the last token that was not skipped, so a bad last spelling leaves the
 /// earlier one standing. A `socks=` entry also fills every scheme the string left
-/// unset; the last two examples below are that rule and its limit.
+/// unset; the last two examples below are that rule and its limit. An `all=` entry, or a
+/// bare `host:port`, sets every scheme, so `socks=` fills none beside it, an empty `all=`
+/// included; an `all=` that was rejected sets nothing and leaves the gaps to `socks=`.
 ///
 /// ```
 /// # use proxy_watch::{parse, ProxyScheme, Scheme};
@@ -242,7 +244,9 @@ fn warn_dropped_proxy_server_token(err: &Error) {
 
 // Split `http=host:port` into `("http", "host:port")`. Only an `=` before the first `:`,
 // `/`, `?` or `#` separates a key, so a password's or query's `=` stays in the endpoint
-// text for `ProxyEndpoint::parse`, which cuts the authority at the same characters.
+// text for `ProxyEndpoint::parse`, which cuts the authority at the same characters. A user
+// name's `=` comes before its `:` and does separate one: `u=x:pw@h` is the unknown scheme
+// `u`, and is rejected.
 fn split_scheme_key(token: &str) -> Option<(&str, &str)> {
     let eq = token.find('=')?;
     let boundary = token.find([':', '/', '?', '#']).unwrap_or(token.len());
@@ -259,7 +263,9 @@ fn split_scheme_key(token: &str) -> Option<(&str, &str)> {
 /// documents, and **a bare name matches that name alone** rather than the domain under it:
 /// `contoso.com` here does not bypass `api.contoso.com`. Write `*.contoso.com` for the
 /// subdomains, which is also what Windows asks for; `.contoso.com` is rejected rather than
-/// read, because no measured reader grants it. A CIDR entry is rejected too, because
+/// read, because no measured reader grants it. So is `contoso.com.`: the store compares a
+/// trailing `.` as written, so it would match only a destination spelled with one. A CIDR
+/// entry is rejected too, because
 /// Windows answers a `/` with the whole list: write the range as the wildcard Windows does
 /// read, `10.*`. `<local>` → [`HostPattern::Local`](crate::HostPattern::Local) and
 /// `<-loopback>` (IE9+) →

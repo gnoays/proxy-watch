@@ -127,7 +127,7 @@
 //!   watch is on the config directories, and an edit to the link's target fires nothing
 //!   there. Set [`WatchOptions::poll_interval`] if a dotfile manager links it.
 //! - `ProxyStep::to_url()` carries the password in the clear. It exists to hand
-//!   `user:password@` to a client; `endpoint()`'s `Display` masks it, so print that one.
+//!   `user:password@` to a client; `endpoint()`'s `Display` leaves it out, so print that one.
 //! - `watch_channel()` (behind `tokio`) publishes configuration only. A failed re-read or a
 //!   dead notification route leaves the last good configuration standing with nothing
 //!   marking it.
