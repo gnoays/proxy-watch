@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pbkdf2 } from 'node:crypto';
+import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { inspect } from 'node:util';
 
@@ -119,6 +120,27 @@ test('read() takes process.env when called', async () => {
     if (saved === undefined) delete process.env.https_proxy;
     else process.env.https_proxy = saved;
   }
+});
+
+// A worker thread's `process.env` is its own copy; a write there never reaches the process
+// environment, and a read left without `env` takes it all the same.
+test("a worker thread's own process.env is read when env is left out", async () => {
+  const { Worker } = await import('node:worker_threads');
+  const addon = createRequire(import.meta.url).resolve('../proxy-watch.node');
+  const script = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { read, readSync, watchSync } = require(workerData);
+    process.env.https_proxy = 'http://in-worker.example:3128';
+    const steps = (snapshot) => snapshot.route('https://a.example/').steps;
+    const watcher = watchSync(() => {}, { precedence: 'before-system' });
+    const watched = steps(watcher.current());
+    watcher.close();
+    read().then((snapshot) => parentPort.postMessage([steps(readSync()), steps(snapshot), watched]));
+  `;
+  const worker = new Worker(script, { eval: true, workerData: addon });
+  const [message] = await once(worker, 'message');
+  await worker.terminate();
+  assert.deepEqual(message, Array(3).fill(['http://in-worker.example:3128/']));
 });
 
 test('failures carry a code', async () => {

@@ -1,7 +1,8 @@
 export interface ReadOptions {
-  /** The variables to read `*_proxy` from; the process environment when absent. Pass
-   * `process.env` from a worker thread, whose `process.env` is its own copy. Anything
-   * `Object.prototype.toString` does not tag `[object Object]` (a `Map` included) throws
+  /** The variables to read `*_proxy` from; the calling thread's `process.env` when absent,
+   * which on a worker thread is its own copy, and under Bun holds writes that the process
+   * environment does not. Anything `Object.prototype.toString` does not tag
+   * `[object Object]` (a `Map` included) throws
    * `ObjectExpected`. Enumerable string keys are read, inherited ones included; an
    * `undefined` value is skipped and any other non-string value throws. */
   env?: Record<string, string | undefined>;

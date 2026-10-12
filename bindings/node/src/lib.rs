@@ -113,12 +113,43 @@ impl ToNapiValue for EnvVars {
     }
 }
 
+// `process.env` of the calling thread, for an `env` option left out. On a worker thread it
+// is the thread's own copy, and under Bun a write to it does not reach the process
+// environment; reading the object reads what the caller wrote either way.
+fn process_env(env: &Env) -> napi::Result<EnvVars, &'static str> {
+    let raw = env.raw();
+    // SAFETY: `raw` is the live environment of this call; every handle is created here and
+    // lives in the current scope.
+    let vars = unsafe {
+        let property = |object: sys::napi_value, name: &std::ffi::CStr| {
+            let mut out = std::ptr::null_mut();
+            (sys::napi_get_named_property(raw, object, name.as_ptr(), &mut out)
+                == sys::Status::napi_ok)
+                .then_some(out)
+        };
+        let mut global = std::ptr::null_mut();
+        (sys::napi_get_global(raw, &mut global) == sys::Status::napi_ok)
+            .then_some(global)
+            .and_then(|global| property(global, c"process"))
+            .and_then(|process| property(process, c"env"))
+    };
+    let unreadable = |reason: String| napi::Error::new("ERR_PROXY_WATCH", reason);
+    let vars = vars.ok_or_else(|| unreadable("process.env could not be read".to_owned()))?;
+    // SAFETY: `vars` is a handle of this call's environment.
+    unsafe { EnvVars::from_napi_value(raw, vars) }.map_err(|error| unreadable(error.reason))
+}
+
 fn layering(
-    env: Option<EnvVars>,
+    env: &Env,
+    vars: Option<EnvVars>,
     precedence: Option<&str>,
 ) -> napi::Result<Layering, &'static str> {
+    let vars = match vars {
+        Some(vars) => vars,
+        None => process_env(env)?,
+    };
     shared::precedence(precedence)
-        .and_then(|precedence| Layering::new(env.map(|vars| vars.0), precedence))
+        .and_then(|precedence| Layering::new(Some(vars.0), precedence))
         .map_err(into_napi)
 }
 
@@ -380,27 +411,27 @@ impl Task for Read {
     }
 }
 
-fn read_options(options: Option<ReadOptions>) -> napi::Result<Layering, &'static str> {
+fn read_options(env: &Env, options: Option<ReadOptions>) -> napi::Result<Layering, &'static str> {
     let options = options.unwrap_or(ReadOptions {
         env: None,
         precedence: None,
     });
-    layering(options.env, options.precedence.as_deref())
+    layering(env, options.env, options.precedence.as_deref())
 }
 
 /// Read the OS settings and the environment once, on a libuv worker thread.
 #[napi(ts_return_type = "Promise<Snapshot>")]
-pub fn read(options: Option<ReadOptions>) -> napi::Result<AsyncTask<Read>, &'static str> {
+pub fn read(env: Env, options: Option<ReadOptions>) -> napi::Result<AsyncTask<Read>, &'static str> {
     Ok(AsyncTask::new(Read {
-        layering: read_options(options)?,
+        layering: read_options(&env, options)?,
         env: CapturedEnv::capture(),
     }))
 }
 
 /// `read()` on the JavaScript thread.
 #[napi]
-pub fn read_sync(options: Option<ReadOptions>) -> napi::Result<Snapshot, &'static str> {
-    let layering = read_options(options)?;
+pub fn read_sync(env: Env, options: Option<ReadOptions>) -> napi::Result<Snapshot, &'static str> {
+    let layering = read_options(&env, options)?;
     let (config, os_readable) = shared::read_os(&CapturedEnv::capture()).map_err(into_napi)?;
     Ok(Snapshot {
         config: layering.apply(config),
@@ -597,6 +628,7 @@ pub fn install_inspect(exports: Object, env: Env) -> napi::Result<()> {
 }
 
 fn watch_options(
+    env: &Env,
     options: Option<WatchOptions>,
 ) -> napi::Result<(Arc<Layering>, Option<Duration>), &'static str> {
     let options = options.unwrap_or(WatchOptions {
@@ -604,7 +636,7 @@ fn watch_options(
         precedence: None,
         poll_interval_ms: None,
     });
-    let layering = Arc::new(layering(options.env, options.precedence.as_deref())?);
+    let layering = Arc::new(layering(env, options.env, options.precedence.as_deref())?);
     // A number, not a `u32`: napi wraps `-1` into 49 days rather than refusing it.
     let poll_interval = options
         .poll_interval_ms
@@ -723,7 +755,7 @@ pub fn watch(
     on_change: UserOnChange<'_>,
     options: Option<WatchOptions>,
 ) -> napi::Result<AsyncTask<StartWatch>, &'static str> {
-    let (layering, poll_interval) = watch_options(options)?;
+    let (layering, poll_interval) = watch_options(&env, options)?;
     let open = Arc::new(AtomicBool::new(true));
     let on_change = gated(&env, &on_change, Arc::clone(&open))?;
     Ok(AsyncTask::new(StartWatch {
@@ -744,7 +776,7 @@ pub fn watch_sync(
     on_change: UserOnChange<'_>,
     options: Option<WatchOptions>,
 ) -> napi::Result<Watcher, &'static str> {
-    let (layering, poll_interval) = watch_options(options)?;
+    let (layering, poll_interval) = watch_options(&env, options)?;
     let open = Arc::new(AtomicBool::new(true));
     let on_change = gated(&env, &on_change, Arc::clone(&open))?;
     start(on_change, &layering, poll_interval, &CapturedEnv::capture())

@@ -13,6 +13,14 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Node: `read()`, `readSync()`, `watch()` and `watchSync()` without `env` read `*_proxy`
+  from the calling thread's `process.env`, not the process environment. On the main
+  thread under Node the two hold the same; a worker thread's own copy is read now, and
+  under Bun, whose `process.env` writes do not reach the process environment, so is a
+  variable set at run time.
+
 ## [0.2.0] - 2026-10-09
 
 Built from crate 0.3.0, which changes some routing answers (macOS with an empty bypass
