@@ -13,6 +13,21 @@ supported Rust version in force for that release.
   setters leave `%` as it is, so a password holding `%41` literally read back as `A` in
   any client that decodes the URL's userinfo, Node's and Python's adapters among them.
 
+### Routing answers that change
+
+- PAC: a result's words are split at ASCII whitespace only. A no-break space or another
+  Unicode space between `PROXY` and its address spoils the candidate, which was read as
+  if a space stood there.
+- PAC: a result keeps its first 64 steps and drops the rest, an explicit `DIRECT` past
+  them included. The chain is held outside the script's heap; 200,000 short candidates
+  cost 77 MB.
+
+### Changed
+
+- QuickJS: the error for a script whose `FindProxyForURL` is declared with `let` or
+  `const` says the function is read off the global object, where those declarations do
+  not put it.
+
 ## [0.3.0] - 2026-10-09
 
 MSRV unchanged: 1.88, with every feature. One addition to the library's API,

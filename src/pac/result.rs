@@ -5,6 +5,12 @@ use crate::error::Error;
 use crate::resolve::ProxyStep;
 use std::collections::HashSet;
 
+// The most steps `parse_find_proxy_result` keeps. The chain is held outside the script's
+// heap, which bounds only the string it came from: at a few hundred bytes a step, 200,000
+// short candidates cost 77 MB. A client tries the steps in order, and one that needs a 65th
+// has spent 64 connection timeouts first.
+const MAX_CHAIN: usize = 64;
+
 /// Parse a `FindProxyForURL` return string into an ordered fallback chain.
 ///
 /// Tokens are separated by `;` or newlines; newline separation is specific to this crate
@@ -14,7 +20,10 @@ use std::collections::HashSet;
 /// [`ProxyScheme::default_port`] for the keyword's scheme. Addresses must be bare
 /// authorities: `/`, `?` or `#`, including in `scheme://`, invalidates the whole candidate.
 /// Bad tokens are skipped, repeats collapse, and embedded credentials are dropped. An empty
-/// usable chain returns [`Error::PacInvalidResult`].
+/// usable chain returns [`Error::PacInvalidResult`]. Words are split at ASCII whitespace
+/// only, so a no-break space stays inside a word and spoils it. An IPv6 address without a
+/// port can go without brackets (`PROXY ::1`). The chain keeps its first 64 steps and drops
+/// the rest, an explicit `DIRECT` among them.
 ///
 /// ```
 /// # use proxy_watch::pac::parse_find_proxy_result;
@@ -60,6 +69,9 @@ pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
             && seen.insert(step.clone())
         {
             steps.push(step);
+            if steps.len() == MAX_CHAIN {
+                break;
+            }
         }
     }
     if steps.is_empty() {
@@ -76,7 +88,8 @@ pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
 
 // One `;`-separated candidate, or `None` when it is not usable.
 fn parse_candidate(candidate: &str) -> Option<ProxyStep> {
-    let mut words = candidate.split_whitespace();
+    // ASCII whitespace only: a Unicode space is a character of the word it sits in.
+    let mut words = candidate.split_ascii_whitespace();
     let keyword = words.next()?;
     let address = words.next();
     // `PROXY a:1 b:2` is not a thing; refuse rather than guess.
@@ -254,6 +267,8 @@ mod tests {
     #[test]
     fn ipv6_literals_survive() {
         assert_eq!(authorities("PROXY [::1]:8080"), ["http/[::1]:8080"]);
+        // Without a port, the brackets can go.
+        assert_eq!(authorities("PROXY ::1"), ["http/[::1]:80"]);
     }
 
     #[test]
@@ -391,7 +406,7 @@ mod tests {
         let elapsed = start.elapsed();
         assert_eq!(
             steps.len(),
-            16_000,
+            MAX_CHAIN,
             "the chain came back a different length"
         );
         assert!(
@@ -399,5 +414,31 @@ mod tests {
             "parsing {} candidates took {elapsed:?}",
             steps.len()
         );
+    }
+
+    #[test]
+    fn the_chain_keeps_its_first_steps_and_drops_the_rest() {
+        // Junk and repeats are not steps and do not count; a `DIRECT` past the limit is
+        // dropped with the rest, so the chain never widens to direct by being long.
+        let mut result = String::from("junk; PROXY h0:1; PROXY h0:1;");
+        for i in 1..=MAX_CHAIN {
+            result.push_str(&format!(" PROXY h{i}:1;"));
+        }
+        result.push_str(" DIRECT");
+        let chain = authorities(&result);
+        assert_eq!(chain.len(), MAX_CHAIN);
+        assert_eq!(chain[0], "http/h0:1");
+        assert_eq!(chain[MAX_CHAIN - 1], format!("http/h{}:1", MAX_CHAIN - 1));
+        assert!(!chain.contains(&"direct".to_owned()));
+    }
+
+    #[test]
+    fn words_are_split_at_ascii_whitespace_only() {
+        assert_eq!(authorities("PROXY\ta:1"), ["http/a:1"]);
+        // A no-break space and an ideographic space are part of the word they sit in.
+        for space in ['\u{a0}', '\u{3000}'] {
+            let result = format!("PROXY{space}a:1; DIRECT");
+            assert_eq!(authorities(&result), ["direct"], "{space:?}");
+        }
     }
 }
