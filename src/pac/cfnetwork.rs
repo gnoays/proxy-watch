@@ -59,8 +59,11 @@ enum EntryKind {
 // chain goes through [`parse_find_proxy_result`](super::parse_find_proxy_result), so this
 // engine collapses repeats, reads a bare `SOCKS` as SOCKS4 and fills default ports exactly
 // as the JS engines do. CFNetwork has one SOCKS type, so a script's `SOCKS` arrives here as
-// SOCKS4; its `HTTPS` and `SOCKS5` entries never arrive, because CFNetwork drops them. The
-// HTTPS arm serves a dictionary that carries that type from elsewhere. CFNetwork splits a
+// SOCKS4; its `HTTPS` and `SOCKS5` entries never arrive, because CFNetwork drops them, for
+// an `http:` and an `https:` URL alike (measured on macOS for `HTTPS`). `kCFProxyTypeHTTPS`
+// names the destination's scheme, not the proxy's: a script's `PROXY p:3128` comes back as
+// that type for an `https:` URL. It is written back as `PROXY`, as Chromium
+// (`GetProxyServerScheme`), .NET and Qt read it. CFNetwork splits a
 // bracketed IPv6 proxy at its first colon (`[2001:db8::1]:3128` arrives as host `[2001`,
 // port 0); the bracket check below drops that entry.
 //
@@ -75,8 +78,7 @@ fn entries_to_steps(entries: &[Entry]) -> Result<Vec<ProxyStep>, Error> {
                 candidates.push("DIRECT".to_owned());
                 continue;
             }
-            EntryKind::Http => "PROXY",
-            EntryKind::Https => "HTTPS",
+            EntryKind::Http | EntryKind::Https => "PROXY",
             EntryKind::Socks => "SOCKS",
             EntryKind::AutoConfigUrl | EntryKind::Other => continue,
         };
@@ -268,7 +270,8 @@ mod native {
     ///
     /// CFNetwork hands the script the target's scheme and host only (`url` is
     /// `http://example.net/` for `http://example.net/some/path`) and drops the `HTTPS` and
-    /// `SOCKS5` entries of its answer (measured on macOS with an `http:` target). An answer
+    /// `SOCKS5` entries of its answer (measured on macOS with an `http:` target, and for
+    /// `HTTPS` with an `https:` one too). An answer
     /// made only of those is [`Error::PacInvalidResult`]; one that falls back to `DIRECT`
     /// after them comes back as `DIRECT` alone, where the JS engines would try the proxy
     /// first. `SOCKS` comes back as [`ProxyStep::Socks4`]. An IPv6 literal proxy
@@ -925,7 +928,7 @@ mod tests {
     #[test]
     fn each_type_maps_as_the_js_engines_read_it() {
         same_as(
-            "PROXY a.example:8080; HTTPS b.example:443; SOCKS c.example:1080; DIRECT",
+            "PROXY a.example:8080; PROXY b.example:443; SOCKS c.example:1080; DIRECT",
             &[
                 entry(EntryKind::Http, "a.example", 8080),
                 entry(EntryKind::Https, "b.example", 443),
@@ -933,6 +936,16 @@ mod tests {
                 direct(),
             ],
         );
+    }
+
+    // CFNetwork's answer to `PROXY proxy.example:3128; DIRECT` for an `https:` URL, as
+    // measured on macOS: the type is the destination's scheme, and the proxy speaks HTTP.
+    #[test]
+    fn an_https_entry_is_an_http_proxy_for_an_https_destination() {
+        let steps =
+            entries_to_steps(&[entry(EntryKind::Https, "proxy.example", 3128), direct()]).unwrap();
+        assert!(matches!(steps[0], ProxyStep::Http(_)), "{steps:?}");
+        assert_eq!(steps[1], ProxyStep::Direct);
     }
 
     #[test]
