@@ -66,8 +66,7 @@ pub struct Answer {
     pub engine: Engine,
 }
 
-/// An [`Answer`] as the Node and Python bindings show it: its kind, the one field that kind
-/// carries, and the engine's name.
+/// An [`Answer`] flattened to what the Node and Python bindings expose.
 pub struct AnswerFields {
     pub kind: &'static str,
     pub steps: Option<Vec<String>>,
@@ -999,6 +998,45 @@ mod tests {
             urls(route(&config, "https://internal.example/", Pac::None).unwrap()),
             ["direct"]
         );
+    }
+
+    #[test]
+    fn an_answer_shows_its_kind_its_one_field_and_its_engine() {
+        let fields = |route, engine| AnswerFields::try_from(Answer { route, engine }).unwrap();
+
+        let steps = fields(Route::Steps(vec![ProxyStep::Direct]), Engine::None);
+        assert_eq!(steps.kind, "steps");
+        assert_eq!(steps.steps, Some(vec!["direct".to_owned()]));
+        assert_eq!(
+            (steps.pac_url, steps.script, steps.engine),
+            (None, None, "none")
+        );
+
+        let pac = fields(
+            Route::Pac("http://wpad.test/p.pac".to_owned()),
+            Engine::Native,
+        );
+        assert_eq!(pac.kind, "pac");
+        assert_eq!(pac.pac_url.as_deref(), Some("http://wpad.test/p.pac"));
+        assert_eq!((pac.steps, pac.script, pac.engine), (None, None, "native"));
+
+        let inline = fields(
+            Route::PacInline("function F(){}".to_owned()),
+            Engine::QuickJs,
+        );
+        assert_eq!(inline.kind, "pac-inline");
+        assert_eq!(inline.script.as_deref(), Some("function F(){}"));
+        assert_eq!(
+            (inline.steps, inline.pac_url, inline.engine),
+            (None, None, "quickjs")
+        );
+
+        let wpad = fields(Route::Wpad, Engine::None);
+        assert_eq!(wpad.kind, "wpad");
+        assert_eq!((wpad.steps, wpad.pac_url, wpad.script), (None, None, None));
+
+        assert_eq!(source_label(&ProxyConfigSource::Env), "Env");
+        assert_eq!(source_label(&ProxyConfigSource::Registry), "Registry");
     }
 
     #[test]
