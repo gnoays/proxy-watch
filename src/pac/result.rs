@@ -481,6 +481,8 @@ mod tests {
             ] {
                 assert_eq!(authorities(&result), ["direct"], "{result:?}");
             }
+            let result = format!("DIRECT{space}; PROXY a:1");
+            assert_eq!(authorities(&result), ["http/a:1"], "{result:?}");
         }
     }
 }
