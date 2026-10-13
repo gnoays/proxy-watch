@@ -460,13 +460,16 @@ fn the_local_token_bypasses_nothing_here() {
 /// which is not under `pw-probe`. So `ExceptionsList` has no spelling for "this domain and
 /// everything beneath it" at all: the two directions are separate entries.
 ///
-/// Everywhere else a `*` matches nothing, because it is compared as a character and no host
-/// contains one: `*probe*`, `*invalid` (no dot before the star), `pw-*.invalid` (a star
-/// inside a label) and a bare `*` are all dead entries. WinINet answers three of those the
-/// other way (`pw-probe.*` **and** `*probe*` both match there), so `*` is a general glob
-/// on Windows and is not one here. `BypassDialect::MacOs` refuses the four dead spellings,
-/// so they land in `BypassRules::rejected` rather than in the list; the WinINet reading
-/// would admit every one of them.
+/// A `*` that is not a whole label matches nothing, because it is compared as a character
+/// and no host contains one: `*probe*`, `*invalid` (no dot before the star), `pw-*.invalid`
+/// (a star inside a label) and a bare `*` are all dead entries. WinINet answers three of
+/// those the other way (`pw-probe.*` **and** `*probe*` both match there), so `*` is a
+/// general glob on Windows and is not one here. `BypassDialect::MacOs` refuses the four dead
+/// spellings, so they land in `BypassRules::rejected` rather than in the list; the WinINet
+/// reading would admit every one of them.
+///
+/// A whole-label `*` elsewhere (`www.*.test`, `10.*.*.*`) does match on macOS, by a
+/// right-to-left label rule this crate does not follow; these rows do not cover it.
 #[test]
 fn a_star_is_syntax_at_a_label_boundary_and_a_literal_anywhere_else() {
     println!("--- CFNetwork ExceptionsList, star placement ---");

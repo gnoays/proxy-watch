@@ -1001,15 +1001,20 @@ const UNREACHABLE_NAME: &str = "entry is not a name any destination could carry,
 // a bare one, is literal and matches no host. Reject the dead rule so it cannot become a
 // bypass GNOME does not grant; see the `All` guard in `parse_in`.
 const GNOME_LITERAL_STAR: &str = "entry contains a '*' that GNOME does not read as a \
-                                  wildcard — only a leading '*.' is one there — so no \
+                                  wildcard (only a leading '*.' is one there), so no \
                                   destination could ever match it (write *.example.com for \
                                   a domain, or the host on its own)";
 
-// macOS reads only leading `*.` and trailing `.*` as wildcards. A bare `*` matches nothing;
-// treating it as `All` would switch off the proxy.
-const MACOS_LITERAL_STAR: &str = "entry contains a '*' that macOS does not read as a \
-                                  wildcard — only a leading '*.' or a trailing '.*' is one \
-                                  there — so no destination could ever match it (write \
+// Only a leading `*.` and a trailing `.*` are read as wildcards for macOS. CFNetwork also
+// matches a whole-label `*` elsewhere (`www.*.test`, `10.*.*.*`) by an undocumented rule
+// that can change between releases, so such an entry is refused and its destinations go to
+// the proxy. A `*` inside a label, and a bare `*`, match nothing there; reading the bare
+// `*` as `All` would switch off the proxy.
+const MACOS_LITERAL_STAR: &str = "entry contains a '*' this crate does not follow on macOS \
+                                  (only a leading '*.' or a trailing '.*' is read as a \
+                                  wildcard), so the entry is dropped and its destinations go \
+                                  to the proxy (macOS itself matches a whole-label '*' such as \
+                                  www.*.test, and nothing for a '*' inside a label; write \
                                   *.example.com for a domain, or the host on its own)";
 
 /// Destinations that must not go through a proxy
