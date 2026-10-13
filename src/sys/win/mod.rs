@@ -1006,7 +1006,7 @@ mod tests {
         assert!(
             matches!(beneath, ProxyMode::Manual { .. }),
             "a broken AutoConfigURL must not discard the static server sitting beneath \
-             it — got {beneath:?}"
+             it; got {beneath:?}"
         );
     }
 
@@ -1351,7 +1351,7 @@ mod tests {
             matches!(beneath, ProxyMode::Manual { .. }),
             "a static proxy configured underneath auto-detect (which `effective` \
              discards) must still be recoverable as the WPAD fallback, not silently \
-             lost as `Direct` — got {beneath:?}"
+             lost as `Direct`; got {beneath:?}"
         );
         assert_eq!(
             beneath.endpoint_for(Scheme::Http).map(|e| e.authority()),
@@ -1421,7 +1421,7 @@ mod tests {
             matches!(beneath, ProxyMode::Manual { .. }),
             "a static proxy configured beneath auto-detect must survive a broken \
              AutoConfigURL sitting above it in the same registry key, not be silently \
-             bypassed as Direct — got {beneath:?}"
+             bypassed as Direct; got {beneath:?}"
         );
         assert_eq!(
             beneath.endpoint_for(Scheme::Http).map(|e| e.authority()),

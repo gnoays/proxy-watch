@@ -530,18 +530,15 @@ mod tests {
 
     #[test]
     fn to_url_escapes_a_percent_in_credentials() {
-        // A `%` the credentials hold literally, followed by two hex digits or not, and one
-        // `percent_decode` kept whole because its bytes are not UTF-8. A reader decoding
-        // every escape has to get each back as the endpoint holds it.
+        // A literal `%` before hex digits or not, and a `%FF` that is not UTF-8, read back as
+        // the endpoint holds them.
         let endpoint = ProxyEndpoint::new(Host::Domain("proxy".to_owned()), 8080)
             .with_auth(ProxyAuth::new("a%41", Some("p%FF%zz")));
         let url = ProxyStep::Http(endpoint).to_url().unwrap();
         assert_eq!(url.as_str(), "http://a%2541:p%25FF%25zz@proxy:8080/");
-        // Read back as this crate reads a proxy URL's userinfo.
         let decode = crate::util::percent_decode;
         assert_eq!(decode(url.username()), "a%41");
         assert_eq!(decode(url.password().unwrap()), "p%FF%zz");
-        // And as the endpoint parser reads the URL whole.
         let parsed = ProxyEndpoint::parse(url.as_str(), 80).unwrap();
         let auth = parsed.auth.unwrap();
         assert_eq!(auth.username(), "a%41");

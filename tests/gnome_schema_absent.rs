@@ -65,7 +65,7 @@
 //! seeds a `kioslaverc` explicitly set to `ProxyType=0` (a real, explicit "no proxy"). An
 //! unseeded `XDG_CONFIG_HOME` makes every one of them fail with `Error::Unsupported` from
 //! the initial read, before ever reaching the watch-fail-soft code path they exist to
-//! exercise. This is not the same "nothing to watch" scenario `src/sys/linux/kde.rs`'s
+//! exercise. This is not the same "nothing to watch" scenario `src/sys/linux/kde/watch.rs`'s
 //! `watch_targets` doc talks about; that describes what establishing the `kioslaverc`
 //! *watch* does with a missing directory, a different question from what the *initial read*
 //! needs to succeed at all.

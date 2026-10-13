@@ -29,7 +29,6 @@ fn lowercase_wins_over_uppercase() {
     }
 }
 
-// Set empty, the lowercase name still wins: the uppercase value is not read.
 #[test]
 fn an_empty_lowercase_value_hides_the_uppercase_one() {
     let e = env(&[("http_proxy", ""), ("HTTP_PROXY", "upper:80")]);

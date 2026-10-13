@@ -407,7 +407,7 @@ mod tests {
                     unreadable: 1,
                 }
             )]),
-            "the dropped element has to be counted — and when only the count differs the two \
+            "the dropped element has to be counted, and when only the count differs the two \
              sides above print alike, because `ProxyDict`'s `Debug` deliberately says nothing \
              about members it could not read"
         );

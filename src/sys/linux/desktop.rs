@@ -381,7 +381,7 @@ pub(crate) fn note_if_the_leading_store_was_compiled_out(
             effective_store = ?order(desktop)[1],
             "the desktop store this session's proxy settings would normally come from is not \
              compiled into this build, so the configuration being reported is \
-             the other desktop's — which may be stale. Enable the feature for the desktop \
+             the other desktop's, which may be stale. Enable the feature for the desktop \
              this process actually runs under."
         ),
         // This case of the same fault is more misleading because nothing is left to report:

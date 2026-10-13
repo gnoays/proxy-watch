@@ -940,7 +940,7 @@ fn warn_empty_reversed_exception() {
         "kioslaverc: ReversedException is set but NoProxyFor is empty, so the list of \
          destinations that use the proxy is empty too; every destination will resolve \
          Direct even though a proxy is configured. KIO and libproxy both behave this way, \
-         so it is not corrected here — but it is almost certainly not what was intended"
+         so it is not corrected here, but it is almost certainly not what was intended"
     );
 }
 

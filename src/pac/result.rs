@@ -5,26 +5,14 @@ use crate::error::Error;
 use crate::resolve::ProxyStep;
 use std::collections::HashSet;
 
-// The most steps a PAC result keeps. The chain is held outside the script's heap, which
-// bounds only the string it came from: at a few hundred bytes a step, 200,000 short
-// candidates cost 77 MB. A client tries the steps in order, and one that needs a 65th has
-// spent 64 connection timeouts first.
+// The most steps a PAC result keeps. The script's heap limit bounds only the string the
+// chain is read from, not the chain.
 pub(crate) const MAX_CHAIN: usize = 64;
 
-// The fallback chain a PAC answer builds, whichever engine gave it: this parse, WinHTTP's
-// entry array (`winhttp.rs`) and Android's `ProxySelector` list (`sys/proxy_info.rs`) all
-// push their usable steps here, so the same script gets the same chain from each.
-//
-// Repeats collapse. Chromium's `ProxyList::SetFromPacString` keeps them: it
-// `emplace_back`s every valid element with no membership check. A chain is a list of
-// things to try in order, and a proxy that just failed is no more alive the second time the
-// script names it. The test is against the whole chain rather than the previous element, so
-// `a; b; a` collapses as well as `a; a`: by the time the second `a` is reached, `a` has
-// already been tried and failed within this same chain.
-//
-// The set answers in constant time and `MAX_CHAIN` bounds the chain, so reading an answer
-// is linear in its length, on a thread the PAC timeout may have stopped waiting for
-// (`a_long_result_of_repeats_and_junk_parses_in_linear_time`).
+// The chain every PAC engine's answer goes into: this parse, `winhttp.rs` and
+// `sys/proxy_info.rs`. Repeats collapse against the whole chain, since a proxy that failed
+// is no better the second time; Chromium keeps them. WinHTTP drops everything past the
+// first `DIRECT` before its answer gets here.
 pub(crate) struct Chain {
     steps: Vec<ProxyStep>,
     seen: HashSet<ProxyStep>,
@@ -38,20 +26,18 @@ impl Chain {
         }
     }
 
-    // Append `step` unless it is already in the chain or the chain is full.
     pub(crate) fn push(&mut self, step: ProxyStep) {
         if !self.is_full() && self.seen.insert(step.clone()) {
             self.steps.push(step);
         }
     }
 
-    // Whether the chain holds `MAX_CHAIN` steps; the caller stops reading the answer.
     pub(crate) fn is_full(&self) -> bool {
         self.steps.len() == MAX_CHAIN
     }
 
-    // The steps in order, or `None` when nothing usable was pushed. Each caller builds its
-    // own error: an empty chain never becomes `DIRECT`.
+    // `None` when nothing usable was pushed; each caller builds its own error, and an empty
+    // chain never becomes `DIRECT`.
     pub(crate) fn finish(self) -> Option<Vec<ProxyStep>> {
         (!self.steps.is_empty()).then_some(self.steps)
     }
@@ -67,9 +53,9 @@ impl Chain {
 /// authorities: `/`, `?` or `#`, including in `scheme://`, invalidates the whole candidate.
 /// Bad tokens are skipped, repeats collapse, and embedded credentials are dropped. An empty
 /// usable chain returns [`Error::PacInvalidResult`]. Words are split at ASCII whitespace
-/// only, so a no-break space or a vertical tab stays inside a word and spoils it. An IPv6 address without a
-/// port can go without brackets (`PROXY ::1`). The chain keeps its first 64 steps and drops
-/// the rest, an explicit `DIRECT` among them.
+/// only, so a no-break space or a vertical tab stays inside a word and spoils it. An IPv6
+/// address without a port can go without brackets (`PROXY ::1`). The chain keeps its first
+/// 64 steps and drops the rest, an explicit `DIRECT` among them.
 ///
 /// ```
 /// # use proxy_watch::pac::parse_find_proxy_result;
@@ -88,14 +74,11 @@ impl Chain {
 /// including the empty string.
 pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
     let mut chain = Chain::new();
-    // A newline is a separator here, and in Chromium it is not:
-    // `ProxyList::SetFromPacString` builds a `base::StringTokenizer(pac_string, ";")`. A
-    // script that separated its candidates with newlines instead therefore loses all of
-    // them at once: with `;` alone, `PROXY a:1\nDIRECT` is a single candidate of three
-    // words, one more than the grammar allows, so the chain comes back empty. Refusing an
-    // entire chain over punctuation is the same silent-`DIRECT` outcome the block below
-    // declines to inherit, caused here by the separator choice. The divergence runs one way
-    // only: this accepts what the reference rejects, never the other way round.
+    // A newline separates candidates here and not in Chromium, whose
+    // `ProxyList::SetFromPacString` splits on `;` alone.
+    // Without it a script that separates its candidates by line loses the whole chain:
+    // `PROXY a:1\nDIRECT` would be one candidate of three words. This accepts what Chromium
+    // rejects, never the reverse.
     for candidate in result.split([';', '\n', '\r']) {
         if let Some(step) = parse_candidate(candidate) {
             chain.push(step);
@@ -104,11 +87,8 @@ pub fn parse_find_proxy_result(result: &str) -> Result<Vec<ProxyStep>, Error> {
             }
         }
     }
-    // Chromium's `PacResult::ToProxyList` pushes `DIRECT` on an empty chain instead, under
-    // the comment "this basically means an error in the PAC script". Same diagnosis,
-    // opposite handling: a script that said something unreadable has not said "go direct",
-    // and silently going direct is how traffic leaves a network the script was written to
-    // keep it inside. The caller gets the error and can choose `DIRECT` itself.
+    // An error, not `DIRECT` as in Chromium's `PacResult::ToProxyList`: a script that said
+    // something unreadable has not said "go direct". The caller can still choose `DIRECT`.
     chain
         .finish()
         .ok_or_else(|| Error::pac_invalid_result(result))
@@ -130,35 +110,22 @@ fn parse_candidate(candidate: &str) -> Option<ProxyStep> {
         "PROXY" | "HTTP" => ProxyScheme::Http,
         "HTTPS" => ProxyScheme::Https,
         "SOCKS" | "SOCKS4" => ProxyScheme::Socks4,
-        // Remote DNS: Chromium's `ProxyServer::SCHEME_SOCKS5` always resolves names on
-        // the proxy side; curl's URI vocabulary uses the `h` suffix for that
-        // (https://curl.se/docs/url-syntax.html).
+        // Chromium's `ProxyServer::SCHEME_SOCKS5` resolves names on the proxy side, which
+        // curl spells with the `h` suffix (https://curl.se/docs/url-syntax.html).
         "SOCKS5" => ProxyScheme::Socks5h,
         _ => return None,
     };
 
     let address = address?;
     // A PAC candidate is a bare authority, so a `/`, `?` or `#` in it (the `/`s of a
-    // `scheme://` included) makes the candidate malformed rather than something to trim.
-    // `ProxyEndpoint::parse` does trim them, and is right to: the values operating systems
-    // *store* are written as URLs, where `http://proxy:8080/` is an ordinary spelling of an
-    // endpoint. A script's return value is not written that way, and letting the same trim
-    // run here would answer with an address the script did not write, and, for a scheme,
-    // silently override the keyword, where reading `https://p:8443` as plain HTTP is
-    // cleartext to a port that expects TLS.
-    //
-    // Chromium refuses the candidate: `ProxySchemeHostAndPortToProxyServer` hands the whole
-    // string to `url::ParseAuthority`, so `p:8080/x` yields a port component of `8080/x`
-    // that `url::ParsePort` rejects, and `p/x` reaches `CanonicalizeHost` carrying a
-    // forbidden host code point ("Paths disallowed.",
-    // `net/base/proxy_string_util_unittest.cc`). libproxy keeps the path whole, building
-    // `http://<server>` and handing `g_uri_to_string` back unshortened
-    // (`px_manager_run_pac`). Neither answers with an address the script did not write, and
-    // trimming is the one reading that would; between the two, Chromium's is what this
-    // module already follows for the rest of the grammar. Firefox is a third reading again:
-    // `ProcessPACString` tries `NS_NewURI` on the address and only prepends `http://`
-    // when that yields no host, which is why a `scheme://` is accepted there and then
-    // ignored, and it is the one measured for the scheme only, not for a path.
+    // `scheme://` included) makes the candidate malformed rather than something to trim, as
+    // Chromium reads it. `ProxyEndpoint::parse` does trim them, and is right to: the values
+    // operating systems *store* are written as URLs. A script's return value is not, and the
+    // same trim here would answer with an address the script did not write. For a scheme it
+    // would also override the keyword: `PROXY https://p:8443` read as plain HTTP is
+    // cleartext to a port that expects TLS. The tests that hold this are
+    // `junk_candidates_are_skipped_but_do_not_poison_the_chain` and
+    // `a_candidate_that_is_not_a_bare_authority_is_skipped_whole`.
     if address.contains(['/', '?', '#']) {
         return None;
     }
@@ -172,19 +139,15 @@ fn parse_candidate(candidate: &str) -> Option<ProxyStep> {
         .with_scheme_hint(scheme);
     // `p:0` names no port anything listens on. The native engines answer it with the
     // keyword's default port (`winhttp.rs` and `cfnetwork.rs` say why), and the same script
-    // gets the same chain whichever engine ran it.
+    // gets the same port whichever engine ran it.
     if endpoint.port == 0 {
         endpoint.port = scheme.default_port();
     }
-    // A PAC script is remote code (under WPAD, code from whoever answered the discovery
-    // query), so credentials it hands back are attacker-chosen, and `ProxyStep::to_url`
-    // would write them straight into the URL a caller feeds its HTTP client. Neither
-    // reference propagates them: Chromium rejects the candidate outright (`ParseAuthority`
-    // then `if (username_component.is_valid() || password_component.is_valid()) return
-    // ProxyServer()`), Firefox keeps only `GetAsciiHost` and drops them silently. Take
-    // Firefox's outcome: a proxy the script named is still kept as a candidate to try, so
-    // this does not fail closed on a chain, but say so, because a silent drop looks like a
-    // working authenticated proxy right up until the 407.
+    // A PAC script is remote code (under WPAD, from whoever answered discovery), so
+    // credentials in its result are attacker-chosen, and `ProxyStep::to_url` would write
+    // them into the URL a caller feeds its HTTP client. Drop them but keep the candidate, as
+    // Firefox does (Chromium drops the candidate), and warn: a silent drop looks like a
+    // working authenticated proxy until the 407.
     if endpoint.auth.take().is_some() {
         crate::trace::warning!(
             keyword,
@@ -275,13 +238,8 @@ mod tests {
         );
     }
 
-    // A newline is a separator here and not in Chromium, which splits on `;` alone: see the
-    // note on the split.
-    // The row above cannot show it: every `\n` there follows a `;` that has already cut the
-    // string, so `split_whitespace` inside the candidate would absorb it either way. These
-    // rows have no `;` at all, which is the only shape that tells the two apart: without the
-    // newline in the separator set the whole string is one candidate, `PROXY a:1 PROXY b:2`
-    // is three words where two are allowed, and the chain comes back empty.
+    // Every `\n` in the row above follows a `;`, so the word split would absorb it anyway.
+    // These rows have no `;`, the only shape that tells the two apart.
     #[test]
     fn a_newline_separates_candidates_where_no_semicolon_does() {
         assert_eq!(
@@ -289,18 +247,13 @@ mod tests {
             ["http/a:1", "http/b:2", "direct"]
         );
 
-        // The carriage return is needed in that set independently of a newline, and this is
-        // the only shape that shows it: in the row above it sits in front of a `\n` that
-        // has already cut the string, and inside a candidate `split_whitespace` would
-        // absorb it. Alone it is a line ending a script may still be written with, and
-        // without it here the whole return value is again one candidate of too many words.
+        // A lone `\r` is a line ending too; above, it sits before a `\n` that already cut.
         assert_eq!(authorities("PROXY a:1\rDIRECT"), ["http/a:1", "direct"]);
     }
 
     #[test]
     fn ipv6_literals_survive() {
         assert_eq!(authorities("PROXY [::1]:8080"), ["http/[::1]:8080"]);
-        // Without a port, the brackets can go.
         assert_eq!(authorities("PROXY ::1"), ["http/[::1]:80"]);
     }
 
@@ -420,13 +373,8 @@ mod tests {
         }
     }
 
-    // The string parsed here is whatever a remote script returned, and nothing caps its
-    // length: `quickjs::run` hands `FindProxyForURL`'s string straight over. This parse
-    // runs *after* `FindProxyForURL` returns, so `run_with_timeout` has already given its
-    // caller `PacTimeout` and walked away: the thread still finishing this loop is one
-    // nobody is waiting for and nothing will stop. Repeats and junk never fill the chain, so
-    // `MAX_CHAIN` does not end the loop early and every candidate is read. The bound sits
-    // far enough from the linear cost that a loaded machine does not fail it.
+    // A remote script's string has no length cap, and this parse runs after the PAC timeout
+    // has stopped waiting. Repeats and junk never fill the chain, so every candidate is read.
     #[test]
     fn a_long_result_of_repeats_and_junk_parses_in_linear_time() {
         let result = (0..200_000)

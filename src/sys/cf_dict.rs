@@ -97,7 +97,7 @@ pub(super) fn to_proxy_dict(dictionary: &CFDictionary) -> ProxyDict {
                         key = key.as_str(),
                         "a proxies key this crate reads holds a Core Foundation value this \
                          crate could not convert to its schema (not a string, number, \
-                         boolean or array — or a string whose content could not be \
+                         boolean or array, or a string whose content could not be \
                          reencoded as UTF-8); recording it as set but unreadable"
                     );
                     dict.insert(key, DictValue::Unreadable);

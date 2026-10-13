@@ -97,9 +97,9 @@ const WINDOWS_SERVER_SEPARATORS: [char; 5] = [';', ' ', '\t', '\r', '\n'];
 /// [`ProxyEntry::Disabled`]. Bad tokens skipped; recorded on [`windows_manual`]. A scheme
 /// named twice keeps the last token that was not skipped, so a bad last spelling leaves the
 /// earlier one standing. A `socks=` entry also fills every scheme the string left
-/// unset; the last two examples below are that rule and its limit. An `all=` entry, or a
-/// bare `host:port`, sets every scheme, so `socks=` fills none beside it, an empty `all=`
-/// included; an `all=` that was rejected sets nothing and leaves the gaps to `socks=`.
+/// unset; the last two examples below are that rule and its limit. An `all=` entry or a
+/// bare `host:port` sets every scheme, so `socks=` fills none beside it (an empty `all=`
+/// included); a rejected `all=` sets nothing and leaves the gaps to `socks=`.
 ///
 /// ```
 /// # use proxy_watch::{parse, ProxyScheme, Scheme};
@@ -270,9 +270,8 @@ fn split_scheme_key(token: &str) -> Option<(&str, &str)> {
 /// read, `10.*`. `<local>` → [`HostPattern::Local`](crate::HostPattern::Local) and
 /// `<-loopback>` (IE9+) →
 /// [`HostPattern::SubtractImplicit`](crate::HostPattern::SubtractImplicit) are read by
-/// [`no_proxy`] as well as by this one, the way Chromium reads them ("we allow it on all
-/// platforms and interpret it the same way", `proxy_host_matching_rules.cc:113`). Malformed
-/// entries skipped into [`BypassRules::rejected`].
+/// [`no_proxy`] as well as by this one, as Chromium reads them. Malformed entries skipped
+/// into [`BypassRules::rejected`].
 ///
 /// An IPv4 address entry is read only as four decimal octets. WinINet and WinHTTP compare
 /// an address entry with the destination as text, so `012.1.2.3` there is not `10.1.2.3` in

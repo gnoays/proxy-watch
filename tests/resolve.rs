@@ -140,7 +140,7 @@ fn a_url_whose_host_was_emptied_is_hostless_here_too() {
     assert!(
         url.host().is_some(),
         "the premise: this URL is hostless only by `request_host`'s reading, not by \
-         `Url::host`'s — if url ever answers `None` here, this test stops being about the \
+         `Url::host`'s; if url ever answers `None` here, this test stops being about the \
          arm it was written for"
     );
 

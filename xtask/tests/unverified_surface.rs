@@ -526,14 +526,14 @@ fn a_delegation_must_name_a_file_that_declares() {
         vec!["sys/mac/mod.rs".to_owned()]
     );
     // A path that does not exist cannot be delegated to.
-    assert!(!delegates("CI only — see `src/sys/mac/no_such_file.rs`.\n"));
+    assert!(!delegates("CI only; see `src/sys/mac/no_such_file.rs`.\n"));
 
     // One declaring file does not vouch for the file named next to it. `src/sys/mod.rs`
     // exists and carries no declaration, so the second block fails where the first passes,
     // which is why every named path is checked rather than any.
-    assert!(delegates("CI only — see `src/sys/mac/mod.rs`.\n"));
+    assert!(delegates("CI only; see `src/sys/mac/mod.rs`.\n"));
     assert!(!delegates(
-        "CI only — see `src/sys/mac/mod.rs` and `src/sys/mod.rs`.\n"
+        "CI only; see `src/sys/mac/mod.rs` and `src/sys/mod.rs`.\n"
     ));
 }
 
@@ -547,7 +547,7 @@ fn a_delegation_written_the_way_this_gate_asks_for_it_is_read() {
     // Which mattered beyond the panic itself: the step is how the scan reaches the rest
     // of the block, so a real delegation standing after one of these was never seen.
     assert_eq!(
-        delegations("CI only — see `src/…` and `src/sys/mac/mod.rs`.\n"),
+        delegations("CI only; see `src/…` and `src/sys/mac/mod.rs`.\n"),
         vec!["sys/mac/mod.rs".to_owned()]
     );
 }

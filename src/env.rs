@@ -30,9 +30,8 @@ const NO_PROXY_VAR: &str = "no_proxy";
 /// [`ProxyWatcher`](crate::ProxyWatcher) does not merge these in, except where an OS
 /// setting names them, which KDE's `ProxyType=4` does).
 ///
-/// Lowercase beats uppercase, set empty as well: `http_proxy=` beside `HTTP_PROXY=h` is
-/// [`ProxyEntry::Disabled`], and an empty `no_proxy` hides `NO_PROXY`. Empty value →
-/// [`ProxyEntry::Disabled`]; port explicit, else
+/// Lowercase beats uppercase, even when set empty: `http_proxy=` beside `HTTP_PROXY=h` is
+/// [`ProxyEntry::Disabled`], and an empty `no_proxy` hides `NO_PROXY`. Port explicit, else
 /// the `scheme://` default, else 80 (so `all_proxy=socks5://h` is 1080, `http_proxy=h` is
 /// 80), the rule [`ProxyEndpoint::parse`] states. On Windows only, any other letter case
 /// the variable was set in (`Http_Proxy`) is read too, after both conventional spellings.

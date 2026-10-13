@@ -428,7 +428,7 @@ fn every_counting_numeral_is_registered() {
         unregistered.is_empty(),
         "numerals with no row in xtask/tests/claim_counts.rs:\n{}\n\nA row has to name a \
          needle the gate can recount. If the tree cannot be recounted for this numeral, \
-         reword the sentence to name its items instead — there is no row that excuses one.",
+         reword the sentence to name its items instead; there is no row that excuses one.",
         unregistered.join("\n")
     );
 
@@ -445,7 +445,7 @@ fn every_counting_numeral_is_registered() {
     assert!(
         stale.is_empty(),
         "rows in xtask/tests/claim_counts.rs matching no sentence in the tree: {stale:?}. The \
-         sentence was reworded, moved or deleted — update the row rather than leaving it."
+         sentence was reworded, moved or deleted; update the row rather than leaving it."
     );
 }
 
@@ -503,7 +503,7 @@ fn the_scanner_reads_the_shapes_this_tree_uses() {
         [(3, "backends")]
     );
     assert_eq!(
-        claims_in_line("/// failing the caller — both call sites ([`arm_group_policy_key`],"),
+        claims_in_line("/// failing the caller: both call sites ([`arm_group_policy_key`],"),
         [(2, "call sites")]
     );
     // Past ten, where a table of single-word spellings would stop.
@@ -592,7 +592,7 @@ fn no_claim_in_the_tree_is_split_across_a_line_break() {
     assert!(
         split.is_empty(),
         "a numeral+noun claim falls across a line break, where this scanner cannot read \
-         it — rewrap the sentence so the pair sits on one line:\n{}",
+         it; rewrap the sentence so the pair sits on one line:\n{}",
         split.join("\n")
     );
 }
@@ -611,7 +611,7 @@ fn the_exclusion_of_tests_still_excludes_something() {
     }
     assert!(
         excluded > 0,
-        "no numeral is left under tests/ for the exclusion to exclude — either the scan \
+        "no numeral is left under tests/ for the exclusion to exclude: either the scan \
          should cover tests/ again or the exclusion should stop being described as one"
     );
 }

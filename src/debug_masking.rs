@@ -130,7 +130,7 @@ const REGISTRY: &[Registered] = &[
     Registered {
         file: "sys/linux/kde/watch.rs",
         ty: "FileWatch",
-        exposure: Exposure::Inert("nothing at all — the struct name and `..`"),
+        exposure: Exposure::Inert("nothing at all: the struct name and `..`"),
         available: cfg!(all(target_os = "linux", feature = "linux-kde")),
     },
     Registered {
@@ -150,7 +150,7 @@ const REGISTRY: &[Registered] = &[
         file: "sys/linux/watcher.rs",
         ty: "Watch",
         exposure: Exposure::Inert(
-            "whether the portal route was forced, whether it polls, whether it runs — all bool",
+            "whether the portal route was forced, whether it polls, whether it runs: all bool",
         ),
         available: cfg!(target_os = "linux"),
     },
@@ -170,7 +170,7 @@ const REGISTRY: &[Registered] = &[
     Registered {
         file: "watch.rs",
         ty: "CapturedEnv",
-        exposure: Exposure::Inert("nothing at all — the struct name and `..`"),
+        exposure: Exposure::Inert("nothing at all: the struct name and `..`"),
         available: true,
     },
     Registered {
@@ -242,8 +242,8 @@ static DERIVED: &[Derived] = &[
              and phrases the refusal through `redact_offending_token`, so a proxy URL \
              pasted into a bypass list never becomes a pattern in the first place. The \
              variants' fields are `pub` and `#[non_exhaustive]` on an enum does not seal \
-             its existing variants, so a caller can also hand-build one — `tests/bypass.rs` \
-             does, deliberately — and print back whatever it wrote there. That is the \
+             its existing variants, so a caller can also hand-build one (`tests/bypass.rs` \
+             does, deliberately) and print back whatever it wrote there. That is the \
              caller's own string; `parse` stays the only way a value this crate read gets in",
         ),
         available: true,
@@ -276,7 +276,7 @@ static DERIVED: &[Derived] = &[
             "each payload names *which* setting was read, not what it held: \
              `EnvironmentVariable` gets a name out of `SCHEME_VARS`, `Kioslaverc` a \
              `SlotKeys::key`, `GSettings` a GNOME schema key, `SystemConfiguration` a \
-             `SCHEMES` or `UNROUTABLE` host key — all crate constants. A KDE key read \
+             `SCHEMES` or `UNROUTABLE` host key, all crate constants. A KDE key read \
              from the file would \
              not be one, which is why this row names the source and not just the type",
         ),
@@ -287,7 +287,7 @@ static DERIVED: &[Derived] = &[
         ty: "ProxyEndpoint",
         reason: Reason::ClosedAtFill(
             "`parse` and `new` are the constructors, and `parse` splits `user:password@` \
-             off into `auth` before the rest becomes the `host` — so the `url::Host` here \
+             off into `auth` before the rest becomes the `host`, so the `url::Host` here \
              holds an address and the credential prints through `ProxyAuth`'s registered \
              impl. The fields are `pub`, so a caller holding one can overwrite `host` \
              afterwards; what it writes is its own string, not a value this crate read",
@@ -334,7 +334,7 @@ static DERIVED: &[Derived] = &[
         ty: "RegKey",
         reason: Reason::CrateText(
             "`root` is one of the names `root_name` returns and `path` is the `&'static \
-             str` the caller opened it with — always one of this backend's own key-path \
+             str` the caller opened it with, always one of this backend's own key-path \
              constants. Both name *where* a value lives; neither can hold the value, \
              which is the side a proxy password would be on",
         ),
@@ -458,8 +458,8 @@ fn scan_src() -> BTreeSet<(String, String)> {
             assert!(
                 !hides_a_debug_impl_header(line),
                 "{rel} writes a line this scanner reads past without seeing the impl it \
-                 covers — a header broken across lines at `for`, or interrupted by a block \
-                 comment, or a `use` renaming the trait so that no header names it — so a \
+                 covers (a header broken across lines at `for`, or interrupted by a block \
+                 comment, or a `use` renaming the trait so that no header names it), so a \
                  hand-written `Debug` there would never reach REGISTRY and the gate would \
                  pass without checking it. Keep the whole `impl … Debug for Type` on one \
                  line, with no `/* … */` in it (`#[rustfmt::skip]` if it is too long to \
@@ -663,7 +663,7 @@ fn scan_derived_text_holders() -> BTreeSet<(String, String)> {
             assert!(
                 !splits_a_derive_attribute(line),
                 "{rel}:{} splits a `#[derive(…)]` across lines, which this scanner reads \
-                 one line at a time — a `Debug` below the break would never reach DERIVED \
+                 one line at a time: a `Debug` below the break would never reach DERIVED \
                  and the gate would pass without checking it. Keep the attribute on one \
                  line (`#[rustfmt::skip]` if it is too long to fit).",
                 index + 1
@@ -1150,7 +1150,7 @@ mod tests {
         for fragment in case.must_contain {
             assert!(
                 case.rendered.contains(fragment),
-                "{}'s `Debug` ({}) dropped {fragment:?} — that is erasure, not masking: {}",
+                "{}'s `Debug` ({}) dropped {fragment:?}, which is erasure, not masking: {}",
                 case.ty,
                 case.file,
                 case.rendered
@@ -1183,7 +1183,7 @@ mod tests {
         assert!(
             stale.is_empty(),
             "REGISTRY rows with no matching impl in src/: {stale:?}. The impl was \
-             renamed, moved or deleted — update the row rather than leaving it."
+             renamed, moved or deleted; update the row rather than leaving it."
         );
     }
 
@@ -1204,7 +1204,7 @@ mod tests {
                     assert!(
                         matches!(delegate.exposure, Exposure::Secret),
                         "{} delegates to {target}, which is not itself checked as a \
-                         secret bearer — the delegation proves nothing",
+                         secret bearer, so the delegation proves nothing",
                         entry.ty
                     );
                 }
@@ -1258,7 +1258,7 @@ mod tests {
         assert!(
             undeclared.is_empty(),
             "these derive `Debug` over a field naming a text type, with no row in DERIVED \
-             (src/debug_masking.rs): {undeclared:?}. Say why the text cannot be a secret — \
+             (src/debug_masking.rs): {undeclared:?}. Say why the text cannot be a secret, \
              and if it can be, hand-write the impl instead and register it in REGISTRY."
         );
 
@@ -1266,7 +1266,7 @@ mod tests {
         assert!(
             stale.is_empty(),
             "DERIVED rows with no matching derived item in src/: {stale:?}. The item was \
-             renamed, lost its text field, or now writes its `Debug` by hand — in the last \
+             renamed, lost its text field, or now writes its `Debug` by hand; in the last \
              case the row belongs in REGISTRY."
         );
     }
@@ -1288,8 +1288,8 @@ mod tests {
                     });
                     assert!(
                         matches!(target.exposure, Exposure::Secret),
-                        "{} rests on {ty}, which is not itself checked as a secret bearer — \
-                         the reason proves nothing",
+                        "{} rests on {ty}, which is not itself checked as a secret bearer, \
+                         so the reason proves nothing",
                         entry.ty
                     );
                     why

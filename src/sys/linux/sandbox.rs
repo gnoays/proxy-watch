@@ -372,7 +372,7 @@ ca.desrt.dconf=talk
         );
         assert!(
             !has_dconf_access(&info("; a comment\nca.desrt.dconf=talk")),
-            "`g_key_file_line_is_comment` is `#` and the blank line only — `;` opens a key"
+            "`g_key_file_line_is_comment` is `#` and the blank line only; `;` opens a key"
         );
         // Every row here needs a granting `ca.desrt.dconf` line *after* the bad one, or it
         // cannot fail: without it the answer is `false` because nothing granted anything,

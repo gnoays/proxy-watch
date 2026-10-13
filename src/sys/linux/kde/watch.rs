@@ -173,7 +173,7 @@ pub(crate) fn watch(trigger: SyncSender<()>, env: &Env) -> Result<Option<FileWat
             file = FILE_NAME,
             "the most specific configuration directory does not exist, so it cannot be \
              watched; a kioslaverc created there later would win the cascade and be read, \
-             but no event would announce it — health() reports this route as degraded, and \
+             but no event would announce it; health() reports this route as degraded, and \
              WatchOptions::poll_interval is what closes it"
         );
     }
@@ -260,7 +260,7 @@ fn loss_callback(
                             remaining = live,
                             "watched configuration directories were removed or renamed; \
                              those watches are dropped or now follow the moved directories, \
-                             so kioslaverc changes there will no longer be noticed — \
+                             so kioslaverc changes there will no longer be noticed; \
                              health() now reports this route as degraded, though the \
                              remaining directories still report"
                         );

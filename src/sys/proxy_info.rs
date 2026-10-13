@@ -192,8 +192,7 @@ pub(crate) fn java_uri_text(url: &Url) -> String {
 /// `java.net` SOCKS client opens with version 5.
 #[cfg(feature = "pac-android-native")]
 pub(crate) fn steps_from_selected(selected: &[SelectedProxy]) -> Result<Vec<ProxyStep>, Error> {
-    // An element no client could use is skipped and the rest go into the same `Chain` the
-    // in-process and WinHTTP parsers fill; only an answer with nothing usable in it fails.
+    // An element no client could use is skipped; only an answer with nothing usable fails.
     let mut chain = crate::pac::result::Chain::new();
     let mut first_error = None;
     for result in selected.iter().map(|proxy| {
@@ -310,8 +309,6 @@ mod tests {
                 ProxyStep::Direct
             ]
         );
-        // The chain keeps its first steps, as a PAC result's does; a `DIRECT` past them goes
-        // with the rest.
         let mut long = (1..=crate::pac::result::MAX_CHAIN as i32 + 1)
             .map(|port| proxy("HTTP", Some("proxy.example"), port))
             .collect::<Vec<_>>();

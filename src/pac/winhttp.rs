@@ -1352,8 +1352,6 @@ mod tests {
         );
     }
 
-    // The portable parser keeps the same number of steps, so a script gives the same chain
-    // whichever engine ran it. A `DIRECT` past the limit goes with the rest.
     #[test]
     fn the_chain_keeps_its_first_steps_and_drops_the_rest() {
         use crate::pac::result::MAX_CHAIN;

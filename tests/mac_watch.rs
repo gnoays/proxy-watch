@@ -127,7 +127,7 @@ fn the_backend_starts_and_stops_cleanly() {
          src/sys/mac/notify.rs), SCDynamicStoreSetNotificationKeys failed to register the \
          Setup:/State: Network/Global/Proxies keys (Registration::new in \
          src/sys/mac/notify.rs), or the watcher thread never reported itself ready \
-         (Watch::spawn's ready_rx.recv() in src/sys/mac/notify.rs) — see the attached \
+         (Watch::spawn's ready_rx.recv() in src/sys/mac/notify.rs); see the attached \
          error for which one",
     );
 
@@ -243,7 +243,7 @@ fn a_sudo_networksetup_change_is_observed() {
         skip_or_fail(
             "passwordless sudo is not available (`sudo -n true` failed); this test only \
              runs where `sudo networksetup` needs no password, which in practice means \
-             CI, never a developer's own machine — see the module doc's \"Safety\" \
+             CI, never a developer's own machine; see the module doc's \"Safety\" \
              section",
         );
         return;
@@ -273,8 +273,8 @@ fn a_sudo_networksetup_change_is_observed() {
     assert!(
         config_mentions_http_proxy(&changed, TEST_HOST, TEST_PORT),
         "after `sudo networksetup -setwebproxy {service} {TEST_HOST} {TEST_PORT}`, the \
-         emitted configuration must show that host/port somewhere — effective or a \
-         source — got effective={:?} sources={:?}",
+         emitted configuration must show that host/port somewhere (effective or a \
+         source); got effective={:?} sources={:?}",
         changed.effective,
         changed.sources
     );

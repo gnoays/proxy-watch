@@ -308,7 +308,7 @@ fn the_harness_can_tell_a_proxied_destination_from_a_bypassed_one() {
     );
     assert!(
         cfnetwork_bypasses(&[DOMAIN], false, DOMAIN),
-        "an ExceptionsList naming {DOMAIN} exactly did not bypass it — \
+        "an ExceptionsList naming {DOMAIN} exactly did not bypass it; \
          CFNetworkCopyProxiesForURL may be ignoring a caller-supplied list, \
          which would invalidate every reading in this file"
     );
