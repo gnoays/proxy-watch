@@ -13,6 +13,10 @@ changes.
 
 ## [Unreleased]
 
+Built from crate 0.3.1, which changes some routing answers (a PAC result split at ASCII
+whitespace only and kept to its first 64 steps, Android's duplicate steps kept once) and
+escapes a `%` in a step's user name or password as `%25`.
+
 ### Changed
 
 - Node: `read()`, `readSync()`, `watch()` and `watchSync()` without `env` read `*_proxy`
@@ -20,6 +24,14 @@ changes.
   thread under Node the two hold the same; a worker thread's own copy is read now, and
   under Bun, whose `process.env` writes do not reach the process environment, so is a
   variable set at run time.
+
+### Fixed
+
+- Python: `repr()` of a `Route` masks a password in its `pac_url` as `***`, as it does a
+  step's.
+- Node: `Watcher.close()` removes the watch's cleanup hook and frees what it held. Each
+  watch opened and closed kept about 500 bytes until its thread's environment ended, so
+  a process that opens and closes watches in a loop grew without bound.
 
 ## [0.2.0] - 2026-10-09
 
