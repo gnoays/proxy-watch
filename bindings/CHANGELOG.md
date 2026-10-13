@@ -23,7 +23,8 @@ escapes a `%` in a step's user name or password as `%25`.
   from the calling thread's `process.env`, not the process environment. On the main
   thread under Node the two hold the same; a worker thread's own copy is read now, and
   under Bun, whose `process.env` writes do not reach the process environment, so is a
-  variable set at run time.
+  variable set at run time. A `process.env` that is missing or not an object of strings
+  now throws `ERR_PROXY_WATCH`.
 
 ### Fixed
 
