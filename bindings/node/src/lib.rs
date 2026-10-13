@@ -13,6 +13,7 @@
 //! it on the JavaScript thread. A pump thread drains the watcher's stream into a weak
 //! threadsafe function, so an open watch never holds the event loop open.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -558,6 +559,10 @@ pub struct Watcher {
     layering: Arc<Layering>,
     // Cleared by `close()`, on the JavaScript thread; see [`gated`].
     open: Arc<AtomicBool>,
+    // The cleanup hook's `Box`, until `close()` removes the hook and frees it; null after.
+    // An unreferenced watch keeps running, so dropping the `Watcher` leaves the hook to stop
+    // it at teardown.
+    hook: Cell<*mut shared::Watch>,
 }
 
 #[napi]
@@ -575,9 +580,22 @@ impl Watcher {
     /// Stop watching. Safe to call more than once. Once it returns, `onChange` is not
     /// called again.
     #[napi]
-    pub fn close(&self) {
+    pub fn close(&self, env: Env) {
         self.open.store(false, Ordering::SeqCst);
         self.watch.close();
+        let hook = self.hook.replace(std::ptr::null_mut());
+        if hook.is_null() {
+            return;
+        }
+        // SAFETY: `env` is the environment `watcher` registered `hook` in, as this object
+        // belongs to it, and JavaScript still runs, so the hook has not run.
+        let status = unsafe {
+            sys::napi_remove_env_cleanup_hook(env.raw(), Some(close_at_teardown), hook.cast())
+        };
+        if status == sys::Status::napi_ok {
+            // SAFETY: the hook is gone, so nothing else takes `hook` back.
+            drop(unsafe { Box::from_raw(hook) });
+        }
     }
 
     /// `Watcher { open: <bool> }`.
@@ -670,15 +688,36 @@ fn watcher(
     layering: Arc<Layering>,
     open: Arc<AtomicBool>,
 ) -> Result<Watcher, Failure> {
-    if let Err(error) = env.add_env_cleanup_hook(watch.clone(), |watch| watch.close()) {
+    let hook = Box::into_raw(Box::new(watch.clone()));
+    // SAFETY: `env` is the live environment of this thread, and `hook` is a `Box` that
+    // `close_at_teardown` or `Watcher::close` takes back exactly once.
+    let status =
+        unsafe { sys::napi_add_env_cleanup_hook(env.raw(), Some(close_at_teardown), hook.cast()) };
+    if status != sys::Status::napi_ok {
+        // SAFETY: napi did not take `hook`, so it is still this function's.
+        drop(unsafe { Box::from_raw(hook) });
         watch.close_in_background();
-        return Err(Failure::new("ERR_PROXY_WATCH", error.reason));
+        return Err(Failure::new(
+            "ERR_PROXY_WATCH",
+            format!("registering the watch's cleanup hook failed with napi status {status}"),
+        ));
     }
     Ok(Watcher {
         watch,
         layering,
         open,
+        hook: Cell::new(hook),
     })
+}
+
+// The cleanup hook: stops the watch, and frees the `Box` `watcher` handed napi. napi's own
+// `add_env_cleanup_hook` leaks that box even once the hook is removed, so a process that
+// opens and closes watches in a loop would keep one per watch.
+unsafe extern "C" fn close_at_teardown(hook: *mut std::ffi::c_void) {
+    // SAFETY: `hook` is the `Box` `watcher` registered, and napi calls this only for a hook
+    // `Watcher::close` has not removed.
+    let watch = unsafe { Box::from_raw(hook.cast::<shared::Watch>()) };
+    watch.close();
 }
 
 // A started watch no `Watcher` owns yet. A worker that exits with `watch()` pending drops
