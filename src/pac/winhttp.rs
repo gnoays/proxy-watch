@@ -302,6 +302,13 @@ impl WinHttpPacResolver {
     /// as in [`parse_find_proxy_result`](super::parse_find_proxy_result), so the chain can
     /// be shorter than the entry count WinHTTP reported).
     ///
+    /// WinHTTP splits the script's result itself, and its answers differ from
+    /// [`parse_find_proxy_result`](super::parse_find_proxy_result)'s wherever the result is
+    /// spaced or split unusually. Among them: `PROXY\u{a0}a:1` is `a:1` here (a no-break space
+    /// ends the keyword), `PROXY a:1\r\nPROXY b:2` has no `b:2` (a line break does not
+    /// separate candidates), and nothing past the first `DIRECT` arrives, so
+    /// `PROXY a:1; DIRECT; PROXY b:2` has no `b:2` either.
+    ///
     /// `ERROR_WINHTTP_AUTODETECTION_FAILED` → `[Direct]`, but only from a `source` that
     /// asked for auto-detect. Download / script failure (and that same code from a
     /// URL-only source, where there was nothing to discover) stays an error.
