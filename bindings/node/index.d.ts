@@ -4,7 +4,9 @@ export interface ReadOptions {
    * environment does not. Anything `Object.prototype.toString` does not tag
    * `[object Object]` (a `Map` included) throws
    * `ObjectExpected`. Enumerable string keys are read, inherited ones included; an
-   * `undefined` value is skipped and any other non-string value throws. */
+   * `undefined` value is skipped and any other non-string value throws. A `process.env`
+   * replaced by something unreadable throws `ERR_PROXY_WATCH`, or what its own getter or
+   * Proxy trap throws. */
   env?: Record<string, string | undefined>;
   /** `before-system` (the default) lets any `*_proxy` or `no_proxy` outrank the OS,
    * `after-system` uses them only where the OS has no configuration, `ignore` skips them. */

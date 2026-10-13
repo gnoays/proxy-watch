@@ -143,6 +143,24 @@ test("a worker thread's own process.env is read when env is left out", async () 
   assert.deepEqual(message, Array(3).fill(['http://in-worker.example:3128/']));
 });
 
+// A `process.env` replaced by something unreadable is reported as itself, not as the `env`
+// option the caller left out.
+test('a process.env that cannot be read is named in the error', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const addon = createRequire(import.meta.url).resolve('../proxy-watch.node');
+  const script = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { readSync } = require(workerData);
+    process.env = new Map();
+    try { readSync(); parentPort.postMessage(null); }
+    catch (error) { parentPort.postMessage([error.code, error.message]); }
+  `;
+  const worker = new Worker(script, { eval: true, workerData: addon });
+  const [message] = await once(worker, 'message');
+  await worker.terminate();
+  assert.deepEqual(message, ['ERR_PROXY_WATCH', 'process.env is not an object of variable names to values']);
+});
+
 test('failures carry a code', async () => {
   const snapshot = readSync({ env });
   assert.throws(() => snapshot.route('not a url'), { code: 'ERR_INVALID_URL' });

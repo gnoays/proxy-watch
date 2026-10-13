@@ -137,7 +137,15 @@ fn process_env(env: &Env) -> napi::Result<EnvVars, &'static str> {
     let unreadable = |reason: String| napi::Error::new("ERR_PROXY_WATCH", reason);
     let vars = vars.ok_or_else(|| unreadable("process.env could not be read".to_owned()))?;
     // SAFETY: `vars` is a handle of this call's environment.
-    unsafe { EnvVars::from_napi_value(raw, vars) }.map_err(|error| unreadable(error.reason))
+    unsafe { EnvVars::from_napi_value(raw, vars) }.map_err(|error| {
+        unreadable(match error.status {
+            // The conversion's own text names the `env` option, which the caller left out.
+            napi::Status::ObjectExpected => {
+                "process.env is not an object of variable names to values".to_owned()
+            }
+            _ => format!("process.env: {}", error.reason),
+        })
+    })
 }
 
 fn layering(
