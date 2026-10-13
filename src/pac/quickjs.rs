@@ -37,17 +37,15 @@ const STACK_LIMIT: usize = 256 * 1024;
 /// is the sole entry point (Ex-only hostfns are not registered).
 ///
 /// Of [`PacPolicy`]'s limits it honours the timeout, and enforces it: a script still
-/// running at the deadline is interrupted, so the evaluation thread ends with the call,
-/// unless it is inside a host function then, such as `dnsResolve` waiting on the system
-/// resolver, which holds the thread until it returns. A fixed 64 MiB heap and a fixed 256
+/// running at the deadline is interrupted, so the evaluation thread is free for the next
+/// evaluation when the call returns, unless the script is inside a host function then, such
+/// as `dnsResolve` waiting on the system resolver, which holds the thread until it returns. A fixed 64 MiB heap and a fixed 256
 /// KiB native stack bound the script, and a script that exceeds either gets an exception
-/// rather than aborting the process. The chain read from what it returns is held outside
-/// that heap, and [`parse_find_proxy_result`] keeps it to 64 steps. The entry point is read
-/// off the global object, where a `function` or `var` declaration puts it and a `let` or
-/// `const` one does not. The heap bound holds only while nothing in the build
-/// turns on `rquickjs`'s `rust-alloc` or `allocator` feature, which removes it. The
-/// host-function settings (DNS, internal addresses, `myIpAddress`, the clock and the UTC
-/// offset) all apply.
+/// rather than aborting the process. The heap bound holds only while nothing in the build
+/// turns on `rquickjs`'s `rust-alloc` or `allocator` feature, which removes it. The entry
+/// point is read off the global object: a `function` or `var` declaration puts it there, a
+/// `let` or `const` one does not. The host-function settings (DNS, internal addresses,
+/// `myIpAddress`, the clock and the UTC offset) all apply.
 ///
 /// ```
 /// # #[cfg(pac_quickjs)] {

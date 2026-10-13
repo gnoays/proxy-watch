@@ -90,8 +90,9 @@ impl PacPolicy {
     /// unlinked because the type exists only under `pac-windows-native` on Windows; linking
     /// it breaks doc builds elsewhere.
     ///
-    /// `QuickJsEvaluator` interrupts the script at the deadline, so its thread ends with
-    /// the call unless a host function (`dnsResolve` with DNS on) is still running then.
+    /// `QuickJsEvaluator` interrupts the script at the deadline, so its thread is free for
+    /// the next evaluation when the call returns, unless a host function (`dnsResolve` with
+    /// DNS on) is still running then.
     ///
     /// Evaluation threads are limited process-wide to the number of cores, with a minimum
     /// of 4. A thread holds its slot until its script ends, including after the call times
