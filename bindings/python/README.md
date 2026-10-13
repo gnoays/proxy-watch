@@ -2,7 +2,8 @@
 
 The operating system's proxy settings for Python, layered with `http_proxy`,
 `https_proxy`, `all_proxy` and `no_proxy`, and the route each URL takes under them.
-Windows, macOS and Linux (GNOME, KDE) settings are read directly; nothing is spawned.
+Windows, macOS and Linux (GNOME, KDE) settings are read directly, not through a
+helper command.
 
 ```sh
 pip install proxy-watch
@@ -43,7 +44,13 @@ machine is.
 ## Watching
 
 ```python
-with proxy_watch.watch(lambda err, snapshot: print(err or snapshot.route("https://example.com/").kind)) as watcher:
+def on_change(err, snapshot):
+    if err:
+        print(err)
+    else:
+        print(snapshot.route("https://example.com/").kind)
+
+with proxy_watch.watch(on_change) as watcher:
     ...
 ```
 

@@ -2,7 +2,8 @@
 
 The operating system's proxy settings for Node.js, layered with `http_proxy`,
 `https_proxy`, `all_proxy` and `no_proxy`, and the route each URL takes under them.
-Windows, macOS and Linux (GNOME, KDE) settings are read directly; nothing is spawned.
+Windows, macOS and Linux (GNOME, KDE) settings are read directly, not through a
+helper command.
 
 ```sh
 npm install proxy-watch
@@ -60,7 +61,7 @@ The watch does not keep the process alive.
 ## Platforms
 
 Prebuilt for Linux x64 and arm64 (glibc 2.17 and later, and musl), Linux arm (ARMv7,
-glibc 2.17 and later), macOS x64 and arm64, and Windows x64 and arm64. npm installs the one
+glibc 2.17 and later), macOS x64 and arm64, and Windows x64 and arm64. The loader picks the
 package that matches the machine.
 
 ## License
