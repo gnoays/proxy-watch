@@ -311,7 +311,7 @@ impl Snapshot {
     }
 
     /// The whole configuration as plain objects and arrays, which `JSON.stringify` also
-    /// takes. A proxy's password is in it as the value.
+    /// takes. A proxy's password, and one in a PAC URL, is in it as the value.
     #[napi(js_name = "toJSON")]
     pub fn to_json(&self) -> Json {
         Json(shared::describe(&self.config, self.os_readable))

@@ -228,6 +228,34 @@ class WatchTest(unittest.TestCase):
             out.stderr,
         )
 
+    # A password in the PAC URL is masked in the route's repr, as a step's is, and kept in
+    # pac_url.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "kioslaverc is the Linux store")
+    def test_a_route_repr_masks_the_pac_url_password(self):
+        script = textwrap.dedent(
+            """
+            import proxy_watch
+            r = proxy_watch.read(precedence="ignore").route("http://a.example/")
+            print(r.pac_url)
+            print(repr(r))
+            """
+        )
+        with tempfile.TemporaryDirectory() as home:
+            with open(os.path.join(home, "kioslaverc"), "w") as f:
+                f.write("[Proxy Settings]\nProxyType=2\nProxy Config Script=http://u:secret@wpad.example/proxy.pac\n")
+            env = dict(
+                os.environ, XDG_CURRENT_DESKTOP="KDE", XDG_CONFIG_HOME=home, XDG_CONFIG_DIRS="/nonexistent"
+            )
+            out = subprocess.run(
+                [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(
+            out.stdout,
+            "http://u:secret@wpad.example/proxy.pac\n"
+            "Route(kind='pac', pac_url='http://u:***@wpad.example/proxy.pac', engine='none')\n",
+            out.stderr,
+        )
+
     # Each shape a route takes from the OS, under each precedence: the environment outranks
     # the OS before it, the OS outranks the environment after it, and ignore leaves it out.
     @unittest.skipUnless(sys.platform.startswith("linux"), "kioslaverc is the Linux store")

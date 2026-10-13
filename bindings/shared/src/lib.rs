@@ -758,9 +758,9 @@ fn list<T>(items: impl IntoIterator<Item = T>, each: impl Fn(T) -> Value) -> Val
 }
 
 /// The whole snapshot as data: the effective mode, every source's own, the sources left
-/// out, and `os_readable`. A proxy's password is its value, not a mask. A dropped value
-/// (`rejected`) stays masked, as [`rejected`] gives it: nothing uses it, so nothing needs
-/// its secret. Enumerations are strings, a core variant's name where the bindings have no
+/// out, and `os_readable`. A proxy's password, and one in a PAC URL, is its value, not a
+/// mask. A dropped value (`rejected`) stays masked, as [`rejected`] gives it: nothing uses
+/// it, so nothing needs its secret. Enumerations are strings, a core variant's name where the bindings have no
 /// name of their own, so a later variant is a new string rather than a failure.
 pub fn describe(config: &ProxyConfig, os_readable: bool) -> Value {
     map([

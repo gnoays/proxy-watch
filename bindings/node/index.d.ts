@@ -96,7 +96,7 @@ export declare class Snapshot {
   /** The configuration on one line, passwords masked; also what `util.inspect` shows. */
   toString(): string;
   /** The whole configuration as plain data, which `JSON.stringify` also takes. A proxy's
-   * password is in it as the value. */
+   * password, and one in a PAC URL, is in it as the value. */
   toJSON(): SnapshotJson;
 }
 

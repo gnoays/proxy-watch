@@ -116,15 +116,16 @@ impl TryFrom<Answer> for Route {
 
 #[pymethods]
 impl Route {
-    /// The kind, the one field it carries, and the engine. A step's password shows as
-    /// `***`, since a repr reaches tracebacks and logs unasked; `steps` itself keeps it.
+    /// The kind, the one field it carries, and the engine. A password in a step or in the
+    /// PAC URL shows as `***`, since a repr reaches tracebacks and logs unasked; `steps` and
+    /// `pac_url` themselves keep it.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let carried = match (&self.steps, &self.pac_url, &self.script) {
             (Some(steps), _, _) => {
                 let masked: Vec<String> = steps.iter().map(|step| masked_url(step)).collect();
                 format!(", steps={}", repr(py, masked)?)
             }
-            (_, Some(pac_url), _) => format!(", pac_url={}", repr(py, pac_url)?),
+            (_, Some(pac_url), _) => format!(", pac_url={}", repr(py, masked_url(pac_url))?),
             (_, _, Some(script)) => format!(", script=<{} chars>", script.chars().count()),
             _ => String::new(),
         };
@@ -298,7 +299,7 @@ impl Snapshot {
     }
 
     /// The whole configuration as plain dicts and lists, the stub file describes the
-    /// shape. A proxy's password is in it as the value.
+    /// shape. A proxy's password, and one in a PAC URL, is in it as the value.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         to_python(py, shared::describe(&self.config, self.os_readable))
     }
