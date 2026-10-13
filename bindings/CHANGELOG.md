@@ -13,9 +13,11 @@ changes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-13
+
 Built from crate 0.3.1, which changes some routing answers (a PAC result split at ASCII
-whitespace only and kept to its first 64 steps, Android's duplicate steps kept once) and
-escapes a `%` in a step's user name or password as `%25`.
+whitespace only and kept to its first 64 steps, Android's duplicate steps kept once, and
+macOS's PAC engine answering an HTTP proxy for an `https:` URL) and escapes a `%` in a step's user name or password as `%25`.
 
 ### Changed
 
