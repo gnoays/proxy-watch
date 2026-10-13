@@ -7,6 +7,49 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-13
+
+MSRV unchanged: 1.88, with every feature. No change to the library's API. The same
+machine and destination can route differently from 0.3.0;
+`### Routing answers that change` has each case.
+
+### Fixed
+
+- `ProxyStep::to_url()` escapes a `%` in the user name or password as `%25`. The URL
+  setters leave `%` as it is, so a password holding `%41` literally read back as `A` in
+  any client that decodes the URL's userinfo, Node's and Python's adapters among them.
+
+### Routing answers that change
+
+- PAC: a result's words are split at ASCII whitespace only, as Chromium and Firefox split
+  them. A no-break space, another Unicode space or a vertical tab anywhere in a candidate,
+  `DIRECT` followed by one included, spoils the candidate; it was read as a space.
+  WinHTTP, CFNetwork and Android split the string themselves and are unaffected.
+- PAC: a result keeps its first 64 steps on every engine and drops the rest, an explicit
+  `DIRECT` among them.
+- `AndroidPacResolver`: a step `ProxySelector` names twice is kept once, at its first
+  place, as on the other engines.
+- `CfNetworkPacResolver` and `CfNetworkPacEvaluator` (macOS, iOS): a script's `PROXY` for an `https:` URL is an HTTP
+  proxy, `ProxyStep::Http`, as the JS engines, Chromium, .NET and Qt read it. CFNetwork
+  labels that entry `kCFProxyTypeHTTPS` after the destination's scheme, and it was read as
+  a proxy reached over TLS (`ProxyStep::Https`).
+
+### Changed
+
+- QuickJS: the error for a script whose `FindProxyForURL` is declared with `let` or
+  `const` says the function is read off the global object, where those declarations do
+  not put it.
+- macOS: a refused `ExceptionsList` entry with a `*` in the middle (`www.*.test`) is
+  explained as one macOS matches and this crate does not follow, its destinations going to
+  the proxy; the reason said no destination could match it.
+- QuickJS: an evaluation with a timeout (the default) runs on a thread an earlier one left
+  idle, where there is one, rather than on a new thread each time; an idle thread ends 30 s
+  after its last evaluation. One evaluation of a small script takes 200–250 µs, from
+  350–410 µs, on Linux x86_64. Each evaluation still builds its own runtime. There are
+  never more of these threads than evaluations allowed at once, idle ones included, apart
+  from `SubprocessEvaluator` conversations that start while QuickJS threads are idle. A
+  child of `fork` starts threads of its own rather than handing work to its parent's.
+
 ## [0.3.0] - 2026-10-09
 
 MSRV unchanged: 1.88, with every feature. One addition to the library's API,
@@ -315,7 +358,8 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
-[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1

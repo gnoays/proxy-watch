@@ -71,6 +71,23 @@ worker.on('exit', (code) => console.log('worker exit', code));
   assert.equal(node(script), 'worker exit 0\n');
 });
 
+// `close()` takes back the cleanup hook it frees, so the worker's teardown runs only the
+// hooks of the watchers still open.
+test('a worker can exit after closing some of its watchers', () => {
+  const script = `${prelude}
+import { Worker } from 'node:worker_threads';
+const worker = new Worker(\`
+  const { createRequire } = process.getBuiltinModule('node:module');
+  const { watchSync } = createRequire(process.env.ADDON)(process.env.ADDON);
+  const watchers = Array.from({ length: 1000 }, () => watchSync(() => {}));
+  watchers.forEach((w, at) => at % 2 && w.close());
+  globalThis.w = watchers;
+\`, { eval: true });
+worker.on('exit', (code) => console.log('worker exit', code));
+`;
+  assert.equal(node(script), 'worker exit 0\n');
+});
+
 test('a worker can exit with a read, a routeNative and a watch pending', () => {
   const script = `${prelude}
 import { Worker } from 'node:worker_threads';

@@ -37,14 +37,15 @@ const STACK_LIMIT: usize = 256 * 1024;
 /// is the sole entry point (Ex-only hostfns are not registered).
 ///
 /// Of [`PacPolicy`]'s limits it honours the timeout, and enforces it: a script still
-/// running at the deadline is interrupted, so the evaluation thread ends with the call,
-/// unless it is inside a host function then, such as `dnsResolve` waiting on the system
-/// resolver, which holds the thread until it returns. A fixed 64 MiB heap and a fixed 256
-/// KiB native stack bound the rest, and a script that exceeds either gets an exception
+/// running at the deadline is interrupted, so the evaluation thread is free for the next
+/// evaluation when the call returns, unless the script is inside a host function then, such
+/// as `dnsResolve` waiting on the system resolver, which holds the thread until it returns. A fixed 64 MiB heap and a fixed 256
+/// KiB native stack bound the script, and a script that exceeds either gets an exception
 /// rather than aborting the process. The heap bound holds only while nothing in the build
-/// turns on `rquickjs`'s `rust-alloc` or `allocator` feature, which removes it. The
-/// host-function settings (DNS, internal addresses, `myIpAddress`, the clock and the UTC
-/// offset) all apply.
+/// turns on `rquickjs`'s `rust-alloc` or `allocator` feature, which removes it. The entry
+/// point is read off the global object: a `function` or `var` declaration puts it there, a
+/// `let` or `const` one does not. The host-function settings (DNS, internal addresses,
+/// `myIpAddress`, the clock and the UTC offset) all apply.
 ///
 /// ```
 /// # #[cfg(pac_quickjs)] {
@@ -173,7 +174,8 @@ pub(super) fn run_raw(
         }
         let Some(callee) = callee else {
             return Err(Error::pac_evaluation(
-                "the PAC script defines no FindProxyForURL function",
+                "the PAC script defines no FindProxyForURL function on its global object \
+                 (a `let` or `const` declaration does not put one there)",
             ));
         };
 
@@ -669,6 +671,24 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_point_a_let_or_const_declares_is_not_on_the_global_object() {
+        for declaration in ["let", "const"] {
+            let source =
+                format!("{declaration} FindProxyForURL = function () {{ return 'DIRECT'; }};");
+            let error = steps(&source, "http://a/", PacPolicy::new()).unwrap_err();
+            assert!(error.to_string().contains("global object"), "{error}");
+        }
+        assert!(
+            steps(
+                "var FindProxyForURL = function () { return 'DIRECT'; };",
+                "http://a/",
+                PacPolicy::new()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn a_nonsense_return_value_is_an_error() {
         let error = steps(
             "function FindProxyForURL(url, host) { return 'GOPHER g:70'; }",
@@ -688,13 +708,15 @@ mod tests {
             "process.exit(1)",
             "std.loadFile('/etc/passwd')",
             "os.exec(['sh'])",
-            "globalThis.WebAssembly.compile",
+            "WebAssembly.compile",
         ] {
             let source =
                 format!("function FindProxyForURL(url, host) {{ {escape}; return 'DIRECT'; }}");
             let error = steps(&source, "http://a/", PacPolicy::new()).unwrap_err();
+            // Failing for being absent, not for some other reason with the name present.
             assert!(
-                matches!(error, Error::PacEvaluation { .. }),
+                matches!(error, Error::PacEvaluation { .. })
+                    && error.to_string().contains("is not defined"),
                 "{escape} gave {error:?}"
             );
         }

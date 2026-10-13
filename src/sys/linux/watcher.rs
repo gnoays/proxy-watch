@@ -464,10 +464,10 @@ fn is_leading_store(desktop: desktop::Desktop, store: desktop::Store) -> bool {
     not(any(feature = "linux-gnome", feature = "linux-kde")),
     allow(dead_code)
 )]
-const LEADING_STORE_HAS_NO_FALLBACK: &str = "this is the leading Linux desktop store — \
-     either the store belonging to the desktop XDG_CURRENT_DESKTOP says is actually \
+const LEADING_STORE_HAS_NO_FALLBACK: &str = "this is the leading Linux desktop store \
+     (either the store belonging to the desktop XDG_CURRENT_DESKTOP says is actually \
      running, or, when that desktop's store is not compiled into this build, the store \
-     that inherits the position — so there is no other source left to notice a later \
+     that inherits the position), so there is no other source left to notice a later \
      change with";
 
 // Establish the `kioslaverc` inotify watch for [`Watch::armed`].

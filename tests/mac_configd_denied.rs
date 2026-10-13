@@ -118,7 +118,7 @@ fn sc_dynamic_store_build_reports_whether_configd_is_reachable() {
         println!(
             "CONTROL: SCDynamicStoreBuilder::new({SMOKE_STORE_NAME:?}).build() returned \
              {outcome} with no sandbox in effect. {EXPECT_DENIED} is unset, so nothing is \
-             asserted — this line exists to be read against the sandboxed run's line in \
+             asserted; this line exists to be read against the sandboxed run's line in \
              the same CI log (see this file's module doc)."
         );
         return;
@@ -128,7 +128,7 @@ fn sc_dynamic_store_build_reports_whether_configd_is_reachable() {
         store.is_none(),
         "{EXPECT_DENIED} is set, which means this process was supposed to be running under \
          a sandbox-exec profile that denies the mach-lookup of \
-         com.apple.SystemConfiguration.configd — but \
+         com.apple.SystemConfiguration.configd, but \
          SCDynamicStoreBuilder::new({SMOKE_STORE_NAME:?}).build() still returned Some. The \
          premise every other test in this file rests on no longer holds on this runner: \
          the deny either does not apply to this lookup any more, or the framework reaches \
@@ -190,7 +190,7 @@ fn the_create_store_retry_loop_spends_its_full_budget_before_giving_up() {
     if !configd_is_denied() {
         println!(
             "SKIPPED: {EXPECT_DENIED} is unset, so configd is reachable and \
-             ProxyWatcher::new() is expected to *succeed* — which tests/mac_watch.rs \
+             ProxyWatcher::new() is expected to *succeed*, which tests/mac_watch.rs \
              already asserts. This test only means something under the sandbox-exec \
              profile described in this file's module doc."
         );
@@ -207,7 +207,7 @@ fn the_create_store_retry_loop_spends_its_full_budget_before_giving_up() {
              working (in which case \
              sc_dynamic_store_build_reports_whether_configd_is_reachable has already \
              failed, and that is the finding to read), or the macOS backend acquired a way \
-             to produce a configuration without configd — which would be a confident wrong \
+             to produce a configuration without configd, which would be a confident wrong \
              answer of exactly the kind this backend must not produce."
         );
     };
@@ -217,7 +217,7 @@ fn the_create_store_retry_loop_spends_its_full_budget_before_giving_up() {
             context.contains("SCDynamicStore"),
             "the failure should be the one create_store raises after exhausting its \
              retries (context \"creating an SCDynamicStore session\"), but it came back as \
-             Io {{ context: {context:?}, source: {source} }} — some other step failed \
+             Io {{ context: {context:?}, source: {source} }}: some other step failed \
              first, so this test is no longer exercising the retry loop"
         ),
         other => panic!(
@@ -231,7 +231,7 @@ fn the_create_store_retry_loop_spends_its_full_budget_before_giving_up() {
         elapsed >= MIN_ELAPSED,
         "ProxyWatcher::new() failed after only {elapsed:?}, short of the {MIN_ELAPSED:?} \
          floor implied by {EXPECTED_MAX_RETRIES} retries {EXPECTED_RETRY_INTERVAL:?} apart. \
-         The error is right but the retry loop did not run — this is the assertion that \
+         The error is right but the retry loop did not run; this is the assertion that \
          tells those two apart, so do not relax it without changing create_store in \
          src/sys/mac/mod.rs to match"
     );

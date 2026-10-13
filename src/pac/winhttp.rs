@@ -9,7 +9,6 @@
 //! Async `WinHttpGetProxyForUrlEx` is blocked on a manual-reset [`Event`] with a
 //! **bounded timeout** (cancel by closing the resolver; callback keeps its `Arc` alive).
 
-use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fmt;
 use std::net::Ipv6Addr;
@@ -43,6 +42,8 @@ use crate::error::Error;
 use crate::mode::ProxyMode;
 use crate::resolve::ProxyStep;
 use crate::sys::win::ffi::{Event, wide, wide_ptr_to_string};
+
+use super::result::Chain;
 
 /// Default native resolution budget (5 s): same as
 /// [`DEFAULT_PAC_TIMEOUT`](super::DEFAULT_PAC_TIMEOUT), but also covers WPAD discovery and
@@ -300,6 +301,13 @@ impl WinHttpPacResolver {
     /// (HTTP/HTTPS/SOCKS**4**; `fProxy == FALSE` → Direct; FTP skipped; repeats collapse,
     /// as in [`parse_find_proxy_result`](super::parse_find_proxy_result), so the chain can
     /// be shorter than the entry count WinHTTP reported).
+    ///
+    /// WinHTTP splits the script's result itself, and its answers differ from
+    /// [`parse_find_proxy_result`](super::parse_find_proxy_result)'s wherever the result is
+    /// spaced or split unusually. Among them: `PROXY\u{a0}a:1` is `a:1` here (a no-break space
+    /// ends the keyword), `PROXY a:1\r\nPROXY b:2` has no `b:2` (a line break does not
+    /// separate candidates), and nothing past the first `DIRECT` arrives, so
+    /// `PROXY a:1; DIRECT; PROXY b:2` has no `b:2` either.
     ///
     /// `ERROR_WINHTTP_AUTODETECTION_FAILED` → `[Direct]`, but only from a `source` that
     /// asked for auto-detect. Download / script failure (and that same code from a
@@ -873,29 +881,24 @@ impl ProxyResult {
             unsafe { std::slice::from_raw_parts(self.0.pEntries.cast_const(), count) }
         };
 
-        // Sized from the array, not `cEntries`: the null check above already distrusts the
-        // count, and reserving a `u32` of entries can abort the process.
-        let mut steps: Vec<ProxyStep> = Vec::with_capacity(entries.len());
-        let mut seen = HashSet::with_capacity(entries.len());
+        let mut chain = Chain::new();
         for entry in entries {
-            // Match `parse_find_proxy_result`: repeated steps add no fallback value, and
-            // the set keeps deduplication linear in the script's candidate count.
             // SAFETY: the entry belongs to the array borrowed above and its `pwszProxy`
             // member is either null or a NUL terminated UTF-16 string owned by it.
-            if let Some(step) = unsafe { entry_to_step(entry) }
-                && seen.insert(step.clone())
-            {
-                steps.push(step);
+            if let Some(step) = unsafe { entry_to_step(entry) } {
+                chain.push(step);
+                if chain.is_full() {
+                    break;
+                }
             }
         }
-        if steps.is_empty() {
-            // This crate wrote the message itself, but it still goes through the masking
-            // constructor so `PacInvalidResult` is never built any other way.
-            return Err(Error::pac_invalid_result(format!(
+        // This crate wrote the message itself, but it still goes through the masking
+        // constructor so `PacInvalidResult` is never built any other way.
+        chain.finish().ok_or_else(|| {
+            Error::pac_invalid_result(format!(
                 "WinHTTP returned {count} proxy entries, none of them usable"
-            )));
-        }
-        Ok(steps)
+            ))
+        })
     }
 }
 
@@ -1347,6 +1350,29 @@ mod tests {
                 endpoint_step("secure.corp", 8443, ProxyScheme::Https),
             ]
         );
+    }
+
+    #[test]
+    fn the_chain_keeps_its_first_steps_and_drops_the_rest() {
+        use crate::pac::result::MAX_CHAIN;
+
+        let mut host = wide("proxy.corp");
+        let mut entries = (1..=MAX_CHAIN as u16 + 1)
+            .map(|port| proxy_entry(WINHTTP_INTERNET_SCHEME_HTTP, &mut host, port))
+            .collect::<Vec<_>>();
+        entries.push(WINHTTP_PROXY_RESULT_ENTRY {
+            fProxy: false.into(),
+            ..proxy_entry(WINHTTP_INTERNET_SCHEME_HTTP, &mut host, 0)
+        });
+
+        let count = entries.len() as u32;
+        let steps = steps_of(count, entries.as_mut_ptr()).expect("every candidate is usable");
+        assert_eq!(steps.len(), MAX_CHAIN);
+        assert_eq!(
+            steps[MAX_CHAIN - 1],
+            endpoint_step("proxy.corp", MAX_CHAIN as u16, ProxyScheme::Http)
+        );
+        assert!(!steps.contains(&ProxyStep::Direct));
     }
 
     // The all-junk chain, which is the one shape that must not fail open: a managed PAC

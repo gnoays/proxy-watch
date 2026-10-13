@@ -33,7 +33,7 @@ const PROSE_FILES: &[&str] = &[
 // page is still this crate's and is still checked.
 const EXEMPT_DOCS: &[(&str, &str)] = &[(
     "docs/SURVEY.html",
-    "other crates' versions, toolchains and download counts — not this manifest",
+    "other crates' versions, toolchains and download counts, not this manifest",
 )];
 
 // Toolchain strings that are not this crate's MSRV.
@@ -618,7 +618,7 @@ fn the_declared_floor_is_one_ci_builds() {
     let ci = ci_toolchains();
     assert!(
         ci.contains(&manifest.rust_version),
-        "`rust-version` declares {} but the msrv job builds {ci:?} — a floor nothing \
+        "`rust-version` declares {} but the msrv job builds {ci:?}; a floor nothing \
          builds is a claim, not a measurement",
         manifest.rust_version
     );
@@ -642,12 +642,12 @@ fn every_toolchain_exception_justifies_itself() {
         );
         assert!(
             !ci.contains(*value) && *value != manifest.rust_version,
-            "{value} is an authority now — delete its exception row rather than \
+            "{value} is an authority now; delete its exception row rather than \
              letting two rules cover it"
         );
         assert!(
             stated.iter().any(|m| m.value == *value),
-            "no gated file states {value}, so the exception excuses nothing — delete \
+            "no gated file states {value}, so the exception excuses nothing; delete \
              the row rather than leaving it to read as coverage"
         );
     }
@@ -748,7 +748,7 @@ fn every_dependency_version_in_prose_matches_the_manifest() {
                     continue;
                 }
                 wrong.push(format!(
-                    "{file}: `{name}` {stated} but the manifest requires {required} — \
+                    "{file}: `{name}` {stated} but the manifest requires {required}, \
                      in {:?}",
                     line.trim()
                 ));
@@ -788,7 +788,7 @@ fn every_version_exception_justifies_itself() {
             stated
                 .iter()
                 .any(|(name, version)| name == dep && version == value),
-            "no gated file states `{dep}` {value}, so the exception excuses nothing — \
+            "no gated file states `{dep}` {value}, so the exception excuses nothing; \
              delete the row"
         );
         assert!(
@@ -802,7 +802,7 @@ fn every_version_exception_justifies_itself() {
         );
         assert!(
             !describes(&manifest.deps[*dep], value),
-            "`{dep}` {value} is what the manifest requires now — delete the exception"
+            "`{dep}` {value} is what the manifest requires now; delete the exception"
         );
     }
 }
@@ -852,7 +852,7 @@ fn every_exemption_names_a_page_and_still_earns_it() {
     for (page, reason) in EXEMPT_DOCS {
         assert!(
             pages.iter().any(|existing| existing == page),
-            "an exemption row for {page}, which is not in docs/ — the page was renamed \
+            "an exemption row for {page}, which is not in docs/: the page was renamed \
              or deleted; move the row with it"
         );
         assert!(
@@ -875,7 +875,7 @@ fn every_exemption_names_a_page_and_still_earns_it() {
         });
         assert!(
             stale_toolchain || stale_version,
-            "{page} is exempt but would pass the gate as it stands — delete the row \
+            "{page} is exempt but would pass the gate as it stands; delete the row \
              rather than leaving an exemption that only covers what gets added later"
         );
     }
@@ -955,7 +955,7 @@ fn the_gate_reaches_the_whole_tree_that_travels() {
     for prose in PROSE_FILES {
         assert!(
             manifest_dir().join(prose).is_file(),
-            "{prose} is listed as gated prose but is not a file — restated prose that \
+            "{prose} is listed as gated prose but is not a file; restated prose that \
              travels with the crate has to be readable here or it is not gated at all"
         );
     }
@@ -969,7 +969,7 @@ fn the_gate_reaches_the_whole_tree_that_travels() {
         manifest_dir().join("docs").is_dir(),
         !doc_pages().is_empty(),
         "a docs/ that is here scans to nothing, which is the answer a checkout without \
-         one gives — the pages were renamed off `.html`, or the walk stopped finding them"
+         one gives: the pages were renamed off `.html`, or the walk stopped finding them"
     );
 }
 
@@ -1011,7 +1011,7 @@ fn the_parser_reads_the_shapes_this_manifest_uses() {
     assert_eq!(
         ci_toolchains().len(),
         1,
-        "the msrv job's matrix is no longer one row — check that the parser still \
+        "the msrv job's matrix is no longer one row; check that the parser still \
          reads it before trusting the toolchain check"
     );
 }
@@ -1026,7 +1026,7 @@ fn the_parser_reads_the_shapes_this_manifest_uses() {
 fn unsafe_lives_only_where_the_readme_says() {
     assert!(
         read("README.md").contains(UNSAFE_CLAIM),
-        "the README no longer makes the claim this gate enforces ({UNSAFE_CLAIM:?}) — \
+        "the README no longer makes the claim this gate enforces ({UNSAFE_CLAIM:?}); \
          the sentence was reworded or deleted; update the gate with it"
     );
 
@@ -1050,7 +1050,7 @@ fn unsafe_lives_only_where_the_readme_says() {
     for (allowed, reason, named) in UNSAFE_ALLOWED {
         assert!(
             readme.contains(named),
-            "the README's list no longer names {allowed} ({named:?}) — say where `unsafe` \
+            "the README's list no longer names {allowed} ({named:?}); say where `unsafe` \
              is, or drop the row with the code"
         );
         assert!(
@@ -1059,7 +1059,7 @@ fn unsafe_lives_only_where_the_readme_says() {
         );
         assert!(
             actual.iter().any(|file| file.starts_with(allowed)),
-            "{allowed} is allowed to contain `unsafe` but no longer does — narrow the \
+            "{allowed} is allowed to contain `unsafe` but no longer does; narrow the \
              claim rather than leaving the reader a wider one than the code needs"
         );
     }

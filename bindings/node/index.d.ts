@@ -1,9 +1,12 @@
 export interface ReadOptions {
-  /** The variables to read `*_proxy` from; the process environment when absent. Pass
-   * `process.env` from a worker thread, whose `process.env` is its own copy. Anything
-   * `Object.prototype.toString` does not tag `[object Object]` (a `Map` included) throws
+  /** The variables to read `*_proxy` from; the calling thread's `process.env` when absent,
+   * which on a worker thread is its own copy, and under Bun holds writes that the process
+   * environment does not. Anything `Object.prototype.toString` does not tag
+   * `[object Object]` (a `Map` included) throws
    * `ObjectExpected`. Enumerable string keys are read, inherited ones included; an
-   * `undefined` value is skipped and any other non-string value throws. */
+   * `undefined` value is skipped and any other non-string value throws. A `process.env`
+   * replaced by something unreadable throws `ERR_PROXY_WATCH`, or what its own getter or
+   * Proxy trap throws. */
   env?: Record<string, string | undefined>;
   /** `before-system` (the default) lets any `*_proxy` or `no_proxy` outrank the OS,
    * `after-system` uses them only where the OS has no configuration, `ignore` skips them. */
@@ -95,7 +98,7 @@ export declare class Snapshot {
   /** The configuration on one line, passwords masked; also what `util.inspect` shows. */
   toString(): string;
   /** The whole configuration as plain data, which `JSON.stringify` also takes. A proxy's
-   * password is in it as the value. */
+   * password, and one in a PAC URL, is in it as the value. */
   toJSON(): SnapshotJson;
 }
 

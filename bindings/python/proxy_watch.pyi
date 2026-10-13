@@ -22,8 +22,8 @@ class Route:
     """Where a request to one URL goes: ``kind``, the one field that kind carries, and the
     engine that answered it. Compares and hashes by value.
 
-    ``steps`` holds "direct" or proxy URLs with their credentials, so do not log it.
-    ``repr()`` shows a step's password as ``***``.
+    ``steps`` holds "direct" or proxy URLs with their credentials, and ``pac_url`` the PAC
+    URL with its own, so do not log them. ``repr()`` shows either password as ``***``.
     """
 
     kind: Literal["steps", "pac", "pac-inline", "wpad"]
@@ -116,8 +116,8 @@ class Snapshot:
         {"kind": "pac-inline", "script", "rejected"}, or {"kind": "manual", "proxies",
         "bypass", "rejected"}. "proxies" maps "http", "https", "ftp", "socks" or "all" to
         {"kind": "use", "scheme", "host", "port", "username", "password", "password_state"},
-        {"kind": "disabled"}, or {"kind": "unusable", "rejected"}. A proxy's password is in it
-        as the value; "password_state" is "Present", "Absent", "NotRead" (GNOME's stored
+        {"kind": "disabled"}, or {"kind": "unusable", "rejected"}. A proxy's password, and one
+        in a PAC URL, is in it as the value; "password_state" is "Present", "Absent", "NotRead" (GNOME's stored
         password, which is not read) or "InKeychain" (macOS). "bypass" holds "patterns" (each
         rule in the form it parses back from), "implicit" ("Broad", "WinInet", "CfNetwork" or
         "Empty"), five flags and "rejected". "rejected" values are masked text. Every

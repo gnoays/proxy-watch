@@ -252,8 +252,8 @@ fn warn_every_probe_answered_direct() {
         probe_host = probe_host!(),
         "the portal answered direct:// for every probed scheme, so the reported mode is \
          Direct. If the sandbox host resolves proxies with a PAC script that branches on \
-         the host name, this is what that looks like from inside the sandbox — the script \
-         saw the probe host, not the real destination — and the real answer for a real \
+         the host name, this is what that looks like from inside the sandbox (the script \
+         saw the probe host, not the real destination), and the real answer for a real \
          destination may well be a proxy"
     );
 }

@@ -1529,7 +1529,7 @@ mod tests {
             !auth.has_password(),
             "nothing supplied a password here and this mapper does not invent one. That \
              the live reader never supplies one is `gnome::READ_AUTHENTICATION_PASSWORD`, \
-             which no test on this side can reach — and the next test shows this mapper \
+             which no test on this side can reach; the next test shows this mapper \
              maps a password perfectly well once something hands it one"
         );
     }

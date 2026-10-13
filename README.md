@@ -6,20 +6,17 @@
 [![Audit](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml/badge.svg)](https://github.com/gnoays/proxy-watch/actions/workflows/audit.yml)
 
 Read the operating system's proxy configuration on Windows, macOS, Linux, Android and
-iOS, and get a `Stream` item every time it changes. On a host set to PAC, a URL's route
-comes from the OS's own PAC engine or a bundled one.
+iOS, and get a `Stream` item every time it changes. On a host set to PAC, a `pac-*`
+feature gives a URL's route from the OS's own PAC engine or a bundled one.
 
 ```rust,no_run
-use futures_util::StreamExt;
-use proxy_watch::{ProxyWatcher, WatchEvent};
+use proxy_watch::{read, resolve, Url};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut watcher = ProxyWatcher::new()?;
-    while let Some(event) = futures_executor::block_on(watcher.next()) {
-        if let WatchEvent::Snapshot { state, .. } = event {
-            println!("proxy: {:?}", state.config.effective);
-        }
-    }
+    let config = read()?;
+    println!("proxy: {:?}", config.effective);
+    let steps = resolve(&config, &Url::parse("https://example.com/")?)?;
+    println!("route: {steps:?}");
     Ok(())
 }
 ```
@@ -175,7 +172,7 @@ The rest, with each platform's limits, is on [docs.rs](https://docs.rs/proxy-wat
 |---|---|
 | Windows | Tested in CI |
 | macOS | Tested in CI without a GUI. GUI changes, network-location switches and MDM `GlobalHTTPProxy` are **unverified** on real hardware |
-| Linux (GNOME, KDE) | Tested in CI; behind `linux-gnome` and `linux-kde` |
+| Linux (GNOME, KDE) | Tested in CI against dconf and a `kioslaverc` file, not a running desktop; behind `linux-gnome` and `linux-kde` |
 | Linux (Flatpak/Snap) | Read through the desktop portal (needs `linux-gnome`); watching needs `WatchOptions::poll_interval`. **Unverified** |
 | Android | API 23+; watching needs API 26+, or else `WatchOptions::poll_interval`. `android-activity` and Tauri 2.12+ hand the crate the app's `JavaVM` and `Context`; any other host calls `proxy_watch::android::init` before the first read, which otherwise fails, or aborts under `panic = "abort"`. **Partly verified** on an emulator and a phone (Android 17) |
 | iOS | Watching needs `WatchOptions::poll_interval`: iOS gives an app no proxy change notification. **Partly verified** on a simulator |
@@ -197,17 +194,16 @@ checked against it.
 ## Design
 
 - **Async-runtime agnostic:** `futures_core::Stream` on dedicated OS threads (`tokio` optional).
-- **`unsafe` is confined to the code that calls the OS directly.** Windows and macOS
-  backends, the iOS backend and the Core Foundation conversion it shares with macOS, the
-  Android backend's JNI entry, the WinHTTP and CFNetwork PAC engines, the limits
-  `pac-subprocess` puts on its worker (a memory cap through `setrlimit` on Linux and a job
-  object on Windows, and the Linux seccomp filter), and the table through which
-  `linux-gnome` calls GLib; the OS-independent core and the rest of the Linux backend
-  contain none of their own.
-- **Credentials stay masked** in `Debug`; `ProxyAuth` has no `Display`. That is the
-  `user:password@` of a URL; its query prints as it is, a PAC URL's `?key=` included,
-  because nothing about a query parameter says it is a secret and the PAC URL is what
-  tells two configurations apart.
+- **`unsafe` is confined to the code that calls the OS directly.** The OS-independent core
+  has none. It is in:
+  - the Windows and macOS backends, the iOS backend and the Core Foundation conversion
+    it shares with macOS
+  - the Android backend's JNI entry
+  - the WinHTTP and CFNetwork PAC engines
+  - the limits `pac-subprocess` puts on its worker
+  - the table through which `linux-gnome` calls GLib
+- **Credentials stay masked** in `Debug`, and `ProxyAuth` has no `Display`. Masking covers
+  a URL's `user:password@`; a query, a PAC URL's `?key=` included, prints as it is.
 
 ## Contributing
 

@@ -1,8 +1,8 @@
 //! Tests for the environment variable snapshot type.
 
 use proxy_watch::{
-    Error, ProxyConfigSource, ProxyEnv, ProxyScheme, RejectedValue, RejectionKind, RejectionSource,
-    Scheme,
+    Error, ProxyConfigSource, ProxyEntry, ProxyEnv, ProxyScheme, RejectedValue, RejectionKind,
+    RejectionSource, Scheme,
 };
 
 fn rejected_texts(values: &[RejectedValue]) -> Vec<&str> {
@@ -27,6 +27,23 @@ fn lowercase_wins_over_uppercase() {
         let endpoint = env(vars).endpoint_for(Scheme::Http).unwrap().authority();
         assert_eq!(&endpoint, expected, "{vars:?}");
     }
+}
+
+#[test]
+fn an_empty_lowercase_value_hides_the_uppercase_one() {
+    let e = env(&[("http_proxy", ""), ("HTTP_PROXY", "upper:80")]);
+    assert!(matches!(
+        e.per_scheme().get(&Scheme::Http),
+        Some(ProxyEntry::Disabled)
+    ));
+    let e = env(&[
+        ("http_proxy", "p:80"),
+        ("no_proxy", ""),
+        ("NO_PROXY", "a.example"),
+    ]);
+    assert!(!e.bypass().matches_authority("a.example"));
+    let e = env(&[("http_proxy", "p:80"), ("NO_PROXY", "a.example")]);
+    assert!(e.bypass().matches_authority("a.example"));
 }
 
 #[test]

@@ -690,8 +690,8 @@ fn lifting_a_group_policy_is_detected_and_leaves_the_route_alive() {
     assert_eq!(
         lifted.effective,
         ProxyMode::Direct,
-        "the per-user Direct baseline answered before the lift and still answers after it \
-         — unchanged by design, and asserted so a lift that broke the read is not read as \
+        "the per-user Direct baseline answered before the lift and still answers after it, \
+         unchanged by design, and asserted so a lift that broke the read is not read as \
          a lift that worked"
     );
     assert!(

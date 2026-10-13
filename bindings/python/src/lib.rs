@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use proxy_watch::{CapturedEnv, ProxyConfig};
-use proxy_watch_shared::{self as shared, Answer, Failure, Layering, Route as SharedRoute};
+use proxy_watch_shared::{self as shared, Answer, Failure, Layering};
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -96,44 +96,36 @@ pub struct Route {
 impl TryFrom<Answer> for Route {
     type Error = Failure;
 
-    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
-        let (kind, steps, pac_url, script) = match route {
-            SharedRoute::Steps(steps) => (
-                "steps",
-                Some(
-                    steps
-                        .iter()
-                        .map(shared::step_url)
-                        .collect::<Result<_, _>>()?,
-                ),
-                None,
-                None,
-            ),
-            SharedRoute::Pac(url) => ("pac", None, Some(url), None),
-            SharedRoute::PacInline(script) => ("pac-inline", None, None, Some(script)),
-            SharedRoute::Wpad => ("wpad", None, None, None),
-        };
+    fn try_from(answer: Answer) -> Result<Self, Failure> {
+        let shared::AnswerFields {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine,
+        } = answer.try_into()?;
         Ok(Self {
             kind,
             steps,
             pac_url,
             script,
-            engine: engine.name(),
+            engine,
         })
     }
 }
 
 #[pymethods]
 impl Route {
-    /// The kind, the one field it carries, and the engine. A step's password shows as
-    /// `***`, since a repr reaches tracebacks and logs unasked; `steps` itself keeps it.
+    /// The kind, the one field it carries, and the engine. A password in a step or in the
+    /// PAC URL shows as `***`, since a repr reaches tracebacks and logs unasked; `steps` and
+    /// `pac_url` themselves keep it.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let carried = match (&self.steps, &self.pac_url, &self.script) {
             (Some(steps), _, _) => {
                 let masked: Vec<String> = steps.iter().map(|step| masked_url(step)).collect();
                 format!(", steps={}", repr(py, masked)?)
             }
-            (_, Some(pac_url), _) => format!(", pac_url={}", repr(py, pac_url)?),
+            (_, Some(pac_url), _) => format!(", pac_url={}", repr(py, masked_url(pac_url))?),
             (_, _, Some(script)) => format!(", script=<{} chars>", script.chars().count()),
             _ => String::new(),
         };
@@ -307,7 +299,7 @@ impl Snapshot {
     }
 
     /// The whole configuration as plain dicts and lists, the stub file describes the
-    /// shape. A proxy's password is in it as the value.
+    /// shape. A proxy's password, and one in a PAC URL, is in it as the value.
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         to_python(py, shared::describe(&self.config, self.os_readable))
     }
@@ -320,13 +312,13 @@ impl Snapshot {
                 .config
                 .sources
                 .iter()
-                .map(|(source, _)| format!("{source:?}"))
+                .map(|(source, _)| shared::source_label(source))
                 .collect(),
             fallbacks: self
                 .config
                 .fallbacks
                 .iter()
-                .map(|source| format!("{source:?}"))
+                .map(shared::source_label)
                 .collect(),
             rejected: shared::rejected(&self.config),
         }

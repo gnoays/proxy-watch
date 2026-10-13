@@ -7,7 +7,7 @@
 #[cfg_attr(not(pac_quickjs), allow(dead_code))]
 mod hostfn;
 mod policy;
-mod result;
+pub(crate) mod result;
 #[cfg_attr(not(pac_quickjs), allow(dead_code))]
 mod time;
 

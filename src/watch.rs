@@ -810,7 +810,7 @@ fn report_discarded(discarded: Option<u64>) {
             capacity = MAX_QUEUED_CHANGES,
             "the change queue is full, so the oldest undelivered failure was discarded; \
              the subscriber is not draining the stream. `ProxyWatcher::current` stays \
-             accurate — what is being lost is the record of individual read failures"
+             accurate; what is being lost is the record of individual read failures"
         ),
         Some(total) => crate::trace::debug!(
             discarded = total,

@@ -358,10 +358,9 @@ impl ProxyEndpoint {
 }
 
 impl fmt::Display for ProxyEndpoint {
-    // Renders `host:port`, and prefixes `scheme://` only when a hint was parsed out. The
-    // prefix is the exception, not the shape: most sources store a bare authority, which
-    // is why [`ProxyScheme`] is a hint in the first place. Never the credentials (see
-    // [`ProxyAuth`]'s own documentation for why).
+    // Renders `host:port`, with `scheme://` only when a hint was parsed out: most sources
+    // store a bare authority. Never the credentials: a `Display` ends up in logs and error
+    // messages.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(scheme) = self.scheme_hint {
             write!(f, "{scheme}://")?;

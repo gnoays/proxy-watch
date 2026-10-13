@@ -895,7 +895,7 @@ fn a_genuine_inotify_failure_is_reported_as_degraded() {
     let options = WatchOptions::new().with_poll_interval(Some(Duration::from_secs(30)));
     let watcher = ProxyWatcher::with_options(options).expect(
         "a poll_interval is set precisely so this failure degrades instead of \
-         propagating — see the doc comment above",
+         propagating; see the doc comment above",
     );
     let health = watcher.health();
     assert!(
@@ -1189,7 +1189,7 @@ fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
 /// `a_kioslaverc_change_is_emitted_exactly_once` lands in that window under CI load: the
 /// coordinator in [`watcher::coordinate`](../src/sys/linux/watcher.rs) opens a *fixed* 200
 /// ms debounce window on the first inotify event and reads whatever is on disk when that
-/// window closes, not when the writer is done. [`kde::watch`](../src/sys/linux/kde.rs) has
+/// window closes, not when the writer is done. [`kde::watch`](../src/sys/linux/kde/watch.rs) has
 /// no debounce of its own; it sends `()` on the shared trigger for every relevant event,
 /// and that one coordinator debounces all four sources (GSettings, this inotify watch, the
 /// poll timer, `poll_now`) together. A reader unlucky enough to land between the truncate
@@ -1222,7 +1222,7 @@ fn fixture() -> (PathBuf, MutexGuard<'static, ()>) {
 /// this suite rewrites `kioslaverc` in place (same inode, plain truncate-then-write) while
 /// a watcher is live. That is judged acceptable rather than overlooked: `kde::watch`
 /// watches the *directory* and matches purely on file name (see `is_interesting` in
-/// `src/sys/linux/kde.rs`), so it does not distinguish an in-place `Modify` from a
+/// `src/sys/linux/kde/watch.rs`), so it does not distinguish an in-place `Modify` from a
 /// `Remove`+`Create` pair produced by a rename; there is no separate code path this loss
 /// leaves unexercised. What goes unexercised is a *KDE-external* writer that truncates
 /// `kioslaverc` in place instead of renaming over it; this crate has no such writer of its

@@ -272,7 +272,7 @@ fn an_explicit_gnome_none_is_not_overruled_by_a_stale_kioslaverc() {
     );
     assert!(
         config.source(ProxyConfigSource::Kioslaverc).is_some(),
-        "the stale store is still reported — it is simply not believed: {:?}",
+        "the stale store is still reported; it is simply not believed: {:?}",
         config.sources
     );
     assert_eq!(config.sources[0].0, ProxyConfigSource::GSettings);

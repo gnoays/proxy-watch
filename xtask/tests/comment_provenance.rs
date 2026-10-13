@@ -310,7 +310,7 @@ fn no_comment_states_what_the_text_around_it_stated_before() {
     let mut found = Vec::new();
     for hit in scan() {
         found.push(format!(
-            "{}:{} — {:?}\n    {}",
+            "{}:{}: {:?}\n    {}",
             hit.file,
             hit.line,
             hit.phrase,
@@ -320,7 +320,7 @@ fn no_comment_states_what_the_text_around_it_stated_before() {
     assert!(
         found.is_empty(),
         "prose about its own past, addressed to a reader who cannot have seen what it \
-         corrects. State the rule forward instead — what a reader must not do, and the \
+         corrects. State the rule forward instead: what a reader must not do, and the \
          mechanism that makes it wrong:\n{}",
         found.join("\n")
     );

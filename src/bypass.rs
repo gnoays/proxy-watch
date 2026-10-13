@@ -106,105 +106,48 @@ pub enum HostPattern {
 }
 
 // Which list an entry came from, for the places the lists disagree about what an entry
-// means. Named after the source rather than after a behaviour, because no two of them
-// differ from `Suffix` on the same set of axes: `Windows` on four, `MacOs` on five, `Gnome`
-// on four and `Kde` on two, no two the same set, and `MacOs` shares two of the `Windows`
-// axes while disagreeing with it everywhere else.
+// means. Named after the source rather than after a behaviour, because no two sources
+// differ from `Suffix` on the same set of axes.
 //
 // `Suffix` reads a bare name as the name and everything under it, and a leading `*.` or `.`
-// as the subdomains alone. That much is Go's `httpproxy` with `no_proxy` and libproxy's with
-// KDE's `NoProxyFor` (`ignore_domain` in `px-manager.c`, reached from `config-kde.c`), and it is why a
-// bare name here is not the name alone the way it is under `Windows` and `MacOs`.
+// as the subdomains alone. A `*` anywhere else is a glob, as the module documentation says,
+// so the dialect is the union of the two readings and the wider answer: `*.*.*.1` is met
+// by `10.0.0.1`, which a suffix-only reader sends to the proxy. The union is kept because
+// narrowing it would leave a rule someone typed a `*` into matching nothing while still
+// reading back as live, which is the shape `Gnome` refuses outright rather than store.
 //
-// A `*` anywhere else is a glob, and that half is *not* those two. `config.init` in
-// `http/httpproxy/proxy.go` special-cases a bare `*` and strips one character off a leading
-// `*.`; what is left goes to a `domainMatcher` that compares with `strings.HasSuffix`, so no
-// star past the first is syntax. libproxy's `ignore_domain` (`px-manager.c`) reads four
-// shapes and no more: the bare `*`, an exact name, and the two suffix spellings `.name`
-// and `*.name`. Under both, `192.168.*` and `*.*.*.1` are literal text no host carries,
-// so they match nothing. Neither refuses a CIDR entry, though, it leaves the name rules
-// before it reaches them. `config.init` tries `net.ParseCIDR` first, and libproxy tries
-// `ignore_ip` after `ignore_domain` (`px_manager_is_ignore`), which masks an entry holding a
-// `/` with `g_inet_address_mask_new_from_string` against an address literal only.
+// `Windows` reads a bare name as the name alone (the rows of
+// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`), and refuses the
+// four spellings it has no reading this crate can follow rather than store rules the
+// machine does not honour: an entry holding a `/`, one starting with `.`, one ending in `.`
+// (the store compares it as written; `Kde` shares this), and an IPv4 address not written as
+// four decimal octets. Each has a guard in `parse_in` carrying its readings.
 //
-// The star is read as a glob because the third reader of these same two lists reads it that
-// way. Chromium hands `no_proxy` and KDE's `NoProxyFor` to the same
-// `ProxyHostMatchingRules::ParseFromString` (`proxy_config_service_linux.cc:230`), which builds a
-// `SchemeHostPortMatcherHostnamePatternRule` for everything that is not a CIDR or an address
-// literal and evaluates it with `base::MatchPattern`
-// (`scheme_host_port_matcher_rule.cc:99,139`), a glob, and the source of the leading-dot
-// rewrite the `Wildcard` arm in `parse_in` already quotes.
+// `MacOs` is CFNetwork's `ExceptionsList`, measured against the OS matcher by
+// `tests/mac_exceptions_list.rs`. It agrees with `Windows` on the bare name and on
+// non-decimal IPv4 (the same guard), and differs from every other dialect on three more:
+//   * a `*` is syntax here only as a leading `*.` or a trailing `.*`. CFNetwork also matches
+//     a whole-label `*` elsewhere (`www.*.test`) by an undocumented rule, which this crate
+//     does not follow: the entry is refused, so its destinations go to the proxy. A `*`
+//     inside a label and a bare `*` match nothing there; reading the bare `*` as
+//     `HostPattern::All` would turn the proxy off on a Mac that proxies everything.
+//   * a `:port` kills the entry rather than constraining it.
+//   * neither end is trimmed (`trim` below): a stray space kills the entry.
+// `<local>` and `<-loopback>` bypass nothing there but are recognised anyway: the tokens
+// are read before the dialect so every source shares one vocabulary. `name.*` is the
+// mirror of `*.name`; the glob gets it right except `example.com.*` against
+// `example.com`, which fails closed and is recorded rather than given a new variant
+// (`a_trailing_star_reaches_the_bare_host_and_this_crate_does_not`).
 //
-// So this dialect is the union of the two readings rather than either one, and the union is
-// the wider answer, the one that reaches `Direct` more often. `*.*.*.1` is met by
-// `10.0.0.1` here and by `base::MatchPattern`; the two suffix readers send that request to
-// the proxy. The union is kept because narrowing it would leave a rule someone typed a `*`
-// into matching nothing while still reading back as live, which is the shape `Gnome` below
-// refuses outright rather than store.
-//
-// `Windows` differs in four places. A bare name is the name alone, measured on this
-// crate's own terms rather than read off a reimplementation, because the two
-// reimplementations disagree and neither is the OS; the readings are the rows of
-// `a_bare_name_in_a_windows_list_is_the_one_host` in `tests/bypass.rs`. And the three
-// spellings a Windows list has no reading this crate can follow (an entry holding a `/`,
-// an entry starting with `.`, and an IPv4 address written other than as four decimal
-// octets) are refused rather than stored as rules the machine does not honour. Each has
-// a guard in `parse_in` carrying its readings.
-//
-// `MacOs` is CFNetwork's `ExceptionsList`, measured the same way and by the same argument:
-// `tests/mac_exceptions_list.rs` hands `CFNetworkCopyProxiesForURL` a settings dictionary
-// and reads the verdict off the matcher itself, so Chromium's macOS reader is not consulted:
-// it is a reimplementation and not the OS. It agrees with `Windows` that a bare name is the
-// name alone, and that an IPv4 address written other than as four decimal octets is
-// compared as text (`012.1.2.3` met only a destination written `012.1.2.3`, the same
-// diagonal WinINet gives), so it is refused by the same guard. It differs from every other
-// dialect here on three more:
-//
-//   * a `*` is syntax only as a leading `*.` or a trailing `.*`, and a character everywhere
-//     else, so `*probe*`, `*invalid`, `pw-*.invalid` and a bare `*` match nothing. Reading
-//     the bare `*` as `HostPattern::All` turns the proxy off for every destination on a Mac
-//     that proxies all of them.
-//   * a `:port` does not constrain an entry, it kills it. `example.com:80` matched no
-//     destination on port 80, and `example.com` matched one that carried a port, so the
-//     port is not part of the comparison at all.
-//   * neither end is trimmed, which is `trim` below rather than an arm here: a space in
-//     front of a name or behind it kills the entry the same way a `*` in the middle does.
-//
-// Two things it does *not* differ on are left alone. `<local>` and
-// `<-loopback>` bypass nothing there, but they are recognised here anyway, for the reason
-// `sys/linux/gsettings_map.rs` gives for GLib: the tokens are read before the dialect so
-// every source shares one vocabulary, and no macOS writer types a WinINet token. And
-// `name.*` covers the host plus anything whose leading labels are the host (the mirror of
-// `*.name`, not a suffix rule), which the glob this arm already builds gets right except
-// when the star stands for no labels at all (`example.com.*` against `example.com`). That
-// one row is fail-*closed*, so it is recorded rather than answered with a new variant.
-//
-// `Gnome` is GLib's `GSimpleProxyResolver`, which is the code that resolves on GNOME:
-// `gsettings_map.rs` reads the same keys GLib's `GProxyResolverGnome` does. It agrees on
-// the bare name, and on CIDR: `reparse_ignore_hosts` tries
-// `g_inet_address_mask_new_from_string` on the whole entry before it strips anything
-// (`gsimpleproxyresolver.c:186`), so a mask never reaches the name rules. It differs on
-// four more axes, all from the same file:
-//
-//   * `reparse_ignore_hosts` strips a leading `*.` or `.` and stores the rest as a plain
-//     name, which `ignore_host` then matches with `offset == 0` allowed, so
-//     `*.example.com`, `.example.com` and `example.com` are one rule there, covering the
-//     domain *and* its subdomains.
-//   * no other `*` is syntax: what is left is `g_ascii_strcasecmp`d whole, and no
-//     host contains a `*`, so `foo*.example.com` matches nothing at all. A bare `*` is that
-//     rule's worst case and reads the same way: `reparse_ignore_hosts` strips neither a
-//     `*.` nor a leading `.` from it, so it is stored whole and `ignore_host` then wants a
-//     destination whose last character is a `*` behind a dot. None arrives. It shares this
-//     with `MacOs`, and shares the reason with nothing else here: on Windows and in
-//     `no_proxy` a bare `*` does switch the proxy off.
-//   * that same parse chomps with `g_strchomp`, trailing whitespace only, so a leading
-//     space survives into the name and kills the rule the same way.
-//   * `g_simple_proxy_resolver_lookup` resolves the destination with `G_URI_FLAGS_NONE`, and
-//     `g_uri_split_internal` fills a scheme's default port only in its scheme-based
-//     normalization, under `G_URI_FLAGS_SCHEME_NORMALIZE`, so a portless
-//     `http://example.com/` is asked about with port 0, and an `example.com:80` rule does
-//     not fire on it. That last one is not a pattern shape and lives in
-//     [`BypassRules::require_explicit_port`].
+// `Gnome` is GLib's `GSimpleProxyResolver`. It agrees on the bare name, and on CIDR: a mask
+// is tried on the whole entry before any name rule. It differs on four axes:
+//   * a leading `*.` or `.` is stripped, so `*.example.com`, `.example.com` and
+//     `example.com` are one rule covering the domain and its subdomains.
+//   * no other `*` is syntax, so `foo*.example.com` and a bare `*` match nothing. Unlike
+//     `Windows` and `no_proxy`, a bare `*` does not switch the proxy off.
+//   * trailing whitespace is trimmed; a leading space is not, and kills the rule.
+//   * a portless `http://example.com/` is asked about with port 0, so an `example.com:80`
+//     rule does not fire on it; see [`BypassRules::require_explicit_port`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BypassDialect {
     Suffix,
@@ -366,7 +309,7 @@ impl HostPattern {
         if dialect == BypassDialect::Windows && lowered.contains('/') {
             return Err(Error::bypass(
                 entry,
-                "entry contains a '/', which Windows does not read as a CIDR block — it \
+                "entry contains a '/', which Windows does not read as a CIDR block: it \
                  invalidates the whole bypass list (write the range with wildcards, for \
                  example 10.* rather than 10.0.0.0/8)",
             ));
@@ -388,7 +331,7 @@ impl HostPattern {
         {
             return Err(Error::bypass(
                 entry,
-                "entry starts with a '.', which Windows does not read as a subdomain rule — \
+                "entry starts with a '.', which Windows does not read as a subdomain rule; \
                  WinINet refuses the whole bypass list over one (write the subdomains as \
                  *.example.com rather than .example.com)",
             ));
@@ -438,7 +381,7 @@ impl HostPattern {
             return Err(Error::bypass(
                 entry,
                 "entry contains a '/', so it can only be a CIDR block, but it is not a \
-                 valid one (an address, a '/', and a prefix length — for example \
+                 valid one (an address, a '/', and a prefix length, for example \
                  10.0.0.0/8 or fe80::/10)",
             ));
         }
@@ -473,7 +416,7 @@ impl HostPattern {
         if dialect == BypassDialect::MacOs && port.is_some() {
             return Err(Error::bypass(
                 entry,
-                "entry carries a port, which macOS does not read as a restriction — it \
+                "entry carries a port, which macOS does not read as a restriction: it \
                  compares the whole entry to the destination's host name, so no destination \
                  could ever match it (write the host on its own)",
             ));
@@ -669,8 +612,8 @@ impl HostPattern {
             if dialect == BypassDialect::Gnome {
                 return Err(Error::bypass(entry, GNOME_LITERAL_STAR));
             }
-            // The `*.` spelling was taken above, so the only star macOS still reads as
-            // syntax is a trailing `.*`, and only when it is the sole one. What is left of
+            // The `*.` spelling was taken above, so the only star still read as syntax for
+            // macOS is a trailing `.*`, and only when it is the sole one. What is left of
             // the entry has to be a name a destination could carry: a leading dot is not,
             // and the glob would be as dead as the entry it came from.
             if dialect == BypassDialect::MacOs {
@@ -744,7 +687,7 @@ impl HostPattern {
             return Err(Error::bypass(
                 entry,
                 "entry is an IPv4 address written other than as four decimal octets, which \
-                 this list's reader does not read as the address a URL parser does — Windows, \
+                 this list's reader does not read as the address a URL parser does: Windows, \
                  macOS and Android compare it as text, KIO reads each part as decimal \
                  (write the four decimal octets, for example 10.1.2.3)",
             ));
@@ -821,22 +764,17 @@ impl HostPattern {
                 match_self,
                 port: rule_port,
             } => {
-                // No `ip.is_none()` guard, so `.1` also matches `10.0.0.1` through text
-                // matching, as in the Windows `ProxyOverride` lists this crate reads. Go
-                // excludes addresses here; Chromium does not.
+                // No `ip.is_none()` guard: a `Domain` built by hand with the suffix `.1`
+                // matches `10.0.0.1` as text. `parse` builds none (it refuses a suffix that
+                // reads as an address), so from a list only a wildcard (`*.*.*.1`) reaches
+                // an address as text.
                 //
-                // The leading dot is `parse`'s convention, not something the type can
-                // enforce: the fields are public and `BypassRules::new` exists to be filled
-                // in by hand. So name the domain rather than slicing a byte off it (a
-                // non-ASCII first character is not a char boundary) and refuse the empty
-                // name outright, which is what the field doc promises matches nothing. It
-                // would not: an empty `bare` strips nothing, so the whole host comes back
-                // as `rest`, and any host still ending in a dot once one is shed then
-                // satisfies the `ends_with('.')` test below. The destination side of that
-                // is an ordinary URL and not a hand-built value: `url` reads
-                // `http://example.com../` as `Host::Domain("example.com..")`. (Not "matches
-                // every host": that is what an `ends_with(bare)` shape would do, and
-                // this one strips instead.)
+                // The leading dot is `parse`'s convention; the fields are public, so a
+                // hand-built `Domain` may lack it. Refuse the empty name outright (an empty
+                // `bare` strips nothing, so the whole host would come back as `rest` and a
+                // host such as `example.com..` would pass the `ends_with('.')` test below),
+                // and name the domain rather than slice a byte off it (a non-ASCII first
+                // character is not a char boundary).
                 //
                 // The suffix's case is also a `parse` convention, so fold it here. The
                 // `Exact` arm folds through `host_key`, which also lowercases the
@@ -998,15 +936,20 @@ const UNREACHABLE_NAME: &str = "entry is not a name any destination could carry,
 // a bare one, is literal and matches no host. Reject the dead rule so it cannot become a
 // bypass GNOME does not grant; see the `All` guard in `parse_in`.
 const GNOME_LITERAL_STAR: &str = "entry contains a '*' that GNOME does not read as a \
-                                  wildcard — only a leading '*.' is one there — so no \
+                                  wildcard (only a leading '*.' is one there), so no \
                                   destination could ever match it (write *.example.com for \
                                   a domain, or the host on its own)";
 
-// macOS reads only leading `*.` and trailing `.*` as wildcards. A bare `*` matches nothing;
-// treating it as `All` would switch off the proxy.
-const MACOS_LITERAL_STAR: &str = "entry contains a '*' that macOS does not read as a \
-                                  wildcard — only a leading '*.' or a trailing '.*' is one \
-                                  there — so no destination could ever match it (write \
+// Only a leading `*.` and a trailing `.*` are read as wildcards for macOS. CFNetwork also
+// matches a whole-label `*` elsewhere (`www.*.test`, `10.*.*.*`) by an undocumented rule
+// that can change between releases, so such an entry is refused and its destinations go to
+// the proxy. A `*` inside a label, and a bare `*`, match nothing there; reading the bare
+// `*` as `All` would switch off the proxy.
+const MACOS_LITERAL_STAR: &str = "entry contains a '*' this crate does not follow on macOS \
+                                  (only a leading '*.' or a trailing '.*' is read as a \
+                                  wildcard), so the entry is dropped and its destinations go \
+                                  to the proxy (macOS itself matches a whole-label '*' such as \
+                                  www.*.test, and nothing for a '*' inside a label; write \
                                   *.example.com for a domain, or the host on its own)";
 
 /// Destinations that must not go through a proxy

@@ -539,7 +539,7 @@ fn no_comment_names_a_document_the_published_tree_leaves_behind() {
     }
     assert!(
         msg.is_empty(),
-        "comments name documents the published tree does not carry — write the decision in \
+        "comments name documents the published tree does not carry; write the decision in \
          the comment, or name the test that holds it:\n{msg}"
     );
 }

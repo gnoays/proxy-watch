@@ -13,6 +13,7 @@
 //! it on the JavaScript thread. A pump thread drains the watcher's stream into a weak
 //! threadsafe function, so an open watch never holds the event loop open.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +28,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Task, sys};
 use napi_derive::napi;
 use proxy_watch::{CapturedEnv, ProxyConfig};
-use proxy_watch_shared::{self as shared, Answer, Failure, Layering, Route};
+use proxy_watch_shared::{self as shared, Answer, Failure, Layering};
 
 // napi puts the status on the thrown error as its `code`.
 fn into_napi(failure: Failure) -> napi::Error<&'static str> {
@@ -113,12 +114,51 @@ impl ToNapiValue for EnvVars {
     }
 }
 
+// `process.env` of the calling thread, for an `env` option left out. On a worker thread it
+// is the thread's own copy, and under Bun a write to it does not reach the process
+// environment; reading the object reads what the caller wrote either way.
+fn process_env(env: &Env) -> napi::Result<EnvVars, &'static str> {
+    let raw = env.raw();
+    // SAFETY: `raw` is the live environment of this call; every handle is created here and
+    // lives in the current scope.
+    let vars = unsafe {
+        let property = |object: sys::napi_value, name: &std::ffi::CStr| {
+            let mut out = std::ptr::null_mut();
+            (sys::napi_get_named_property(raw, object, name.as_ptr(), &mut out)
+                == sys::Status::napi_ok)
+                .then_some(out)
+        };
+        let mut global = std::ptr::null_mut();
+        (sys::napi_get_global(raw, &mut global) == sys::Status::napi_ok)
+            .then_some(global)
+            .and_then(|global| property(global, c"process"))
+            .and_then(|process| property(process, c"env"))
+    };
+    let unreadable = |reason: String| napi::Error::new("ERR_PROXY_WATCH", reason);
+    let vars = vars.ok_or_else(|| unreadable("process.env could not be read".to_owned()))?;
+    // SAFETY: `vars` is a handle of this call's environment.
+    unsafe { EnvVars::from_napi_value(raw, vars) }.map_err(|error| {
+        unreadable(match error.status {
+            // The conversion's own text names the `env` option, which the caller left out.
+            napi::Status::ObjectExpected => {
+                "process.env is not an object of variable names to values".to_owned()
+            }
+            _ => format!("process.env: {}", error.reason),
+        })
+    })
+}
+
 fn layering(
-    env: Option<EnvVars>,
+    env: &Env,
+    vars: Option<EnvVars>,
     precedence: Option<&str>,
 ) -> napi::Result<Layering, &'static str> {
+    let vars = match vars {
+        Some(vars) => vars,
+        None => process_env(env)?,
+    };
     shared::precedence(precedence)
-        .and_then(|precedence| Layering::new(env.map(|vars| vars.0), precedence))
+        .and_then(|precedence| Layering::new(Some(vars.0), precedence))
         .map_err(into_napi)
 }
 
@@ -189,29 +229,20 @@ pub struct JsRoute {
 impl TryFrom<Answer> for JsRoute {
     type Error = Failure;
 
-    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
-        let (kind, steps, pac_url, script) = match route {
-            Route::Steps(steps) => (
-                "steps",
-                Some(
-                    steps
-                        .iter()
-                        .map(shared::step_url)
-                        .collect::<Result<_, _>>()?,
-                ),
-                None,
-                None,
-            ),
-            Route::Pac(url) => ("pac", None, Some(url), None),
-            Route::PacInline(script) => ("pac-inline", None, None, Some(script)),
-            Route::Wpad => ("wpad", None, None, None),
-        };
+    fn try_from(answer: Answer) -> Result<Self, Failure> {
+        let shared::AnswerFields {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine,
+        } = answer.try_into()?;
         Ok(Self {
             kind: kind.to_owned(),
             steps,
             pac_url,
             script,
-            engine: engine.name().to_owned(),
+            engine: engine.to_owned(),
         })
     }
 }
@@ -288,7 +319,7 @@ impl Snapshot {
     }
 
     /// The whole configuration as plain objects and arrays, which `JSON.stringify` also
-    /// takes. A proxy's password is in it as the value.
+    /// takes. A proxy's password, and one in a PAC URL, is in it as the value.
     #[napi(js_name = "toJSON")]
     pub fn to_json(&self) -> Json {
         Json(shared::describe(&self.config, self.os_readable))
@@ -303,13 +334,13 @@ impl Snapshot {
                 .config
                 .sources
                 .iter()
-                .map(|(source, _)| format!("{source:?}"))
+                .map(|(source, _)| shared::source_label(source))
                 .collect(),
             fallbacks: self
                 .config
                 .fallbacks
                 .iter()
-                .map(|source| format!("{source:?}"))
+                .map(shared::source_label)
                 .collect(),
             rejected: shared::rejected(&self.config),
         }
@@ -380,27 +411,27 @@ impl Task for Read {
     }
 }
 
-fn read_options(options: Option<ReadOptions>) -> napi::Result<Layering, &'static str> {
+fn read_options(env: &Env, options: Option<ReadOptions>) -> napi::Result<Layering, &'static str> {
     let options = options.unwrap_or(ReadOptions {
         env: None,
         precedence: None,
     });
-    layering(options.env, options.precedence.as_deref())
+    layering(env, options.env, options.precedence.as_deref())
 }
 
 /// Read the OS settings and the environment once, on a libuv worker thread.
 #[napi(ts_return_type = "Promise<Snapshot>")]
-pub fn read(options: Option<ReadOptions>) -> napi::Result<AsyncTask<Read>, &'static str> {
+pub fn read(env: Env, options: Option<ReadOptions>) -> napi::Result<AsyncTask<Read>, &'static str> {
     Ok(AsyncTask::new(Read {
-        layering: read_options(options)?,
+        layering: read_options(&env, options)?,
         env: CapturedEnv::capture(),
     }))
 }
 
 /// `read()` on the JavaScript thread.
 #[napi]
-pub fn read_sync(options: Option<ReadOptions>) -> napi::Result<Snapshot, &'static str> {
-    let layering = read_options(options)?;
+pub fn read_sync(env: Env, options: Option<ReadOptions>) -> napi::Result<Snapshot, &'static str> {
+    let layering = read_options(&env, options)?;
     let (config, os_readable) = shared::read_os(&CapturedEnv::capture()).map_err(into_napi)?;
     Ok(Snapshot {
         config: layering.apply(config),
@@ -536,6 +567,10 @@ pub struct Watcher {
     layering: Arc<Layering>,
     // Cleared by `close()`, on the JavaScript thread; see [`gated`].
     open: Arc<AtomicBool>,
+    // The cleanup hook's `Box`, until `close()` removes the hook and frees it; null after.
+    // An unreferenced watch keeps running, so dropping the `Watcher` leaves the hook to stop
+    // it at teardown.
+    hook: Cell<*mut shared::Watch>,
 }
 
 #[napi]
@@ -553,9 +588,22 @@ impl Watcher {
     /// Stop watching. Safe to call more than once. Once it returns, `onChange` is not
     /// called again.
     #[napi]
-    pub fn close(&self) {
+    pub fn close(&self, env: Env) {
         self.open.store(false, Ordering::SeqCst);
         self.watch.close();
+        let hook = self.hook.replace(std::ptr::null_mut());
+        if hook.is_null() {
+            return;
+        }
+        // SAFETY: `env` is the environment `watcher` registered `hook` in, as this object
+        // belongs to it, and JavaScript still runs, so the hook has not run.
+        let status = unsafe {
+            sys::napi_remove_env_cleanup_hook(env.raw(), Some(close_at_teardown), hook.cast())
+        };
+        if status == sys::Status::napi_ok {
+            // SAFETY: the hook is gone, so nothing else takes `hook` back.
+            drop(unsafe { Box::from_raw(hook) });
+        }
     }
 
     /// `Watcher { open: <bool> }`.
@@ -597,6 +645,7 @@ pub fn install_inspect(exports: Object, env: Env) -> napi::Result<()> {
 }
 
 fn watch_options(
+    env: &Env,
     options: Option<WatchOptions>,
 ) -> napi::Result<(Arc<Layering>, Option<Duration>), &'static str> {
     let options = options.unwrap_or(WatchOptions {
@@ -604,7 +653,7 @@ fn watch_options(
         precedence: None,
         poll_interval_ms: None,
     });
-    let layering = Arc::new(layering(options.env, options.precedence.as_deref())?);
+    let layering = Arc::new(layering(env, options.env, options.precedence.as_deref())?);
     // A number, not a `u32`: napi wraps `-1` into 49 days rather than refusing it.
     let poll_interval = options
         .poll_interval_ms
@@ -647,15 +696,36 @@ fn watcher(
     layering: Arc<Layering>,
     open: Arc<AtomicBool>,
 ) -> Result<Watcher, Failure> {
-    if let Err(error) = env.add_env_cleanup_hook(watch.clone(), |watch| watch.close()) {
+    let hook = Box::into_raw(Box::new(watch.clone()));
+    // SAFETY: `env` is the live environment of this thread, and `hook` is a `Box` that
+    // `close_at_teardown` or `Watcher::close` takes back exactly once.
+    let status =
+        unsafe { sys::napi_add_env_cleanup_hook(env.raw(), Some(close_at_teardown), hook.cast()) };
+    if status != sys::Status::napi_ok {
+        // SAFETY: napi did not take `hook`, so it is still this function's.
+        drop(unsafe { Box::from_raw(hook) });
         watch.close_in_background();
-        return Err(Failure::new("ERR_PROXY_WATCH", error.reason));
+        return Err(Failure::new(
+            "ERR_PROXY_WATCH",
+            format!("registering the watch's cleanup hook failed with napi status {status}"),
+        ));
     }
     Ok(Watcher {
         watch,
         layering,
         open,
+        hook: Cell::new(hook),
     })
+}
+
+// The cleanup hook: stops the watch, and frees the `Box` `watcher` handed napi. napi's own
+// `add_env_cleanup_hook` leaks that box even once the hook is removed, so a process that
+// opens and closes watches in a loop would keep one per watch.
+unsafe extern "C" fn close_at_teardown(hook: *mut std::ffi::c_void) {
+    // SAFETY: `hook` is the `Box` `watcher` registered, and napi calls this only for a hook
+    // `Watcher::close` has not removed.
+    let watch = unsafe { Box::from_raw(hook.cast::<shared::Watch>()) };
+    watch.close();
 }
 
 // A started watch no `Watcher` owns yet. A worker that exits with `watch()` pending drops
@@ -723,7 +793,7 @@ pub fn watch(
     on_change: UserOnChange<'_>,
     options: Option<WatchOptions>,
 ) -> napi::Result<AsyncTask<StartWatch>, &'static str> {
-    let (layering, poll_interval) = watch_options(options)?;
+    let (layering, poll_interval) = watch_options(&env, options)?;
     let open = Arc::new(AtomicBool::new(true));
     let on_change = gated(&env, &on_change, Arc::clone(&open))?;
     Ok(AsyncTask::new(StartWatch {
@@ -744,7 +814,7 @@ pub fn watch_sync(
     on_change: UserOnChange<'_>,
     options: Option<WatchOptions>,
 ) -> napi::Result<Watcher, &'static str> {
-    let (layering, poll_interval) = watch_options(options)?;
+    let (layering, poll_interval) = watch_options(&env, options)?;
     let open = Arc::new(AtomicBool::new(true));
     let on_change = gated(&env, &on_change, Arc::clone(&open))?;
     start(on_change, &layering, poll_interval, &CapturedEnv::capture())

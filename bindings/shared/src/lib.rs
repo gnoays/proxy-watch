@@ -17,9 +17,9 @@ use std::time::Duration;
 use futures_core::Stream;
 use proxy_watch::pac::{PacPolicy, PacScript};
 use proxy_watch::{
-    BypassRules, CapturedEnv, EnvPrecedence, Error, Host, ProxyAuth, ProxyConfig, ProxyEntry,
-    ProxyEnv, ProxyMode, ProxyScheme, ProxyStep, ProxyWatcher, RejectedValue, Scheme, Url,
-    WatchEvent, WatchOptions,
+    BypassRules, CapturedEnv, EnvPrecedence, Error, Host, ProxyAuth, ProxyConfig,
+    ProxyConfigSource, ProxyEntry, ProxyEnv, ProxyMode, ProxyScheme, ProxyStep, ProxyWatcher,
+    RejectedValue, Scheme, Url, WatchEvent, WatchOptions,
 };
 
 /// Where a request to one URL goes.
@@ -64,6 +64,40 @@ impl Engine {
 pub struct Answer {
     pub route: Route,
     pub engine: Engine,
+}
+
+/// An [`Answer`] flattened to what the Node and Python bindings expose.
+pub struct AnswerFields {
+    pub kind: &'static str,
+    pub steps: Option<Vec<String>>,
+    pub pac_url: Option<String>,
+    pub script: Option<String>,
+    pub engine: &'static str,
+}
+
+impl TryFrom<Answer> for AnswerFields {
+    type Error = Failure;
+
+    fn try_from(Answer { route, engine }: Answer) -> Result<Self, Failure> {
+        let (kind, steps, pac_url, script) = match route {
+            Route::Steps(steps) => (
+                "steps",
+                Some(steps.iter().map(step_url).collect::<Result<_, _>>()?),
+                None,
+                None,
+            ),
+            Route::Pac(url) => ("pac", None, Some(url), None),
+            Route::PacInline(script) => ("pac-inline", None, None, Some(script)),
+            Route::Wpad => ("wpad", None, None, None),
+        };
+        Ok(Self {
+            kind,
+            steps,
+            pac_url,
+            script,
+            engine: engine.name(),
+        })
+    }
 }
 
 /// A failure with the code each binding shows.
@@ -305,6 +339,8 @@ fn body_engine(pac: Pac) -> Option<Engine> {
 pub fn route(config: &ProxyConfig, url: &str, options: &RouteOptions) -> Result<Answer, Failure> {
     let url =
         Url::parse(url).map_err(|error| Failure::new("ERR_INVALID_URL", error.to_string()))?;
+    // The crate's own `has_request_host` test, which is not public: no host, or an empty
+    // one. Change the two together.
     let hostless = matches!(url.host(), None | Some(Host::Domain("")));
     let answer = |route| {
         Ok(Answer {
@@ -427,6 +463,11 @@ fn run_body_natively(
     _: Option<&PacScript>,
 ) -> Result<Vec<ProxyStep>, Error> {
     Err(Error::PacEngineUnavailable)
+}
+
+/// The name the bindings show for a source: its core variant's name.
+pub fn source_label(source: &ProxyConfigSource) -> String {
+    format!("{source:?}")
 }
 
 /// `"direct"`, or the proxy URL with its credentials and its `socks5h` / `socks4a` hint.
@@ -716,9 +757,9 @@ fn list<T>(items: impl IntoIterator<Item = T>, each: impl Fn(T) -> Value) -> Val
 }
 
 /// The whole snapshot as data: the effective mode, every source's own, the sources left
-/// out, and `os_readable`. A proxy's password is its value, not a mask. A dropped value
-/// (`rejected`) stays masked, as [`rejected`] gives it: nothing uses it, so nothing needs
-/// its secret. Enumerations are strings, a core variant's name where the bindings have no
+/// out, and `os_readable`. A proxy's password, and one in a PAC URL, is its value, not a
+/// mask. A dropped value (`rejected`) stays masked, as [`rejected`] gives it: nothing uses
+/// it, so nothing needs its secret. Enumerations are strings, a core variant's name where the bindings have no
 /// name of their own, so a later variant is a new string rather than a failure.
 pub fn describe(config: &ProxyConfig, os_readable: bool) -> Value {
     map([
@@ -727,14 +768,14 @@ pub fn describe(config: &ProxyConfig, os_readable: bool) -> Value {
             "sources",
             list(&config.sources, |(source, mode)| {
                 map([
-                    ("source", format!("{source:?}").into()),
+                    ("source", source_label(source).into()),
                     ("mode", describe_mode(mode)),
                 ])
             }),
         ),
         (
             "fallbacks",
-            list(&config.fallbacks, |source| format!("{source:?}").into()),
+            list(&config.fallbacks, |source| source_label(source).into()),
         ),
         ("rejected", list(rejected(config), Value::Str)),
         ("os_readable", os_readable.into()),
@@ -957,6 +998,45 @@ mod tests {
             urls(route(&config, "https://internal.example/", Pac::None).unwrap()),
             ["direct"]
         );
+    }
+
+    #[test]
+    fn an_answer_shows_its_kind_its_one_field_and_its_engine() {
+        let fields = |route, engine| AnswerFields::try_from(Answer { route, engine }).unwrap();
+
+        let steps = fields(Route::Steps(vec![ProxyStep::Direct]), Engine::None);
+        assert_eq!(steps.kind, "steps");
+        assert_eq!(steps.steps, Some(vec!["direct".to_owned()]));
+        assert_eq!(
+            (steps.pac_url, steps.script, steps.engine),
+            (None, None, "none")
+        );
+
+        let pac = fields(
+            Route::Pac("http://wpad.test/p.pac".to_owned()),
+            Engine::Native,
+        );
+        assert_eq!(pac.kind, "pac");
+        assert_eq!(pac.pac_url.as_deref(), Some("http://wpad.test/p.pac"));
+        assert_eq!((pac.steps, pac.script, pac.engine), (None, None, "native"));
+
+        let inline = fields(
+            Route::PacInline("function F(){}".to_owned()),
+            Engine::QuickJs,
+        );
+        assert_eq!(inline.kind, "pac-inline");
+        assert_eq!(inline.script.as_deref(), Some("function F(){}"));
+        assert_eq!(
+            (inline.steps, inline.pac_url, inline.engine),
+            (None, None, "quickjs")
+        );
+
+        let wpad = fields(Route::Wpad, Engine::None);
+        assert_eq!(wpad.kind, "wpad");
+        assert_eq!((wpad.steps, wpad.pac_url, wpad.script), (None, None, None));
+
+        assert_eq!(source_label(&ProxyConfigSource::Env), "Env");
+        assert_eq!(source_label(&ProxyConfigSource::Registry), "Registry");
     }
 
     #[test]
@@ -1315,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn wpad_without_a_script_is_the_callers_unless_the_os_is_asked_to_discover() {
+    fn wpad_without_a_script_or_os_discovery_is_the_callers() {
         let wpad = ProxyConfig::new(ProxyMode::WpadAutoDetect, Vec::new());
         for pac in [Pac::None, Pac::Native, Pac::QuickJs, Pac::Auto] {
             let answered = answer(&wpad, pac, None, PacPolicy::new()).unwrap();
