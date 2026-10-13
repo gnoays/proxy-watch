@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-watch"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "configparser",
  "core-foundation",

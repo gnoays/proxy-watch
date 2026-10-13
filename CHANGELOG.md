@@ -7,7 +7,10 @@ supported Rust version in force for that release.
 
 ## [Unreleased]
 
-The same machine and destination can route differently from 0.3.0;
+## [0.3.1] - 2026-10-13
+
+MSRV unchanged: 1.88, with every feature. No change to the library's API. The same
+machine and destination can route differently from 0.3.0;
 `### Routing answers that change` has each case.
 
 ### Fixed
@@ -355,7 +358,8 @@ Initial release. MSRV 1.88, which the `linux-gnome` feature raises to 1.92.
 - `tracing` is off by default, so the library picks no logging facade on a dependent's
   behalf; a consumer that wants the lifecycle and change logs turns the feature on.
 
-[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gnoays/proxy-watch/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/gnoays/proxy-watch/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gnoays/proxy-watch/releases/tag/v0.1.1
