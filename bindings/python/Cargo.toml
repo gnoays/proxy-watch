@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 [dependencies]
 proxy-watch = { path = "../..", default-features = false }
 proxy-watch-shared = { path = "../shared" }
-pyo3 = { version = "0.29", features = ["abi3-py310", "generate-import-lib"] }
+pyo3 = { version = "0.30", features = ["abi3-py310", "generate-import-lib"] }
